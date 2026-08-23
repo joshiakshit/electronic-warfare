@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any
 
 import numpy as np
@@ -44,6 +45,10 @@ class EmitterInfo:
     emitter_type: str
     params: dict[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        # Wrap params in a read-only proxy to enforce immutability
+        object.__setattr__(self, "params", MappingProxyType(dict(self.params)))
+
 
 @dataclass(frozen=True)
 class EpisodeConfig:
@@ -56,6 +61,14 @@ class EpisodeConfig:
     detection_threshold: float
     pfa: float
     seed: int = 0
+
+    def __post_init__(self) -> None:
+        if self.k != 1:
+            raise ValueError(
+                f"Only k=1 (single-band scanning) is currently supported, got k={self.k}. "
+                "Multi-band scanning (k>1) requires redesigning ScanAction, "
+                "Observation, and EpisodeRecorder."
+            )
 
 
 @dataclass

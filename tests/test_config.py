@@ -86,7 +86,7 @@ class TestValidConfig:
         original = EpisodeConfig(
             n_bands=10,
             n_slots=500,
-            k=2,
+            k=1,
             emitters=(
                 EmitterInfo(
                     band=1,

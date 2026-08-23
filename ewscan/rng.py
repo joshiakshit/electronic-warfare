@@ -86,4 +86,4 @@ def spawn_episode_seed(root_seed: int, episode_index: int) -> np.random.SeedSequ
         Pass to ``make_generators`` to obtain subsystem generators for this
         episode.
     """
-    return np.random.SeedSequence(root_seed).spawn(episode_index + 1)[episode_index]
+    return np.random.SeedSequence(root_seed, spawn_key=(episode_index,))

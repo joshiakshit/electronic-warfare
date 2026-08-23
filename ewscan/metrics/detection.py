@@ -163,9 +163,15 @@ def _scanned_truth(log: EpisodeLog) -> NDArray[np.bool_]:
     """Return the truth value at each scanned (band, slot) pair.
 
     Returns a 1-D boolean array of length ``n_slots`` where entry *t* is
-    ``truth[actions[t], t]``.
+    ``truth[actions[t], t]``.  Invalid action indices (out of band range)
+    are treated as non-detections (False).
     """
-    return log.truth[log.actions, np.arange(log.n_slots)]
+    actions = log.actions
+    valid = (actions >= 0) & (actions < log.n_bands)
+    safe_actions = np.where(valid, actions, 0)
+    result = log.truth[safe_actions, np.arange(log.n_slots)]
+    result[~valid] = False
+    return result
 
 
 def estimate_pd(log: EpisodeLog) -> PdEstimate:
@@ -258,6 +264,18 @@ def estimate_per_emitter_pd(log: EpisodeLog) -> tuple[EmitterPdEstimate, ...]:
 
     for idx, emitter_info in enumerate(log.config.emitters):
         band = emitter_info.band
+
+        # Skip emitters with out-of-range bands
+        if band < 0 or band >= log.n_bands:
+            results.append(EmitterPdEstimate(
+                emitter_index=idx,
+                band=band,
+                snr=emitter_info.snr,
+                pd=float("nan"),
+                n_hits=0,
+                n_scans_on=0,
+            ))
+            continue
 
         # Slots where the scanner was tuned to this emitter's band
         scanned_this_band = log.actions == band

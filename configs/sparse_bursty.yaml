@@ -1,0 +1,30 @@
+# Canned Demo Scenario 1: Sparse and Bursty Spectrum
+# 16 bands, 3 bursty Gilbert-Elliott Markov emitters, 13 quiet bands.
+n_bands: 16
+n_slots: 2000
+k: 1
+detection_threshold: 3.0
+pfa: 0.0001
+seed: 42
+emitters:
+  - band: 3
+    snr: 15.0
+    threat_level: 0.8
+    emitter_type: gilbert_elliott
+    params:
+      p01: 0.05
+      p10: 0.20
+  - band: 7
+    snr: 18.0
+    threat_level: 0.9
+    emitter_type: gilbert_elliott
+    params:
+      p01: 0.08
+      p10: 0.24
+  - band: 12
+    snr: 14.0
+    threat_level: 0.7
+    emitter_type: gilbert_elliott
+    params:
+      p01: 0.04
+      p10: 0.16

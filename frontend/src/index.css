@@ -1,0 +1,11 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    background-color: #000000;
+    color: #e5e7eb;
+    @apply font-sans overflow-hidden m-0 p-0;
+  }
+}

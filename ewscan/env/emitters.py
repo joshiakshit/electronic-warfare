@@ -140,6 +140,12 @@ class PeriodicEmitter(Emitter):
             self._period_jitters[period_idx] = int(
                 self._rng.integers(-self.jitter, self.jitter + 1)
             )
+            # Prune old entries to cap memory (keep only recent window)
+            max_offset = (self.jitter // self.period) + 1 if self.period > 0 else 1
+            min_keep = max(0, period_idx - max_offset - 2)
+            stale = [k for k in self._period_jitters if k < min_keep]
+            for k in stale:
+                del self._period_jitters[k]
         return self._period_jitters[period_idx]
 
     def step(self) -> bool:
@@ -151,9 +157,10 @@ class PeriodicEmitter(Emitter):
 
         if t >= self.phase:
             approx_k = (t - self.phase) // self.period
-            for k in (approx_k - 1, approx_k, approx_k + 1):
-                if k < 0:
-                    continue
+            # Widen search window based on jitter magnitude to avoid
+            # missing pulses when jitter > period
+            max_offset = (self.jitter // self.period) + 1 if self.period > 0 else 1
+            for k in range(max(0, approx_k - max_offset), approx_k + max_offset + 1):
                 j = self._get_jitter(k)
                 start = k * self.period + self.phase + j
                 end = start + self.dwell

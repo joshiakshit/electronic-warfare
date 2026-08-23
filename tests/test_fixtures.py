@@ -42,11 +42,16 @@ class TestMakeTestConfig:
         assert cfg.seed == 0
 
     def test_custom_values(self):
-        cfg = make_test_config(n_bands=16, n_slots=2000, k=2, seed=42)
+        cfg = make_test_config(n_bands=16, n_slots=2000, k=1, seed=42)
         assert cfg.n_bands == 16
         assert cfg.n_slots == 2000
-        assert cfg.k == 2
+        assert cfg.k == 1
         assert cfg.seed == 42
+
+    def test_k_greater_than_1_raises(self):
+        import pytest
+        with pytest.raises(ValueError, match="Only k=1"):
+            make_test_config(n_bands=4, n_slots=100, k=2)
 
 
 # -----------------------------------------------------------------------
