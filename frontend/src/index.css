@@ -3,9 +3,37 @@
 @tailwind utilities;
 
 @layer base {
+  :root {
+    --ew-bg: 0 0 0;
+    --ew-surface: 9 9 11;
+    --ew-accent: 30 215 96;
+    --ew-unscanned: 39 39 42;
+    --ew-text: 255 255 255;
+    --ew-text-secondary: 229 231 235;
+    --ew-text-muted: 156 163 175;
+    --ew-text-dim: 107 114 128;
+    --ew-text-dimmer: 75 85 99;
+    --ew-border: 31 41 55;
+    --ew-border-subtle: 17 24 39;
+  }
+
+  [data-theme="light"] {
+    --ew-bg: 255 255 255;
+    --ew-surface: 248 250 252;
+    --ew-accent: 22 163 74;
+    --ew-unscanned: 228 228 231;
+    --ew-text: 15 23 42;
+    --ew-text-secondary: 51 65 85;
+    --ew-text-muted: 100 116 139;
+    --ew-text-dim: 148 163 184;
+    --ew-text-dimmer: 203 213 225;
+    --ew-border: 226 232 240;
+    --ew-border-subtle: 241 245 249;
+  }
+
   body {
-    background-color: #000000;
-    color: #e5e7eb;
+    background-color: rgb(var(--ew-bg));
+    color: rgb(var(--ew-text-secondary));
     @apply font-sans overflow-hidden m-0 p-0;
   }
 }

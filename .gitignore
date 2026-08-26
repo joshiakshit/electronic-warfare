@@ -57,3 +57,10 @@ logs/
 PLAN.md
 GEMINI.md
 agent convos/
+project memories/
+
+# Frontend build artifacts
+frontend/dist/
+frontend/*.tsbuildinfo
+frontend/vite.config.js
+frontend/vite.config.d.ts
