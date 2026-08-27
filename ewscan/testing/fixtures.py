@@ -55,7 +55,7 @@ def scripted_observations(
     For scheduler unit tests where you want full control over what the
     scheduler sees at each step.
     """
-    return [Observation(slot=s, band=b, detection=d) for s, b, d in specs]
+    return [Observation(slot=s, bands=(b,), detections=(d,)) for s, b, d in specs]
 
 
 def _build_default_truth(n_bands: int, n_slots: int) -> NDArray[np.bool_]:
@@ -129,9 +129,9 @@ def synthetic_log(
       First intercept: band 0 at slot 0, band 1 at slot 5, band 2 at slot 6
     """
     truth = _build_default_truth(n_bands, n_slots)
-    actions = np.array([t % n_bands for t in range(n_slots)], dtype=np.intp)
+    actions = np.array([[t % n_bands] for t in range(n_slots)], dtype=np.intp)
     detections = np.array(
-        [bool(truth[actions[t], t]) for t in range(n_slots)], dtype=np.bool_
+        [[bool(truth[actions[t, 0], t])] for t in range(n_slots)], dtype=np.bool_
     )
 
     config = EpisodeConfig(
@@ -163,14 +163,25 @@ class StubScheduler(Scheduler):
         else:
             self._bands = tuple(bands)
         self._step = 0
+        self._k = 1
+        self._n_bands = 1
 
     def reset(self, config: EpisodeConfig) -> None:
         self._step = 0
+        self._k = config.k
+        self._n_bands = config.n_bands
 
     def act(self, obs: Observation | None) -> ScanAction:
-        band = self._bands[self._step % len(self._bands)]
+        base = self._bands[self._step % len(self._bands)]
         self._step += 1
-        return ScanAction(band=band)
+        chosen = [base]
+        i = 0
+        while len(chosen) < self._k:
+            b = (base + 1 + i) % self._n_bands
+            if b not in chosen:
+                chosen.append(b)
+            i += 1
+        return ScanAction(bands=tuple(chosen))
 
     @property
     def name(self) -> str:
@@ -200,8 +211,9 @@ class ScriptedEnv:
     def step(self, action: ScanAction) -> Observation:
         if self._slot >= self.config.n_slots:
             raise IndexError(f"Episode ended at slot {self.config.n_slots}")
-        detection = bool(self.truth[action.band, self._slot])
-        obs = Observation(slot=self._slot, band=action.band, detection=detection)
+        bands = action.bands
+        detections = tuple(bool(self.truth[b, self._slot]) for b in bands)
+        obs = Observation(slot=self._slot, bands=bands, detections=detections)
         self._slot += 1
         return obs
 
@@ -218,15 +230,15 @@ class ScriptedEnv:
         self.reset()
         scheduler.reset(self.config)
 
-        actions = np.zeros(self.config.n_slots, dtype=np.intp)
-        detections = np.zeros(self.config.n_slots, dtype=np.bool_)
+        actions = np.zeros((self.config.n_slots, self.config.k), dtype=np.intp)
+        detections = np.zeros((self.config.n_slots, self.config.k), dtype=np.bool_)
 
         obs: Observation | None = None
         for t in range(self.config.n_slots):
             action = scheduler.act(obs)
             obs = self.step(action)
-            actions[t] = action.band
-            detections[t] = obs.detection
+            actions[t, :] = action.bands
+            detections[t, :] = obs.detections
 
         return EpisodeLog(
             config=self.config,
