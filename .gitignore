@@ -46,6 +46,8 @@ htmlcov/
 # Claude Code
 .claude/
 !.claude/CLAUDE.md
+CLAUDE.md
+HANDOFF.md
 
 # Outputs
 *.csv
