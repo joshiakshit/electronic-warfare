@@ -48,10 +48,13 @@ class TestMakeTestConfig:
         assert cfg.k == 1
         assert cfg.seed == 42
 
-    def test_k_greater_than_1_raises(self):
-        import pytest
-        with pytest.raises(ValueError, match="Only k=1"):
-            make_test_config(n_bands=4, n_slots=100, k=2)
+    def test_k_greater_than_1_is_allowed(self):
+        cfg = make_test_config(n_bands=4, n_slots=100, k=2)
+        assert cfg.k == 2
+
+    def test_k_greater_than_n_bands_raises(self):
+        with pytest.raises(ValueError, match="1 <= k <= n_bands"):
+            make_test_config(n_bands=4, n_slots=100, k=5)
 
 
 # -----------------------------------------------------------------------
@@ -63,9 +66,9 @@ class TestScriptedObservations:
         specs = [(0, 2, True), (1, 3, False), (2, 0, True)]
         obs = scripted_observations(specs)
         assert len(obs) == 3
-        assert obs[0] == Observation(slot=0, band=2, detection=True)
-        assert obs[1] == Observation(slot=1, band=3, detection=False)
-        assert obs[2] == Observation(slot=2, band=0, detection=True)
+        assert obs[0] == Observation(slot=0, bands=(2,), detections=(True,))
+        assert obs[1] == Observation(slot=1, bands=(3,), detections=(False,))
+        assert obs[2] == Observation(slot=2, bands=(0,), detections=(True,))
 
     def test_empty_sequence(self):
         assert scripted_observations([]) == []
@@ -93,9 +96,9 @@ class TestSyntheticLog:
         assert isinstance(log, EpisodeLog)
         assert log.truth.shape == (4, 20)
         assert log.truth.dtype == np.bool_
-        assert log.actions.shape == (20,)
+        assert log.actions.shape == (20, 1)
         assert log.actions.dtype == np.intp
-        assert log.detections.shape == (20,)
+        assert log.detections.shape == (20, 1)
         assert log.detections.dtype == np.bool_
 
     def test_config_matches(self):
@@ -134,13 +137,13 @@ class TestSyntheticLog:
     def test_actions_are_round_robin(self):
         log = synthetic_log()
         for t in range(20):
-            assert log.actions[t] == t % 4, f"slot {t}"
+            assert log.actions[t, 0] == t % 4, f"slot {t}"
 
     def test_detections_match_truth_at_scanned_bands(self):
         log = synthetic_log()
         for t in range(20):
-            band = log.actions[t]
-            assert log.detections[t] == log.truth[band, t], f"slot {t}"
+            band = log.actions[t, 0]
+            assert log.detections[t, 0] == log.truth[band, t], f"slot {t}"
 
     def test_known_total_active_band_slots(self):
         log = synthetic_log()
@@ -154,16 +157,16 @@ class TestSyntheticLog:
         log = synthetic_log()
         hits = [0, 0, 0, 0]
         for t in range(20):
-            if log.detections[t]:
-                hits[log.actions[t]] += 1
+            if log.detections[t, 0]:
+                hits[log.actions[t, 0]] += 1
         assert hits == [5, 2, 2, 0]
 
     def test_known_first_intercept(self):
         log = synthetic_log()
         first = {}
         for t in range(20):
-            band = log.actions[t]
-            if log.detections[t] and band not in first:
+            band = int(log.actions[t, 0])
+            if log.detections[t, 0] and band not in first:
                 first[band] = t
         assert first[0] == 0
         assert first[1] == 5
@@ -173,7 +176,7 @@ class TestSyntheticLog:
     def test_custom_size(self):
         log = synthetic_log(n_bands=16, n_slots=200)
         assert log.truth.shape == (16, 200)
-        assert log.actions.shape == (200,)
+        assert log.actions.shape == (200, 1)
 
     def test_emitters_match_bands(self):
         log = synthetic_log()
@@ -193,30 +196,30 @@ class TestStubScheduler:
         s = StubScheduler()
         s.reset(make_test_config())
         for _ in range(10):
-            assert s.act(None).band == 0
+            assert s.act(None).bands[0] == 0
 
     def test_custom_single_band(self):
         s = StubScheduler(bands=3)
         s.reset(make_test_config())
         for _ in range(10):
-            assert s.act(None).band == 3
+            assert s.act(None).bands[0] == 3
 
     def test_cycling_sequence(self):
         s = StubScheduler(bands=[0, 2, 1])
         s.reset(make_test_config())
-        assert s.act(None).band == 0
-        assert s.act(None).band == 2
-        assert s.act(None).band == 1
-        assert s.act(None).band == 0
+        assert s.act(None).bands[0] == 0
+        assert s.act(None).bands[0] == 2
+        assert s.act(None).bands[0] == 1
+        assert s.act(None).bands[0] == 0
 
     def test_reset_restarts_sequence(self):
         s = StubScheduler(bands=[0, 1])
         cfg = make_test_config()
         s.reset(cfg)
-        assert s.act(None).band == 0
-        assert s.act(None).band == 1
+        assert s.act(None).bands[0] == 0
+        assert s.act(None).bands[0] == 1
         s.reset(cfg)
-        assert s.act(None).band == 0
+        assert s.act(None).bands[0] == 0
 
     def test_name(self):
         assert StubScheduler().name == "stub"
@@ -236,34 +239,34 @@ class TestScriptedEnv:
 
     def test_step_returns_correct_observation(self):
         env, _, _ = self._make_env()
-        obs = env.step(ScanAction(band=0))
-        assert obs == Observation(slot=0, band=0, detection=True)
-        obs = env.step(ScanAction(band=1))
-        assert obs == Observation(slot=1, band=1, detection=False)
+        obs = env.step(ScanAction(bands=(0,)))
+        assert obs == Observation(slot=0, bands=(0,), detections=(True,))
+        obs = env.step(ScanAction(bands=(1,)))
+        assert obs == Observation(slot=1, bands=(1,), detections=(False,))
 
     def test_step_advances_slot(self):
         env, _, _ = self._make_env()
         assert env.slot == 0
-        env.step(ScanAction(band=0))
+        env.step(ScanAction(bands=(0,)))
         assert env.slot == 1
 
     def test_done_flag(self):
         env, cfg, _ = self._make_env()
         assert not env.done
         for _ in range(cfg.n_slots):
-            env.step(ScanAction(band=0))
+            env.step(ScanAction(bands=(0,)))
         assert env.done
 
     def test_step_past_end_raises(self):
         env, cfg, _ = self._make_env()
         for _ in range(cfg.n_slots):
-            env.step(ScanAction(band=0))
+            env.step(ScanAction(bands=(0,)))
         with pytest.raises(IndexError):
-            env.step(ScanAction(band=0))
+            env.step(ScanAction(bands=(0,)))
 
     def test_reset(self):
         env, _, _ = self._make_env()
-        env.step(ScanAction(band=0))
+        env.step(ScanAction(bands=(0,)))
         env.reset()
         assert env.slot == 0
         assert not env.done
@@ -281,8 +284,8 @@ class TestScriptedEnv:
         result = env.run(sched)
         assert isinstance(result, EpisodeLog)
         assert result.truth.shape == (log.n_bands, log.n_slots)
-        assert result.actions.shape == (log.n_slots,)
-        assert result.detections.shape == (log.n_slots,)
+        assert result.actions.shape == (log.n_slots, 1)
+        assert result.detections.shape == (log.n_slots, 1)
 
     def test_run_deterministic(self):
         log = synthetic_log()

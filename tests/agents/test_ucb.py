@@ -61,23 +61,23 @@ class TestUCB1InitialExploration:
 
         # Slot 0
         a0 = scheduler.act(None)
-        assert a0.band == 0
+        assert a0.bands[0] == 0
 
         # Slot 1: provide obs for band 0
-        a1 = scheduler.act(Observation(slot=0, band=0, detection=True))
-        assert a1.band == 1
+        a1 = scheduler.act(Observation(slot=0, bands=(0,), detections=(True,)))
+        assert a1.bands[0] == 1
 
         # Slot 2: provide obs for band 1
-        a2 = scheduler.act(Observation(slot=1, band=1, detection=True))
-        assert a2.band == 2
+        a2 = scheduler.act(Observation(slot=1, bands=(1,), detections=(True,)))
+        assert a2.bands[0] == 2
 
         # Slot 3: provide obs for band 2
-        a3 = scheduler.act(Observation(slot=2, band=2, detection=True))
-        assert a3.band == 3
+        a3 = scheduler.act(Observation(slot=2, bands=(2,), detections=(True,)))
+        assert a3.bands[0] == 3
 
         # Slot 4: provide obs for band 3
-        a4 = scheduler.act(Observation(slot=3, band=3, detection=True))
-        assert a4.band == 4
+        a4 = scheduler.act(Observation(slot=3, bands=(3,), detections=(True,)))
+        assert a4.bands[0] == 4
 
 
 class TestUCB1DecisionLogic:
@@ -89,19 +89,19 @@ class TestUCB1DecisionLogic:
 
         # Initial sweep:
         # slot 0 -> scans band 0
-        assert scheduler.act(None).band == 0
+        assert scheduler.act(None).bands[0] == 0
         # slot 1 -> obs for band 0 (detection=True), scans band 1
-        assert scheduler.act(Observation(slot=0, band=0, detection=True)).band == 1
+        assert scheduler.act(Observation(slot=0, bands=(0,), detections=(True,))).bands[0] == 1
         # slot 2 -> obs for band 1 (detection=False), scans band 2
-        assert scheduler.act(Observation(slot=1, band=1, detection=False)).band == 2
+        assert scheduler.act(Observation(slot=1, bands=(1,), detections=(False,))).bands[0] == 2
 
         # Now all 3 bands visited once (t=3):
         # Band 0: mu = 1.0, bonus = sqrt(2 * ln(3) / 1)
         # Band 1: mu = 0.0, bonus = sqrt(2 * ln(3) / 1)
         # Band 2: mu = 0.0, bonus = sqrt(2 * ln(3) / 1)
         # Band 0 clearly has the maximum UCB -> next action must be band 0!
-        a3 = scheduler.act(Observation(slot=2, band=2, detection=False))
-        assert a3.band == 0
+        a3 = scheduler.act(Observation(slot=2, bands=(2,), detections=(False,)))
+        assert a3.bands[0] == 0
 
     def test_ucb_exploration_bonus_triggers_switch(self):
         """Verify that an arm with zero reward is eventually revisited due to the ln(t) bonus."""
@@ -111,10 +111,10 @@ class TestUCB1DecisionLogic:
 
         # Initial sweep
         scheduler.act(None)  # chooses 0
-        scheduler.act(Observation(slot=0, band=0, detection=True))  # chooses 1
+        scheduler.act(Observation(slot=0, bands=(0,), detections=(True,)))  # chooses 1
         # Feed band 1 no detection
-        action = scheduler.act(Observation(slot=1, band=1, detection=False))
-        assert action.band == 0  # chooses 0
+        action = scheduler.act(Observation(slot=1, bands=(1,), detections=(False,)))
+        assert action.bands[0] == 0  # chooses 0
 
         # Continue pulling band 0 with detections. Band 0: mu=1.0, N_0 growing.
         # Band 1: mu=0.0, N_1=1. UCB_1 = 0 + sqrt(2 * ln(t) / 1)
@@ -122,9 +122,9 @@ class TestUCB1DecisionLogic:
         # For t ~ 8, 2 * ln(8) = 4.158, sqrt(4.158) = 2.039 > 1 + sqrt(4.158 / 7) = 1.77.
         band1_selected = False
         for slot in range(2, 50):
-            obs = Observation(slot=slot, band=action.band, detection=(action.band == 0))
+            obs = Observation(slot=slot, bands=(action.bands[0],), detections=((action.bands[0] == 0,)))
             action = scheduler.act(obs)
-            if action.band == 1:
+            if action.bands[0] == 1:
                 band1_selected = True
                 break
 
@@ -144,11 +144,11 @@ class TestUCB1WithRewardFunction:
 
         # Initial sweep
         scheduler.act(None)  # 0
-        scheduler.act(Observation(slot=0, band=0, detection=True))  # 1
-        action = scheduler.act(Observation(slot=1, band=1, detection=True))  # slot 2
+        scheduler.act(Observation(slot=0, bands=(0,), detections=(True,)))  # 1
+        action = scheduler.act(Observation(slot=1, bands=(1,), detections=(True,)))  # slot 2
 
         # Both had detection=True, but band 0 has threat=1.0 (reward=1.0) while band 1 has threat=0.1 (reward=0.1)
-        assert action.band == 0
+        assert action.bands[0] == 0
 
 
 class TestUCB1StationaryBenchmark:
@@ -284,14 +284,14 @@ class TestUCB1WithRFEnvironment:
             else:
                 obs = Observation(
                     slot=len(actions) - 1,
-                    band=actions[-1],
-                    detection=detections[-1],
+                    bands=(actions[-1],),
+                    detections=(detections[-1],),
                 )
                 action = scheduler.act(obs)
 
-            actions.append(action.band)
+            actions.append(action.bands[0])
             obs = env.step(action)
-            detections.append(obs.detection)
+            detections.append(obs.detections[0])
 
         # Band 0 has high duty cycle and high threat, UCB1 must spend majority of pulls on Band 0
         band0_pulls = actions.count(0)

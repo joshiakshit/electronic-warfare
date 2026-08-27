@@ -83,22 +83,22 @@ class TestThompsonSamplingPosteriorUpdates:
 
         # Slot 0: act(None)
         a0 = scheduler.act(None)
-        assert 0 <= a0.band < 3
+        assert 0 <= a0.bands[0] < 3
 
         # Feed detection on Band 0
-        scheduler.act(Observation(slot=0, band=0, detection=True))
+        scheduler.act(Observation(slot=0, bands=(0,), detections=(True,)))
         assert scheduler.alpha[0] == 2.0
         assert scheduler.beta[0] == 1.0
         assert scheduler.posterior_means[0] == 2.0 / 3.0
 
         # Feed miss on Band 0
-        scheduler.act(Observation(slot=1, band=0, detection=False))
+        scheduler.act(Observation(slot=1, bands=(0,), detections=(False,)))
         assert scheduler.alpha[0] == 2.0
         assert scheduler.beta[0] == 2.0
         assert scheduler.posterior_means[0] == 2.0 / 4.0
 
         # Feed detection on Band 1
-        scheduler.act(Observation(slot=2, band=1, detection=True))
+        scheduler.act(Observation(slot=2, bands=(1,), detections=(True,)))
         assert scheduler.alpha[1] == 2.0
         assert scheduler.beta[1] == 1.0
         assert scheduler.posterior_means[1] == 2.0 / 3.0
@@ -132,7 +132,7 @@ class TestThompsonSamplingConvergence:
             p = true_probs[band]
             detections = rng.random(n_samples_per_band) < p
             for det in detections:
-                scheduler.act(Observation(slot=slot, band=band, detection=bool(det)))
+                scheduler.act(Observation(slot=slot, bands=(band,), detections=(bool(det),)))
                 slot += 1
 
         # Check posterior means against true probabilities

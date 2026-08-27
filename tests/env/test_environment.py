@@ -260,7 +260,7 @@ class TestEnvironmentLifecycle:
     def test_unreset_step_raises(self):
         env = RFEnvironment(n_bands=4, n_slots=20)
         with pytest.raises(RuntimeError, match="must be reset"):
-            env.step(ScanAction(band=0))
+            env.step(ScanAction(bands=(0,)))
 
     def test_step_progresses_slots_and_completes(self):
         n_slots = 15
@@ -278,29 +278,29 @@ class TestEnvironmentLifecycle:
         for t in range(n_slots):
             assert env.slot == t
             assert not env.done
-            action = ScanAction(band=t % 4)
+            action = ScanAction(bands=(t % 4,))
             obs = env.step(action)
             assert isinstance(obs, Observation)
             assert obs.slot == t
-            assert obs.band == action.band
-            assert isinstance(obs.detection, bool)
+            assert obs.bands[0] == action.bands[0]
+            assert isinstance(obs.detections[0], bool)
 
         assert env.slot == n_slots
         assert env.done
 
         # Stepping past done raises IndexError
         with pytest.raises(IndexError, match="already completed"):
-            env.step(ScanAction(band=0))
+            env.step(ScanAction(bands=(0,)))
 
     def test_invalid_action_band_raises(self):
         env = RFEnvironment(n_bands=4, n_slots=10)
         env.reset()
 
         with pytest.raises(ValueError, match="out of valid range"):
-            env.step(ScanAction(band=-1))
+            env.step(ScanAction(bands=(-1,)))
 
         with pytest.raises(ValueError, match="out of valid range"):
-            env.step(ScanAction(band=4))
+            env.step(ScanAction(bands=(4,)))
 
     def test_invalid_construction_parameters(self):
         with pytest.raises(ValueError, match="n_bands"):
@@ -374,8 +374,8 @@ class TestDetectionIntegration:
 
         detections = []
         for _ in range(n_slots):
-            obs = env.step(ScanAction(band=0))
-            detections.append(obs.detection)
+            obs = env.step(ScanAction(bands=(0,)))
+            detections.append(obs.detections[0])
 
         hit_rate = sum(detections) / n_slots
         assert hit_rate > 0.99
@@ -395,8 +395,8 @@ class TestDetectionIntegration:
 
         detections = []
         for _ in range(n_slots):
-            obs = env.step(ScanAction(band=1))
-            detections.append(obs.detection)
+            obs = env.step(ScanAction(bands=(1,)))
+            detections.append(obs.detections[0])
 
         empirical_pfa = sum(detections) / n_slots
         sigma = np.sqrt(pfa * (1 - pfa) / n_slots)
@@ -438,11 +438,11 @@ class TestDeterminismAndIndependence:
 
         env1 = RFEnvironment(config)
         env1.reset()
-        obs1 = [env1.step(ScanAction(band=t % 4)) for t in range(100)]
+        obs1 = [env1.step(ScanAction(bands=(t % 4,))) for t in range(100)]
 
         env2 = RFEnvironment(config)
         env2.reset()
-        obs2 = [env2.step(ScanAction(band=t % 4)) for t in range(100)]
+        obs2 = [env2.step(ScanAction(bands=(t % 4,))) for t in range(100)]
 
         np.testing.assert_array_equal(env1.truth, env2.truth)
         assert obs1 == obs2
@@ -470,7 +470,7 @@ class TestDeterminismAndIndependence:
         # Run 1: normal
         env1 = RFEnvironment(config)
         env1.reset()
-        obs1 = [env1.step(ScanAction(band=1)) for _ in range(100)]
+        obs1 = [env1.step(ScanAction(bands=(1,))) for _ in range(100)]
 
         # Run 2: advance scheduler RNG externally
         generators = make_generators(42)
@@ -478,7 +478,7 @@ class TestDeterminismAndIndependence:
 
         env2 = RFEnvironment(config)
         env2.reset()
-        obs2 = [env2.step(ScanAction(band=1)) for _ in range(100)]
+        obs2 = [env2.step(ScanAction(bands=(1,))) for _ in range(100)]
 
         np.testing.assert_array_equal(env1.truth, env2.truth)
         assert obs1 == obs2
