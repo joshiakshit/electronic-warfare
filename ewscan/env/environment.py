@@ -211,12 +211,19 @@ class RFEnvironment:
         self._truth = np.zeros((self._n_bands, self._n_slots), dtype=np.bool_)
         power_matrix = np.zeros((self._n_bands, self._n_slots), dtype=np.float64)
 
-        # Group emitters by band for co-resident evaluation
+        # Read each emitter's band per slot so frequency-agile emitters place
+        # activity across bands. Fixed emitters return a constant current_band.
         for em in self._emitters:
             em_power_lin = 10.0 ** (em.snr / 10.0)
-            b = em.band
             for t in range(self._n_slots):
-                if em.step():
+                on = em.step()
+                b = em.current_band
+                if not (0 <= b < self._n_bands):
+                    raise ValueError(
+                        f"Emitter reported band {b} at slot {t}, out of range "
+                        f"[0, {self._n_bands - 1}]"
+                    )
+                if on:
                     self._truth[b, t] = True
                     power_matrix[b, t] += em_power_lin
 

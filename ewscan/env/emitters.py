@@ -223,6 +223,108 @@ class StaticCWEmitter(Emitter):
         )
 
 
+class FrequencyHopEmitter(Emitter):
+    """Frequency-agile hopper -- Sprint 2.
+
+    Occupies a different band each slot, drawn from ``hop_bands``. The emitter is
+    ON every slot; only its band changes. The hop index comes from a
+    deterministic sequence:
+
+      - "lfsr": Fibonacci LFSR. Feedback is the XOR of the register bits at the
+        given ``taps`` (0-indexed). The band picks from the current state before
+        the register advances.
+      - "logistic": chaotic map x_{n+1} = r * x_n * (1 - x_n), x in (0, 1). The
+        band index is floor(x * len(hop_bands)).
+    """
+
+    def __init__(
+        self,
+        band: int,
+        hop_bands: list[int],
+        snr: float = 10.0,
+        threat_level: float = 1.0,
+        sequence: str = "lfsr",
+        taps: list[int] | None = None,
+        state: int = 1,
+        n_bits: int = 8,
+        r: float = 3.9,
+        x0: float = 0.5,
+    ) -> None:
+        hop_bands = [int(b) for b in hop_bands]
+        if not hop_bands:
+            raise ValueError("hop_bands must be a non-empty list")
+        if any(b < 0 for b in hop_bands):
+            raise ValueError(f"hop_bands must be non-negative, got {hop_bands}")
+        if sequence not in ("lfsr", "logistic"):
+            raise ValueError(f"sequence must be 'lfsr' or 'logistic', got {sequence!r}")
+        if sequence == "lfsr" and state <= 0:
+            raise ValueError(f"LFSR state must be a positive integer, got {state}")
+        if not (0.0 < x0 < 1.0):
+            raise ValueError(f"x0 must be in (0, 1), got {x0}")
+
+        self.band = int(band)
+        self.hop_bands = hop_bands
+        self.snr = float(snr)
+        self.threat_level = float(threat_level)
+        self.sequence = sequence
+        self.taps = list(taps) if taps is not None else [n_bits - 1, n_bits - 2]
+        self.state = int(state)
+        self.n_bits = int(n_bits)
+        self.r = float(r)
+        self.x0 = float(x0)
+
+        self._mask = (1 << self.n_bits) - 1
+        self._reg = self.state
+        self._x = self.x0
+        self._current_band = self.band
+        self._rng: np.random.Generator | None = None
+
+    def reset(self, rng: np.random.Generator) -> None:
+        self._rng = rng
+        self._reg = self.state
+        self._x = self.x0
+        self._current_band = self.band
+
+    def step(self) -> bool:
+        if self._rng is None:
+            raise RuntimeError("Emitter must be reset() before calling step()")
+
+        if self.sequence == "lfsr":
+            idx = self._reg % len(self.hop_bands)
+            feedback = 0
+            for t in self.taps:
+                feedback ^= (self._reg >> t) & 1
+            self._reg = ((self._reg << 1) | feedback) & self._mask
+        else:
+            idx = min(int(self._x * len(self.hop_bands)), len(self.hop_bands) - 1)
+            self._x = self.r * self._x * (1.0 - self._x)
+
+        self._current_band = self.hop_bands[idx]
+        return True
+
+    @property
+    def current_band(self) -> int:
+        return self._current_band
+
+    @property
+    def info(self) -> EmitterInfo:
+        return EmitterInfo(
+            band=self.band,
+            snr=self.snr,
+            threat_level=self.threat_level,
+            emitter_type="frequency_hop",
+            params={
+                "hop_bands": list(self.hop_bands),
+                "sequence": self.sequence,
+                "taps": list(self.taps),
+                "state": self.state,
+                "n_bits": self.n_bits,
+                "r": self.r,
+                "x0": self.x0,
+            },
+        )
+
+
 def emitter_from_info(info: EmitterInfo) -> Emitter:
     """Instantiate a concrete Emitter from an EmitterInfo specification.
 
@@ -261,6 +363,13 @@ def emitter_from_info(info: EmitterInfo) -> Emitter:
             band=info.band,
             snr=info.snr,
             threat_level=info.threat_level,
+        )
+    elif emitter_type in ("frequency_hop", "hopper", "agile"):
+        return FrequencyHopEmitter(
+            band=info.band,
+            snr=info.snr,
+            threat_level=info.threat_level,
+            **info.params,
         )
     else:
         raise ValueError(f"Unknown emitter type: {info.emitter_type!r}")

@@ -137,6 +137,12 @@ class Emitter(ABC):
     def step(self) -> bool: ...
 
     @property
+    def current_band(self) -> int:
+        """Band occupied on the most recent step. Fixed-band emitters return
+        their static band; frequency-agile emitters override this."""
+        return self.band
+
+    @property
     @abstractmethod
     def info(self) -> EmitterInfo: ...
 

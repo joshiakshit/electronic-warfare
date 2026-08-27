@@ -24,6 +24,7 @@ from ewscan.contracts import (
 from ewscan.env import (
     DetectionModel,
     Environment,
+    FrequencyHopEmitter,
     GilbertElliottEmitter,
     PeriodicEmitter,
     RFEnvironment,
@@ -216,6 +217,25 @@ class TestTruthMatrix:
             s2 = ge2_test.step()
             expected = s1 or s2
             assert truth[2, t] == expected
+
+    def test_frequency_hopper_places_activity_per_slot(self):
+        """A hopper puts one ON band per slot, following its LFSR sequence."""
+        hopper = FrequencyHopEmitter(
+            band=0,
+            hop_bands=[0, 1, 2, 3],
+            sequence="lfsr",
+            taps=[3, 2],
+            state=1,
+            n_bits=4,
+        )
+        env = RFEnvironment(n_bands=4, n_slots=8, emitters=[hopper], seed=0)
+        env.reset()
+        truth = env.truth
+
+        expected_bands = [1, 2, 0, 1, 3, 2, 1, 2]
+        for t, b in enumerate(expected_bands):
+            assert truth[:, t].sum() == 1
+            assert truth[b, t]
 
     def test_generate_truth_matrix_helper(self):
         config = EpisodeConfig(

@@ -14,6 +14,7 @@ import pytest
 
 from ewscan.contracts import EmitterInfo
 from ewscan.env import (
+    FrequencyHopEmitter,
     GilbertElliottEmitter,
     PeriodicEmitter,
     StaticCWEmitter,
@@ -219,3 +220,93 @@ class TestStaticCWEmitter:
         assert info.threat_level == 0.9
         assert info.emitter_type == "cw"
         assert info.params == {}
+
+
+# -----------------------------------------------------------------------
+# Sprint 2 FrequencyHopEmitter
+# -----------------------------------------------------------------------
+
+class TestFrequencyHopEmitter:
+    def test_unreset_raises(self):
+        e = FrequencyHopEmitter(band=0, hop_bands=[0, 1, 2, 3])
+        with pytest.raises(RuntimeError, match="must be reset"):
+            e.step()
+
+    def test_validation(self):
+        with pytest.raises(ValueError, match="hop_bands"):
+            FrequencyHopEmitter(band=0, hop_bands=[])
+        with pytest.raises(ValueError, match="hop_bands"):
+            FrequencyHopEmitter(band=0, hop_bands=[0, -1])
+        with pytest.raises(ValueError, match="sequence"):
+            FrequencyHopEmitter(band=0, hop_bands=[0, 1], sequence="nope")
+        with pytest.raises(ValueError, match="state"):
+            FrequencyHopEmitter(band=0, hop_bands=[0, 1], state=0)
+
+    def test_always_on(self):
+        e = FrequencyHopEmitter(band=0, hop_bands=[0, 1, 2, 3])
+        e.reset(np.random.default_rng(0))
+        for _ in range(1000):
+            assert e.step() is True
+
+    def test_lfsr_known_band_sequence(self):
+        """Known LFSR taps produce a known band sequence.
+
+        4-bit Fibonacci LFSR, taps=[3,2], initial state=1. Band picked from the
+        current state (state % len(hop_bands)) before advancing. Hand-derived
+        states: [1,2,4,9,3,6,13,10]; % 4 gives bands [1,2,0,1,3,2,1,2].
+        """
+        e = FrequencyHopEmitter(
+            band=0,
+            hop_bands=[0, 1, 2, 3],
+            sequence="lfsr",
+            taps=[3, 2],
+            state=1,
+            n_bits=4,
+        )
+        e.reset(np.random.default_rng(0))
+
+        expected = [1, 2, 0, 1, 3, 2, 1, 2]
+        got = []
+        for _ in range(len(expected)):
+            e.step()
+            got.append(e.current_band)
+        assert got == expected
+
+    def test_current_band_reflects_last_step(self):
+        e = FrequencyHopEmitter(band=0, hop_bands=[5, 6], sequence="lfsr",
+                                taps=[3, 2], state=1, n_bits=4)
+        e.reset(np.random.default_rng(0))
+        e.step()
+        assert e.current_band in (5, 6)
+
+    def test_logistic_deterministic(self):
+        kw = dict(band=0, hop_bands=[0, 1, 2, 3], sequence="logistic",
+                  r=3.9, x0=0.5)
+        a = FrequencyHopEmitter(**kw)
+        b = FrequencyHopEmitter(**kw)
+        a.reset(np.random.default_rng(0))
+        b.reset(np.random.default_rng(999))
+        seq_a = [(a.step(), a.current_band) for _ in range(200)]
+        seq_b = [(b.step(), b.current_band) for _ in range(200)]
+        assert seq_a == seq_b
+        assert all(band in (0, 1, 2, 3) for _, band in seq_a)
+
+    def test_reset_determinism(self):
+        e = FrequencyHopEmitter(band=0, hop_bands=[0, 1, 2, 3], sequence="lfsr",
+                                taps=[3, 2], state=1, n_bits=4)
+        e.reset(np.random.default_rng(0))
+        first = [(e.step(), e.current_band) for _ in range(50)]
+        e.reset(np.random.default_rng(0))
+        second = [(e.step(), e.current_band) for _ in range(50)]
+        assert first == second
+
+    def test_info_roundtrip(self):
+        e = FrequencyHopEmitter(band=2, hop_bands=[2, 5, 8], snr=15.0,
+                                threat_level=0.7, sequence="lfsr",
+                                taps=[3, 2], state=1, n_bits=4)
+        info = e.info
+        assert info.band == 2
+        assert info.snr == 15.0
+        assert info.emitter_type == "frequency_hop"
+        assert info.params["hop_bands"] == [2, 5, 8]
+        assert info.params["sequence"] == "lfsr"
