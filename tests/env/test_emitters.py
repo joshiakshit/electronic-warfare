@@ -14,6 +14,7 @@ import pytest
 
 from ewscan.contracts import EmitterInfo
 from ewscan.env import (
+    BeamEmitter,
     FrequencyHopEmitter,
     GilbertElliottEmitter,
     PeriodicEmitter,
@@ -310,3 +311,50 @@ class TestFrequencyHopEmitter:
         assert info.emitter_type == "frequency_hop"
         assert info.params["hop_bands"] == [2, 5, 8]
         assert info.params["sequence"] == "lfsr"
+
+
+# -----------------------------------------------------------------------
+# Sprint 2 BeamEmitter
+# -----------------------------------------------------------------------
+
+class TestBeamEmitter:
+    def test_unreset_raises(self):
+        e = BeamEmitter(band=0, omega=0.3, beamwidth=0.1, snr_peak=20.0)
+        with pytest.raises(RuntimeError, match="must be reset"):
+            e.step()
+
+    def test_validation(self):
+        with pytest.raises(ValueError, match="omega"):
+            BeamEmitter(band=0, omega=0.0, beamwidth=0.1, snr_peak=20.0)
+        with pytest.raises(ValueError, match="beamwidth"):
+            BeamEmitter(band=0, omega=0.3, beamwidth=0.0, snr_peak=20.0)
+
+    def test_illumination_period(self):
+        """Illumination recurs with period 2*pi/omega."""
+        import math
+
+        omega = 2 * math.pi / 20  # period 20 slots
+        e = BeamEmitter(band=0, omega=omega, beamwidth=0.1, snr_peak=20.0,
+                        theta0=0.0)
+        e.reset(np.random.default_rng(0))
+
+        on_slots = [t for t in range(60) if e.step()]
+        assert on_slots == [0, 20, 40]
+
+    def test_determinism(self):
+        e = BeamEmitter(band=1, omega=0.25, beamwidth=0.15, snr_peak=18.0)
+        e.reset(np.random.default_rng(0))
+        a = [e.step() for _ in range(100)]
+        e.reset(np.random.default_rng(7))
+        b = [e.step() for _ in range(100)]
+        assert a == b
+
+    def test_info(self):
+        e = BeamEmitter(band=3, omega=0.3, beamwidth=0.12, snr_peak=22.0,
+                        theta0=0.5, threat_level=0.6)
+        info = e.info
+        assert info.band == 3
+        assert info.snr == 22.0
+        assert info.emitter_type == "beam"
+        assert info.params["omega"] == 0.3
+        assert info.params["beamwidth"] == 0.12

@@ -325,6 +325,77 @@ class FrequencyHopEmitter(Emitter):
         )
 
 
+class BeamEmitter(Emitter):
+    """Scanning-beam emitter -- Sprint 2.
+
+    A mainlobe sweeps azimuth at rate ``omega`` (rad/slot). The receiver sits at
+    fixed azimuth ``theta0``. Effective SNR is a Gaussian in the pointing error:
+
+        snr_eff = snr_peak * exp(-(delta ** 2) / (2 * beamwidth ** 2))
+
+    where ``delta`` is the wrapped angle between the beam and the receiver. The
+    emitter is ON while ``snr_eff`` clears ``floor``. Illumination recurs every
+    2*pi/omega slots.
+    """
+
+    def __init__(
+        self,
+        band: int,
+        omega: float,
+        beamwidth: float,
+        snr_peak: float,
+        theta0: float = 0.0,
+        floor: float | None = None,
+        threat_level: float = 1.0,
+    ) -> None:
+        if omega <= 0.0:
+            raise ValueError(f"omega must be positive, got {omega}")
+        if beamwidth <= 0.0:
+            raise ValueError(f"beamwidth must be positive, got {beamwidth}")
+
+        self.band = int(band)
+        self.omega = float(omega)
+        self.beamwidth = float(beamwidth)
+        self.snr_peak = float(snr_peak)
+        self.theta0 = float(theta0)
+        self.floor = float(floor) if floor is not None else self.snr_peak * np.exp(-0.5)
+        self.threat_level = float(threat_level)
+
+        self.snr = self.snr_peak
+        self._slot: int = 0
+        self._rng: np.random.Generator | None = None
+
+    def reset(self, rng: np.random.Generator) -> None:
+        self._rng = rng
+        self._slot = 0
+
+    def step(self) -> bool:
+        if self._rng is None:
+            raise RuntimeError("Emitter must be reset() before calling step()")
+
+        two_pi = 2.0 * np.pi
+        delta = (self.theta0 - self.omega * self._slot + np.pi) % two_pi - np.pi
+        snr_eff = self.snr_peak * np.exp(-(delta ** 2) / (2.0 * self.beamwidth ** 2))
+        self._slot += 1
+        return bool(snr_eff >= self.floor)
+
+    @property
+    def info(self) -> EmitterInfo:
+        return EmitterInfo(
+            band=self.band,
+            snr=self.snr,
+            threat_level=self.threat_level,
+            emitter_type="beam",
+            params={
+                "omega": self.omega,
+                "beamwidth": self.beamwidth,
+                "snr_peak": self.snr_peak,
+                "theta0": self.theta0,
+                "floor": self.floor,
+            },
+        )
+
+
 def emitter_from_info(info: EmitterInfo) -> Emitter:
     """Instantiate a concrete Emitter from an EmitterInfo specification.
 
@@ -368,6 +439,12 @@ def emitter_from_info(info: EmitterInfo) -> Emitter:
         return FrequencyHopEmitter(
             band=info.band,
             snr=info.snr,
+            threat_level=info.threat_level,
+            **info.params,
+        )
+    elif emitter_type in ("beam", "scanning_beam"):
+        return BeamEmitter(
+            band=info.band,
             threat_level=info.threat_level,
             **info.params,
         )
