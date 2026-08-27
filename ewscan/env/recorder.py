@@ -40,6 +40,8 @@ class EpisodeRecorder:
         self._config = config
         self._actions = np.zeros((config.n_slots, config.k), dtype=np.intp)
         self._detections = np.zeros((config.n_slots, config.k), dtype=np.bool_)
+        self._retune_events = np.zeros(config.n_slots, dtype=np.bool_)
+        self._settling_slots = np.zeros(config.n_slots, dtype=np.bool_)
         self._truth: NDArray[np.bool_] | None = None
         self._current_slot = 0
 
@@ -53,7 +55,13 @@ class EpisodeRecorder:
         """The next slot to be recorded."""
         return self._current_slot
 
-    def record(self, bands: "Sequence[int]", detections: "Sequence[bool]") -> None:
+    def record(
+        self,
+        bands: "Sequence[int]",
+        detections: "Sequence[bool]",
+        retune_event: bool = False,
+        settling: bool = False,
+    ) -> None:
         """Record the k bands and detections at the current slot and advance.
 
         Parameters
@@ -86,6 +94,8 @@ class EpisodeRecorder:
 
         self._actions[self._current_slot, :] = bands
         self._detections[self._current_slot, :] = detections
+        self._retune_events[self._current_slot] = retune_event
+        self._settling_slots[self._current_slot] = settling
         self._current_slot += 1
 
     def record_observation(self, obs: Observation) -> None:
@@ -125,6 +135,8 @@ class EpisodeRecorder:
 
         self._actions[slot, :] = bands
         self._detections[slot, :] = detections
+        self._retune_events[slot] = obs.retune_event
+        self._settling_slots[slot] = obs.settling
         # Update current slot pointer to match or exceed recorded slot
         self._current_slot = max(self._current_slot, slot + 1)
 
@@ -175,6 +187,8 @@ class EpisodeRecorder:
             truth=self._truth.copy(),
             actions=self._actions.copy(),
             detections=self._detections.copy(),
+            retune_events=self._retune_events.copy(),
+            settling_slots=self._settling_slots.copy(),
         )
 
 
@@ -202,6 +216,8 @@ def save_episode_log(log: EpisodeLog, filepath: str | Path) -> None:
             "truth": log.truth.tolist(),
             "actions": log.actions.tolist(),
             "detections": log.detections.tolist(),
+            "retune_events": log.retune_events.tolist(),
+            "settling_slots": log.settling_slots.tolist(),
         }
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
@@ -213,6 +229,8 @@ def save_episode_log(log: EpisodeLog, filepath: str | Path) -> None:
             truth=log.truth,
             actions=log.actions,
             detections=log.detections,
+            retune_events=log.retune_events,
+            settling_slots=log.settling_slots,
             config_json=config_json,
         )
 
@@ -259,6 +277,8 @@ def load_episode_log(filepath: str | Path) -> EpisodeLog:
         truth = np.array(data["truth"], dtype=np.bool_)
         actions = np.array(data["actions"], dtype=np.intp)
         detections = np.array(data["detections"], dtype=np.bool_)
+        retune_events = np.array(data.get("retune_events", []), dtype=np.bool_)
+        settling_slots = np.array(data.get("settling_slots", []), dtype=np.bool_)
         
     else:
         # Load from .npz
@@ -272,6 +292,8 @@ def load_episode_log(filepath: str | Path) -> EpisodeLog:
                 truth = data["truth"]
                 actions = data["actions"]
                 detections = data["detections"]
+                retune_events = data["retune_events"] if "retune_events" in data.files else None
+                settling_slots = data["settling_slots"] if "settling_slots" in data.files else None
                 
                 config_json_raw = data["config_json"]
                 if isinstance(config_json_raw, np.ndarray):
@@ -303,10 +325,16 @@ def load_episode_log(filepath: str | Path) -> EpisodeLog:
         raise ValueError(
             f"Loaded detections shape {detections.shape} does not match (n_slots, k) ({config.n_slots}, {config.k})"
         )
+    if retune_events is None or retune_events.size == 0:
+        retune_events = np.zeros(config.n_slots, dtype=np.bool_)
+    if settling_slots is None or settling_slots.size == 0:
+        settling_slots = np.zeros(config.n_slots, dtype=np.bool_)
 
     return EpisodeLog(
         config=config,
         truth=truth,
         actions=actions,
         detections=detections,
+        retune_events=retune_events,
+        settling_slots=settling_slots,
     )

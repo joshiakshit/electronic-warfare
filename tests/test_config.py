@@ -44,6 +44,20 @@ class TestValidConfig:
         assert cfg.pfa == 1e-3
         assert cfg.seed == 0
         assert cfg.emitters == ()
+        assert cfg.retune_cost_slots == 0
+
+    def test_config_roundtrips_retune_cost_slots(self):
+        data = {
+            "n_bands": 8,
+            "n_slots": 100,
+            "k": 1,
+            "detection_threshold": 2.5,
+            "pfa": 1e-3,
+            "retune_cost_slots": 2,
+        }
+        config = config_from_dict(data)
+        assert config.retune_cost_slots == 2
+        assert config_to_dict(config)["retune_cost_slots"] == 2
 
     def test_config_from_dict_with_emitters(self):
         data = {
@@ -217,6 +231,19 @@ class TestMalformedConfig:
     def test_invalid_seed(self):
         data = {"n_bands": 8, "n_slots": 100, "k": 1, "detection_threshold": 2.0, "pfa": 0.01, "seed": "zero"}
         with pytest.raises(ConfigError, match="'seed' must be an integer"):
+            config_from_dict(data)
+
+    @pytest.mark.parametrize("bad_value", [-1, 1.5, True, "one"])
+    def test_invalid_retune_cost_slots(self, bad_value):
+        data = {
+            "n_bands": 8,
+            "n_slots": 100,
+            "k": 1,
+            "detection_threshold": 2.0,
+            "pfa": 0.01,
+            "retune_cost_slots": bad_value,
+        }
+        with pytest.raises(ConfigError, match="retune_cost_slots"):
             config_from_dict(data)
 
     def test_invalid_emitters_container(self):

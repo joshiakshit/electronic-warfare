@@ -116,6 +116,7 @@ class EpisodeResult:
             f"{prefix}miss_cost": self.reward.total_miss_cost,
             f"{prefix}novelty_bonus": self.reward.total_novelty_bonus,
             f"{prefix}revisit_decay": self.reward.total_revisit_decay,
+            f"{prefix}retune_penalty": self.reward.total_retune_penalty,
             # Figure of Merit 5: Prediction
             f"{prefix}prediction_accuracy": self.prediction.accuracy,
             f"{prefix}prediction_pct_correct": self.prediction.percentage_correct,
@@ -190,6 +191,7 @@ def run_episode(
             detection_threshold=config.detection_threshold,
             pfa=config.pfa,
             seed=effective_seed,
+            retune_cost_slots=config.retune_cost_slots,
         )
     else:
         ep_config = config

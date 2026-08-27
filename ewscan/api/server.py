@@ -59,6 +59,7 @@ def _serialize_result(res: EpisodeResult) -> Dict[str, Any]:
         "metrics": {
             "interception_ratio": float(res.interception.interception_ratio.ratio) if np.isfinite(res.interception.interception_ratio.ratio) else 0.0,
             "average_reward": float(res.reward.average_reward) if np.isfinite(res.reward.average_reward) else 0.0,
+            "retune_penalty": float(res.reward.total_retune_penalty),
             "mean_ttfi": float(res.first_intercept.mean_time_to_first_intercept),
             "pd": float(res.detection.pd.pd) if np.isfinite(res.detection.pd.pd) else 0.0,
             "pfa": float(res.detection.pfa.pfa) if np.isfinite(res.detection.pfa.pfa) else 0.0,
@@ -69,6 +70,8 @@ def _serialize_result(res: EpisodeResult) -> Dict[str, Any]:
             "truth": log.truth.tolist(),
             "actions": log.actions.tolist(),
             "detections": log.detections.tolist(),
+            "retune_events": log.retune_events.tolist(),
+            "settling_slots": log.settling_slots.tolist(),
             "emitters": [
                 {"band": em.band, "type": em.emitter_type, "threat": float(em.threat_level), "snr": float(em.snr)}
                 for em in log.config.emitters

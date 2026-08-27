@@ -28,6 +28,8 @@ def _make_test_log(
     actions: np.ndarray | None = None,
     detections: np.ndarray | None = None,
     threat_level: float = 1.0,
+    retune_cost_slots: int = 0,
+    retune_events: np.ndarray | None = None,
 ) -> EpisodeLog:
     if truth is None:
         truth = np.zeros((n_bands, n_slots), dtype=np.bool_)
@@ -45,8 +47,15 @@ def _make_test_log(
         detection_threshold=3.0,
         pfa=1e-3,
         seed=0,
+        retune_cost_slots=retune_cost_slots,
     )
-    return EpisodeLog(config=config, truth=truth, actions=actions, detections=detections)
+    return EpisodeLog(
+        config=config,
+        truth=truth,
+        actions=actions,
+        detections=detections,
+        retune_events=retune_events,
+    )
 
 
 class TestEmptyLog:
@@ -91,6 +100,7 @@ class TestRewardAccumulatorAgreement:
             + metrics.total_miss_cost
             + metrics.total_novelty_bonus
             + metrics.total_revisit_decay
+            + metrics.total_retune_penalty
         )
         assert metrics.total_reward == pytest.approx(component_sum)
         assert metrics.total_reward == pytest.approx(float(np.sum(metrics.per_slot_rewards)))
@@ -105,6 +115,7 @@ class TestRewardAccumulatorAgreement:
         assert metrics.average_miss_cost == pytest.approx(metrics.total_miss_cost / n)
         assert metrics.average_novelty_bonus == pytest.approx(metrics.total_novelty_bonus / n)
         assert metrics.average_revisit_decay == pytest.approx(metrics.total_revisit_decay / n)
+        assert metrics.average_retune_penalty == pytest.approx(metrics.total_retune_penalty / n)
 
     def test_single_slot_scenario_1_stale_max_threat(self):
         # 16 bands, 1 slot, visit band 0, detect threat=1.0, staleness=16
@@ -139,3 +150,28 @@ class TestRewardAccumulatorAgreement:
         metrics = estimate_reward_metrics(log)
         avg = estimate_average_reward(log)
         assert avg == pytest.approx(metrics.average_reward)
+
+    def test_band_thrashing_pays_more_retune_penalty(self):
+        common = dict(
+            n_bands=2,
+            n_slots=4,
+            truth=np.ones((2, 4), dtype=bool),
+            detections=np.ones(4, dtype=bool),
+            retune_cost_slots=1,
+        )
+        sticky = _make_test_log(
+            **common,
+            actions=np.array([0, 0, 0, 0], dtype=np.intp),
+            retune_events=np.array([False, False, False, False]),
+        )
+        thrashing = _make_test_log(
+            **common,
+            actions=np.array([0, 1, 0, 1], dtype=np.intp),
+            retune_events=np.array([False, True, True, True]),
+        )
+
+        sticky_metrics = estimate_reward_metrics(sticky)
+        thrashing_metrics = estimate_reward_metrics(thrashing)
+
+        assert thrashing_metrics.total_retune_penalty < sticky_metrics.total_retune_penalty
+        assert thrashing_metrics.total_reward < sticky_metrics.total_reward

@@ -49,6 +49,7 @@ class RFEnvironment:
         pfa: float = 1e-4,
         detection_threshold: float | None = None,
         seed: int = 0,
+        retune_cost_slots: int = 0,
     ) -> None:
         if config is not None:
             self._n_bands = config.n_bands
@@ -77,6 +78,14 @@ class RFEnvironment:
                 raise ValueError(f"k must be positive, got {k}")
             if k > n_bands:
                 raise ValueError(f"k ({k}) cannot exceed n_bands ({n_bands})")
+            if (
+                not isinstance(retune_cost_slots, int)
+                or isinstance(retune_cost_slots, bool)
+                or retune_cost_slots < 0
+            ):
+                raise ValueError(
+                    f"retune_cost_slots must be a non-negative integer, got {retune_cost_slots!r}"
+                )
 
             self._n_bands = int(n_bands)
             self._n_slots = int(n_slots)
@@ -118,6 +127,7 @@ class RFEnvironment:
                 detection_threshold=det_thresh,
                 pfa=pfa_val,
                 seed=self._seed,
+                retune_cost_slots=retune_cost_slots,
             )
 
         # Validate emitter band assignments
@@ -135,6 +145,8 @@ class RFEnvironment:
         self._snr_matrix: NDArray[np.float64] = np.zeros(
             (self._n_bands, self._n_slots), dtype=np.float64
         )
+        self._previous_bands: tuple[int, ...] | None = None
+        self._settling_remaining = 0
 
     @property
     def config(self) -> EpisodeConfig:
@@ -208,6 +220,8 @@ class RFEnvironment:
 
         # Reset slot counter and state matrices
         self._slot = 0
+        self._previous_bands = None
+        self._settling_remaining = 0
         self._truth = np.zeros((self._n_bands, self._n_slots), dtype=np.bool_)
         power_matrix = np.zeros((self._n_bands, self._n_slots), dtype=np.float64)
 
@@ -272,14 +286,38 @@ class RFEnvironment:
                 )
 
         t = self._slot
+        retune_event = (
+            self._previous_bands is not None
+            and tuple(sorted(bands)) != tuple(sorted(self._previous_bands))
+        )
+        if retune_event:
+            distance = np.mean(
+                np.abs(
+                    np.asarray(sorted(bands), dtype=np.intp)
+                    - np.asarray(sorted(self._previous_bands), dtype=np.intp)
+                )
+            )
+            self._settling_remaining = int(np.ceil(
+                self._config.retune_cost_slots * distance
+            ))
+        settling = self._settling_remaining > 0
         detections = tuple(
             self._detection_model.detect(
-                float(self._snr_matrix[b, t]), bool(self._truth[b, t])
+                0.0 if settling else float(self._snr_matrix[b, t]),
+                False if settling else bool(self._truth[b, t]),
             )
             for b in bands
         )
-        obs = Observation(slot=t, bands=bands, detections=detections)
+        obs = Observation(
+            slot=t,
+            bands=bands,
+            detections=detections,
+            retune_event=retune_event,
+            settling=settling,
+        )
 
+        self._previous_bands = bands
+        self._settling_remaining = max(0, self._settling_remaining - 1)
         self._slot += 1
         return obs
 

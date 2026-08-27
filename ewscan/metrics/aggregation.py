@@ -228,6 +228,7 @@ class AggregateRewardMetrics:
     total_miss_cost: MetricStats
     total_novelty_bonus: MetricStats
     total_revisit_decay: MetricStats
+    total_retune_penalty: MetricStats
 
 
 @dataclass(frozen=True)
@@ -312,6 +313,7 @@ class AggregateMetrics:
         _add_stat("miss_cost", self.reward.total_miss_cost)
         _add_stat("novelty_bonus", self.reward.total_novelty_bonus)
         _add_stat("revisit_decay", self.reward.total_revisit_decay)
+        _add_stat("retune_penalty", self.reward.total_retune_penalty)
         _add_stat("prediction_accuracy", self.prediction.accuracy)
         _add_stat("prediction_pct_correct", self.prediction.percentage_correct)
         _add_stat("time_error", self.time_error.mean_time_error)
@@ -490,6 +492,7 @@ def aggregate_metric_records(
     miss_costs = [r.total_miss_cost for r in reward_list]
     novelty_bonuses = [r.total_novelty_bonus for r in reward_list]
     revisit_decays = [r.total_revisit_decay for r in reward_list]
+    retune_penalties = [r.total_retune_penalty for r in reward_list]
 
     agg_rew = AggregateRewardMetrics(
         total_reward=compute_metric_stats(tot_rewards, confidence_level),
@@ -498,6 +501,7 @@ def aggregate_metric_records(
         total_miss_cost=compute_metric_stats(miss_costs, confidence_level),
         total_novelty_bonus=compute_metric_stats(novelty_bonuses, confidence_level),
         total_revisit_decay=compute_metric_stats(revisit_decays, confidence_level),
+        total_retune_penalty=compute_metric_stats(retune_penalties, confidence_level),
     )
 
     # Prediction metrics
