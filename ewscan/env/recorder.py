@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 import numpy as np
 from numpy.typing import NDArray
 
@@ -38,8 +38,8 @@ class EpisodeRecorder:
             The configuration for the episode to be recorded.
         """
         self._config = config
-        self._actions = np.zeros(config.n_slots, dtype=np.intp)
-        self._detections = np.zeros(config.n_slots, dtype=np.bool_)
+        self._actions = np.zeros((config.n_slots, config.k), dtype=np.intp)
+        self._detections = np.zeros((config.n_slots, config.k), dtype=np.bool_)
         self._truth: NDArray[np.bool_] | None = None
         self._current_slot = 0
 
@@ -53,34 +53,39 @@ class EpisodeRecorder:
         """The next slot to be recorded."""
         return self._current_slot
 
-    def record(self, action: int, detection: bool) -> None:
-        """Record the action and detection at the current slot and advance.
-        
+    def record(self, bands: "Sequence[int]", detections: "Sequence[bool]") -> None:
+        """Record the k bands and detections at the current slot and advance.
+
         Parameters
         ----------
-        action : int
-            The band index scanned in this step.
-        detection : bool
-            Whether a transmission was detected in this step.
-            
+        bands : Sequence[int]
+            The k band indices scanned in this step.
+        detections : Sequence[bool]
+            The k detection results, aligned with bands.
+
         Raises
         ------
         IndexError
             If attempting to record past the configured number of slots.
         ValueError
-            If action is out of the valid range [0, n_bands - 1].
+            If the number of bands is not k, or a band is out of range.
         """
         if self._current_slot >= self._config.n_slots:
             raise IndexError(
                 f"Attempted to record at slot {self._current_slot}, but episode config n_slots is {self._config.n_slots}"
             )
-        if not (0 <= action < self._config.n_bands):
+        if len(bands) != self._config.k or len(detections) != self._config.k:
             raise ValueError(
-                f"Action band {action} out of valid range [0, {self._config.n_bands - 1}]"
+                f"Expected {self._config.k} bands and detections, got {len(bands)} and {len(detections)}"
             )
-        
-        self._actions[self._current_slot] = action
-        self._detections[self._current_slot] = detection
+        for band in bands:
+            if not (0 <= band < self._config.n_bands):
+                raise ValueError(
+                    f"Action band {band} out of valid range [0, {self._config.n_bands - 1}]"
+                )
+
+        self._actions[self._current_slot, :] = bands
+        self._detections[self._current_slot, :] = detections
         self._current_slot += 1
 
     def record_observation(self, obs: Observation) -> None:
@@ -101,20 +106,25 @@ class EpisodeRecorder:
             If the observation's band is out of the range [0, n_bands - 1].
         """
         slot = obs.slot
-        band = obs.band
-        detection = obs.detection
+        bands = obs.bands
+        detections = obs.detections
 
         if not (0 <= slot < self._config.n_slots):
             raise IndexError(
                 f"Observation slot {slot} out of range [0, {self._config.n_slots - 1}]"
             )
-        if not (0 <= band < self._config.n_bands):
+        if len(bands) != self._config.k:
             raise ValueError(
-                f"Observation band {band} out of valid range [0, {self._config.n_bands - 1}]"
+                f"Observation has {len(bands)} bands, expected k={self._config.k}"
             )
-            
-        self._actions[slot] = band
-        self._detections[slot] = detection
+        for band in bands:
+            if not (0 <= band < self._config.n_bands):
+                raise ValueError(
+                    f"Observation band {band} out of valid range [0, {self._config.n_bands - 1}]"
+                )
+
+        self._actions[slot, :] = bands
+        self._detections[slot, :] = detections
         # Update current slot pointer to match or exceed recorded slot
         self._current_slot = max(self._current_slot, slot + 1)
 
@@ -285,13 +295,13 @@ def load_episode_log(filepath: str | Path) -> EpisodeLog:
             f"Loaded truth shape {truth.shape} does not match config "
             f"({config.n_bands}, {config.n_slots})"
         )
-    if actions.shape != (config.n_slots,):
+    if actions.shape != (config.n_slots, config.k):
         raise ValueError(
-            f"Loaded actions shape {actions.shape} does not match config n_slots {config.n_slots}"
+            f"Loaded actions shape {actions.shape} does not match (n_slots, k) ({config.n_slots}, {config.k})"
         )
-    if detections.shape != (config.n_slots,):
+    if detections.shape != (config.n_slots, config.k):
         raise ValueError(
-            f"Loaded detections shape {detections.shape} does not match config n_slots {config.n_slots}"
+            f"Loaded detections shape {detections.shape} does not match (n_slots, k) ({config.n_slots}, {config.k})"
         )
 
     return EpisodeLog(
