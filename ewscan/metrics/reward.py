@@ -101,6 +101,7 @@ def estimate_reward_metrics(
         )
 
     n_bands = log.n_bands
+    k = log.config.k
     cd = rf.cooldown if rf.cooldown is not None else n_bands
 
     threat_map = np.full(n_bands, rf.baseline_threat, dtype=np.float64)
@@ -116,24 +117,20 @@ def estimate_reward_metrics(
     revisit_decays = np.empty(n_slots, dtype=np.float64)
 
     for t in range(n_slots):
-        band = int(log.actions[t])
-        if band < 0 or band >= n_bands:
-            # Invalid action (e.g. -1 "no-op") — treat as zero reward
-            hit_rewards[t] = 0.0
-            miss_costs[t] = 0.0
-            novelty_bonuses[t] = 0.0
-            revisit_decays[t] = 0.0
-            per_slot_rewards[t] = 0.0
-            staleness += 1
-            continue
-
-        det = float(log.detections[t])
-        s = int(staleness[band])
-
-        r_hit = rf.w_threat * threat_map[band] * det
-        r_miss = -rf.c_miss * (1.0 - det)
-        r_novelty = rf.w_novelty * min(s / n_bands, 1.0)
-        r_decay = -rf.w_decay * max(0.0, 1.0 - s / cd) if cd > 0 else 0.0
+        bands_t = log.actions[t]
+        dets_t = log.detections[t]
+        r_hit = r_miss = r_novelty = r_decay = 0.0
+        for j in range(k):
+            band = int(bands_t[j])
+            if band < 0 or band >= n_bands:
+                # Invalid action (e.g. -1 "no-op") — contributes zero reward
+                continue
+            det = float(dets_t[j])
+            s = int(staleness[band])
+            r_hit += rf.w_threat * threat_map[band] * det
+            r_miss += -rf.c_miss * (1.0 - det)
+            r_novelty += rf.w_novelty * min(s / n_bands, 1.0)
+            r_decay += -rf.w_decay * max(0.0, 1.0 - s / cd) if cd > 0 else 0.0
 
         hit_rewards[t] = r_hit
         miss_costs[t] = r_miss
@@ -142,7 +139,10 @@ def estimate_reward_metrics(
         per_slot_rewards[t] = r_hit + r_miss + r_novelty + r_decay
 
         staleness += 1
-        staleness[band] = 0
+        for j in range(k):
+            band = int(bands_t[j])
+            if 0 <= band < n_bands:
+                staleness[band] = 0
 
     tot_hit = float(np.sum(hit_rewards))
     tot_miss = float(np.sum(miss_costs))

@@ -22,7 +22,7 @@ class TestBandStatisticsInit:
         with pytest.raises(RuntimeError, match="must be reset"):
             _ = stats.staleness
         with pytest.raises(RuntimeError, match="must be reset"):
-            stats.update(Observation(slot=0, band=0, detection=True))
+            stats.update(Observation(slot=0, bands=(0,), detections=(True,)))
 
     def test_init_with_n_bands(self):
         stats = BandStatistics(n_bands=4)
@@ -46,8 +46,8 @@ class TestBandStatisticsInit:
 class TestBandStatisticsUpdates:
     def test_single_update_hit(self):
         stats = BandStatistics(n_bands=4)
-        obs = Observation(slot=0, band=1, detection=True)
-        stats.update(obs, reward=1.0)
+        obs = Observation(slot=0, bands=(1,), detections=(True,))
+        stats.update(obs, rewards=[1.0])
 
         assert stats.total_pulls == 1
         np.testing.assert_array_equal(stats.counts, [0, 1, 0, 0])
@@ -62,8 +62,8 @@ class TestBandStatisticsUpdates:
 
     def test_single_update_miss(self):
         stats = BandStatistics(n_bands=4)
-        obs = Observation(slot=0, band=2, detection=False)
-        stats.update(obs, reward=-0.1)
+        obs = Observation(slot=0, bands=(2,), detections=(False,))
+        stats.update(obs, rewards=[-0.1])
 
         assert stats.total_pulls == 1
         np.testing.assert_array_equal(stats.counts, [0, 0, 1, 0])
@@ -144,13 +144,13 @@ class TestBandStatisticsUpdates:
     def test_out_of_bounds_band_raises(self):
         stats = BandStatistics(n_bands=3)
         with pytest.raises(IndexError, match="out of range"):
-            stats.update(Observation(slot=0, band=3, detection=True))
+            stats.update(Observation(slot=0, bands=(3,), detections=(True,)))
         with pytest.raises(IndexError, match="out of range"):
-            stats.update(Observation(slot=0, band=-1, detection=True))
+            stats.update(Observation(slot=0, bands=(-1,), detections=(True,)))
 
     def test_helper_getters(self):
         stats = BandStatistics(n_bands=3)
-        stats.update(Observation(slot=0, band=1, detection=True), reward=0.8)
+        stats.update(Observation(slot=0, bands=(1,), detections=(True,)), rewards=[0.8])
 
         assert stats.get_count(1) == 1
         assert stats.get_count(0) == 0
@@ -171,7 +171,7 @@ class TestBandStatisticsUpdates:
     def test_reset_clears_state(self):
         stats = BandStatistics(n_bands=4)
         for t in range(4):
-            stats.update(Observation(slot=t, band=t, detection=True), reward=1.0)
+            stats.update(Observation(slot=t, bands=(t,), detections=(True,)), rewards=[1.0])
         assert stats.total_pulls == 4
 
         stats.reset(n_bands=2)

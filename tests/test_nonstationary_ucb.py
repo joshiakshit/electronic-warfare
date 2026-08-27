@@ -137,7 +137,7 @@ class TestSWUCB1CircularBuffer:
         obs = None
         for t in range(200):
             a = s.act(obs)
-            obs = Observation(slot=t, band=a.band, detection=(t % 3 == 0))
+            obs = Observation(slot=t, bands=(a.bands[0],), detections=((t % 3 == 0,)))
 
     def test_window_forgets_old_data(self):
         """A band visited only at the start should become unvisited-in-window
@@ -148,15 +148,15 @@ class TestSWUCB1CircularBuffer:
 
         # Initial sweep: visit bands 0 and 1
         a0 = s.act(None)
-        assert a0.band == 0
-        a1 = s.act(Observation(slot=0, band=0, detection=True))
-        assert a1.band == 1
+        assert a0.bands[0] == 0
+        a1 = s.act(Observation(slot=0, bands=(0,), detections=(True,)))
+        assert a1.bands[0] == 1
 
         # Now feed 5 observations for band 1 to push band 0 out of the window
-        obs = Observation(slot=1, band=1, detection=True)
+        obs = Observation(slot=1, bands=(1,), detections=(True,))
         for t in range(2, 7):
             s.act(obs)
-            obs = Observation(slot=t, band=1, detection=True)
+            obs = Observation(slot=t, bands=(1,), detections=(True,))
         
         # Process the final observation
         s.act(obs)
@@ -175,8 +175,8 @@ class TestAllZeroRewards:
         counts = {0: 0, 1: 0, 2: 0}
         for t in range(20):
             a = s.act(obs)
-            counts[a.band] += 1
-            obs = Observation(slot=t, band=a.band, detection=False)
+            counts[a.bands[0]] += 1
+            obs = Observation(slot=t, bands=(a.bands[0],), detections=(False,))
         
         # Should explore all bands due to zero rewards resulting in UCB tie-breaking
         assert all(c > 0 for c in counts.values())
@@ -190,8 +190,8 @@ class TestAllZeroRewards:
         counts = {0: 0, 1: 0, 2: 0}
         for t in range(20):
             a = s.act(obs)
-            counts[a.band] += 1
-            obs = Observation(slot=t, band=a.band, detection=False)
+            counts[a.bands[0]] += 1
+            obs = Observation(slot=t, bands=(a.bands[0],), detections=(False,))
         
         # Should explore all bands due to zero rewards resulting in UCB tie-breaking
         assert all(c > 0 for c in counts.values())
@@ -209,10 +209,10 @@ class TestThreatWeighting:
         s.reset(config)
 
         s.act(None)
-        s.act(Observation(slot=0, band=0, detection=True))
-        a = s.act(Observation(slot=1, band=1, detection=True))
+        s.act(Observation(slot=0, bands=(0,), detections=(True,)))
+        a = s.act(Observation(slot=1, bands=(1,), detections=(True,)))
         # Band 0 has higher threat weight, should be preferred
-        assert a.band == 0
+        assert a.bands[0] == 0
 
     def test_swucb1_uses_threat_map(self):
         emitters = (
@@ -224,6 +224,6 @@ class TestThreatWeighting:
         s.reset(config)
 
         s.act(None)
-        s.act(Observation(slot=0, band=0, detection=True))
-        a = s.act(Observation(slot=1, band=1, detection=True))
-        assert a.band == 0
+        s.act(Observation(slot=0, bands=(0,), detections=(True,)))
+        a = s.act(Observation(slot=1, bands=(1,), detections=(True,)))
+        assert a.bands[0] == 0

@@ -31,22 +31,26 @@ class RoundRobinScheduler(Scheduler):
         self._start_band = start_band
         self._current_band = start_band
         self._n_bands: int | None = None
+        self._k: int | None = None
 
     def reset(self, config: EpisodeConfig) -> None:
         """Reset scheduler state for a new episode."""
         if config.n_bands <= 0:
             raise ValueError(f"n_bands must be positive, got {config.n_bands}")
         self._n_bands = config.n_bands
+        self._k = config.k
         self._current_band = self._start_band % self._n_bands
 
     def act(self, obs: Observation | None) -> ScanAction:
-        """Select next band sequentially."""
-        if self._n_bands is None:
+        """Select the next k bands sequentially (wrapping)."""
+        if self._n_bands is None or self._k is None:
             raise RuntimeError("Scheduler must be reset before calling act()")
 
-        action = ScanAction(band=self._current_band)
-        self._current_band = (self._current_band + 1) % self._n_bands
-        return action
+        bands = tuple(
+            (self._current_band + i) % self._n_bands for i in range(self._k)
+        )
+        self._current_band = (self._current_band + self._k) % self._n_bands
+        return ScanAction(bands=bands)
 
     @property
     def name(self) -> str:
@@ -69,12 +73,14 @@ class UniformRandomScheduler(Scheduler):
         self._seed = seed
         self._rng: np.random.Generator | None = None
         self._n_bands: int | None = None
+        self._k: int | None = None
 
     def reset(self, config: EpisodeConfig) -> None:
         """Reset scheduler state and derive random generator."""
         if config.n_bands <= 0:
             raise ValueError(f"n_bands must be positive, got {config.n_bands}")
         self._n_bands = config.n_bands
+        self._k = config.k
 
         if isinstance(self._seed, np.random.Generator):
             self._rng = self._seed
@@ -84,12 +90,18 @@ class UniformRandomScheduler(Scheduler):
             self._rng = make_generators(config.seed)["scheduler"]
 
     def act(self, obs: Observation | None) -> ScanAction:
-        """Select next band uniformly at random."""
-        if self._n_bands is None or self._rng is None:
+        """Select k distinct bands uniformly at random."""
+        if self._n_bands is None or self._rng is None or self._k is None:
             raise RuntimeError("Scheduler must be reset before calling act()")
 
-        band = int(self._rng.integers(0, self._n_bands))
-        return ScanAction(band=band)
+        if self._k == 1:
+            bands = (int(self._rng.integers(0, self._n_bands)),)
+        else:
+            bands = tuple(
+                int(b)
+                for b in self._rng.choice(self._n_bands, size=self._k, replace=False)
+            )
+        return ScanAction(bands=bands)
 
     @property
     def name(self) -> str:
@@ -120,6 +132,7 @@ class PriorWeightedScheduler(Scheduler):
         self._seed = seed
         self._rng: np.random.Generator | None = None
         self._n_bands: int | None = None
+        self._k: int | None = None
         self._probs: NDArray[np.float64] | None = None
 
     def reset(self, config: EpisodeConfig) -> None:
@@ -127,6 +140,7 @@ class PriorWeightedScheduler(Scheduler):
         if config.n_bands <= 0:
             raise ValueError(f"n_bands must be positive, got {config.n_bands}")
         self._n_bands = config.n_bands
+        self._k = config.k
 
         if self._raw_priors is None:
             self._probs = np.ones(config.n_bands, dtype=np.float64) / config.n_bands
@@ -152,12 +166,25 @@ class PriorWeightedScheduler(Scheduler):
             self._rng = make_generators(config.seed)["scheduler"]
 
     def act(self, obs: Observation | None) -> ScanAction:
-        """Select next band according to prior distribution."""
-        if self._n_bands is None or self._rng is None or self._probs is None:
+        """Select k distinct bands according to the prior distribution."""
+        if (
+            self._n_bands is None
+            or self._rng is None
+            or self._probs is None
+            or self._k is None
+        ):
             raise RuntimeError("Scheduler must be reset before calling act()")
 
-        band = int(self._rng.choice(self._n_bands, p=self._probs))
-        return ScanAction(band=band)
+        if self._k == 1:
+            bands = (int(self._rng.choice(self._n_bands, p=self._probs)),)
+        else:
+            bands = tuple(
+                int(b)
+                for b in self._rng.choice(
+                    self._n_bands, size=self._k, replace=False, p=self._probs
+                )
+            )
+        return ScanAction(bands=bands)
 
     @property
     def name(self) -> str:
@@ -190,6 +217,7 @@ class OracleScheduler(Scheduler):
         self._truth: NDArray[np.bool_] | None = None
         self._n_bands: int | None = None
         self._n_slots: int | None = None
+        self._k: int | None = None
         self._slot: int = 0
         self._threat_weights: NDArray[np.float64] | None = None
 
@@ -239,6 +267,7 @@ class OracleScheduler(Scheduler):
 
         self._n_bands = config.n_bands
         self._n_slots = config.n_slots
+        self._k = config.k
         self._slot = 0
 
         self._threat_weights = np.zeros(config.n_bands, dtype=np.float64)
@@ -259,21 +288,23 @@ class OracleScheduler(Scheduler):
             raise RuntimeError("Scheduler must be reset before calling act()")
 
         t = self._slot
+        chosen: list[int] = []
         if t < self._n_slots:
-            active_bands = np.flatnonzero(self._truth[:, t])
-            if len(active_bands) == 0:
-                chosen_band = t % self._n_bands
-            elif len(active_bands) == 1:
-                chosen_band = int(active_bands[0])
-            else:
-                threats = self._threat_weights[active_bands]
-                best_idx = int(np.argmax(threats))
-                chosen_band = int(active_bands[best_idx])
-        else:
-            chosen_band = t % self._n_bands
+            active = np.flatnonzero(self._truth[:, t])
+            if len(active) > 0:
+                order = active[np.argsort(-self._threat_weights[active], kind="stable")]
+                chosen = [int(b) for b in order[: self._k]]
+
+        # Fill any spare channels with distinct round-robin bands
+        i = 0
+        while len(chosen) < self._k:
+            b = (t + i) % self._n_bands
+            if b not in chosen:
+                chosen.append(b)
+            i += 1
 
         self._slot += 1
-        return ScanAction(band=chosen_band)
+        return ScanAction(bands=tuple(chosen))
 
     @property
     def name(self) -> str:

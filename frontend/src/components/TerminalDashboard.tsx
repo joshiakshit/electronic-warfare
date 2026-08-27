@@ -15,6 +15,7 @@ export const TerminalDashboard = ({ scenarios, schedulers, winSize, setWinSize, 
   const [scenario, setScenario] = useState("synthetic_log");
   const [scheduler, setScheduler] = useState("ucb1");
   const [seed, setSeed] = useState(42);
+  const [k, setK] = useState(1);
 
   const [simulationData, setSimulationData] = useState<any>(null);
   const [currentSlot, setCurrentSlot] = useState(0);
@@ -38,7 +39,7 @@ export const TerminalDashboard = ({ scenarios, schedulers, winSize, setWinSize, 
         const res = await fetch(`${apiBase}/api/simulate`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ scenario_name: scenario, scheduler_name: scheduler, seed }),
+          body: JSON.stringify({ scenario_name: scenario, scheduler_name: scheduler, seed, k }),
           signal: controller.signal
         });
         const data = await res.json();
@@ -58,7 +59,7 @@ export const TerminalDashboard = ({ scenarios, schedulers, winSize, setWinSize, 
     };
     fetchSim();
     return () => controller.abort();
-  }, [scenario, scheduler, seed]);
+  }, [scenario, scheduler, seed, k]);
 
   useEffect(() => {
     if (isPlaying && simulationData) {
@@ -146,8 +147,9 @@ export const TerminalDashboard = ({ scenarios, schedulers, winSize, setWinSize, 
       const row = [];
       for (let s = startSlot; s < endSlot; s++) {
         const tx = activeLog.truth[b][s];
-        const scanned = activeLog.actions[s] === b;
-        const det = activeLog.detections[s];
+        const chan = activeLog.actions[s].indexOf(b);
+        const scanned = chan !== -1;
+        const det = scanned ? activeLog.detections[s][chan] : false;
 
         let bgColor = "bg-transparent";
         let dot = null;
@@ -213,38 +215,41 @@ export const TerminalDashboard = ({ scenarios, schedulers, winSize, setWinSize, 
     const startLogSlot = Math.max(0, currentSlot - 50);
 
     for (let s = startLogSlot; s <= currentSlot; s++) {
-      const b = activeLog.actions[s];
-      if (b === undefined) continue;
+      const bandsAtSlot = activeLog.actions[s];
+      if (bandsAtSlot === undefined) continue;
 
-      const tx = activeLog.truth[b][s];
-      const det = activeLog.detections[s];
+      for (let j = 0; j < bandsAtSlot.length; j++) {
+        const b = bandsAtSlot[j];
+        const tx = activeLog.truth[b][s];
+        const det = activeLog.detections[s][j];
 
-      let msg = "";
-      let colorClass = "";
+        let msg = "";
+        let colorClass = "";
 
-      if (tx && det) {
-        msg = `HIT: Intercepted`;
-        colorClass = "text-ew-accent";
-      } else if (!tx && det) {
-        msg = `FALSE ALARM: Ghost`;
-        colorClass = "text-[#f59e0b]";
-      } else if (tx && !det) {
-        msg = `MISSED: Lost`;
-        colorClass = "text-[#ef4444]";
-      } else {
-        msg = `IDLE: Clear`;
-        colorClass = "text-ew-text-dim";
-      }
+        if (tx && det) {
+          msg = `HIT: Intercepted`;
+          colorClass = "text-ew-accent";
+        } else if (!tx && det) {
+          msg = `FALSE ALARM: Ghost`;
+          colorClass = "text-[#f59e0b]";
+        } else if (tx && !det) {
+          msg = `MISSED: Lost`;
+          colorClass = "text-[#ef4444]";
+        } else {
+          msg = `IDLE: Clear`;
+          colorClass = "text-ew-text-dim";
+        }
 
-      logs.push(
-        <div key={`log-${s}`} className="flex flex-col mb-1.5 pb-1.5 border-b border-ew-border-subtle last:border-0 leading-tight">
-          <div className="flex items-start gap-2">
-            <span className="text-ew-text-dimmer shrink-0 opacity-70">[{String(s).padStart(4, '0')}]</span>
-            <span className="text-ew-text-muted shrink-0">[B-{b}]</span>
-            <span className={`${colorClass} truncate font-semibold`}>{msg}</span>
+        logs.push(
+          <div key={`log-${s}-${j}`} className="flex flex-col mb-1.5 pb-1.5 border-b border-ew-border-subtle last:border-0 leading-tight">
+            <div className="flex items-start gap-2">
+              <span className="text-ew-text-dimmer shrink-0 opacity-70">[{String(s).padStart(4, '0')}]</span>
+              <span className="text-ew-text-muted shrink-0">[B-{b}]</span>
+              <span className={`${colorClass} truncate font-semibold`}>{msg}</span>
+            </div>
           </div>
-        </div>
-      );
+        );
+      }
     }
     return logs;
   };
@@ -281,7 +286,7 @@ export const TerminalDashboard = ({ scenarios, schedulers, winSize, setWinSize, 
         <div className="flex gap-10 items-end pb-1">
           <div className="flex flex-col">
             <span className="text-[10px] text-ew-text-dim uppercase tracking-wider font-semibold">Active Band</span>
-            <span className="text-lg font-light text-ew-accent font-mono">B-{activeLog.actions[currentSlot] ?? 0}</span>
+            <span className="text-lg font-light text-ew-accent font-mono">B-{(activeLog.actions[currentSlot] ?? [0]).join(", B-")}</span>
           </div>
           <div className="flex flex-col">
             <span className="text-[10px] text-ew-text-dim uppercase tracking-wider font-semibold">Intercept Ratio</span>
@@ -448,6 +453,17 @@ export const TerminalDashboard = ({ scenarios, schedulers, winSize, setWinSize, 
               type="number"
               value={seed}
               onChange={e => setSeed(Number(e.target.value))}
+              className="w-full bg-ew-bg border border-ew-border rounded-md text-[11px] font-semibold text-ew-text px-3 py-2 outline-none hover:border-ew-accent transition-colors"
+            />
+          </div>
+
+          <div className="flex flex-col gap-1 w-20">
+            <label className="text-[10px] uppercase text-ew-text-dim font-semibold tracking-wider">Channels</label>
+            <input
+              type="number"
+              min={1}
+              value={k}
+              onChange={e => setK(Math.max(1, Number(e.target.value)))}
               className="w-full bg-ew-bg border border-ew-border rounded-md text-[11px] font-semibold text-ew-text px-3 py-2 outline-none hover:border-ew-accent transition-colors"
             />
           </div>

@@ -231,17 +231,10 @@ class RFEnvironment:
         self._is_reset = True
 
     def step(self, action: ScanAction) -> Observation:
-        """Execute one receiver scan action and return sensor observation.
+        """Execute one parallel scan action and return sensor observation.
 
-        Parameters
-        ----------
-        action : ScanAction
-            Scheduler's scan action specifying which band to tune into.
-
-        Returns
-        -------
-        Observation
-            Sensor feedback containing slot, scanned band, and boolean detection.
+        The k channels sample the same slot. Returns one Observation whose
+        detections align with action.bands. Advances the slot once.
 
         Raises
         ------
@@ -250,7 +243,7 @@ class RFEnvironment:
         IndexError
             If called when the episode is already done.
         ValueError
-            If action.band is out of valid band range [0, n_bands - 1].
+            If len(action.bands) != k, or any band is out of range.
         """
         if not self._is_reset:
             raise RuntimeError("Environment must be reset() before calling step()")
@@ -260,19 +253,25 @@ class RFEnvironment:
                 f"Episode already completed all {self._n_slots} slots"
             )
 
-        if not (0 <= action.band < self._n_bands):
+        bands = action.bands
+        if len(bands) != self._k:
             raise ValueError(
-                f"Action band {action.band} out of valid range [0, {self._n_bands - 1}]"
+                f"ScanAction has {len(bands)} bands, expected k={self._k}"
             )
+        for b in bands:
+            if not (0 <= b < self._n_bands):
+                raise ValueError(
+                    f"Action band {b} out of valid range [0, {self._n_bands - 1}]"
+                )
 
         t = self._slot
-        b = action.band
-
-        transmitting = bool(self._truth[b, t])
-        snr_db = float(self._snr_matrix[b, t])
-
-        detection = self._detection_model.detect(snr_db, transmitting)
-        obs = Observation(slot=t, band=b, detection=detection)
+        detections = tuple(
+            self._detection_model.detect(
+                float(self._snr_matrix[b, t]), bool(self._truth[b, t])
+            )
+            for b in bands
+        )
+        obs = Observation(slot=t, bands=bands, detections=detections)
 
         self._slot += 1
         return obs

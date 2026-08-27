@@ -68,32 +68,32 @@ class TestEpisodeRecorder:
             # Record scanning band t % 4, with detection if it was transmitting in truth
             band = t % sample_config.n_bands
             det = bool(sample_truth[band, t])
-            recorder.record(band, det)
+            recorder.record((band,), (det,))
 
         assert recorder.current_slot == sample_config.n_slots
         
         # Try recording past n_slots -> should raise IndexError
         with pytest.raises(IndexError, match="Attempted to record at slot"):
-            recorder.record(0, False)
+            recorder.record((0,), (False,))
 
     def test_record_invalid_actions(self, sample_config):
         recorder = EpisodeRecorder(sample_config)
         
         # Invalid band index (too low)
         with pytest.raises(ValueError, match="out of valid range"):
-            recorder.record(-1, False)
+            recorder.record((-1,), (False,))
 
         # Invalid band index (too high)
         with pytest.raises(ValueError, match="out of valid range"):
-            recorder.record(sample_config.n_bands, False)
+            recorder.record((sample_config.n_bands,), (False,))
 
     def test_record_observation(self, sample_config, sample_truth):
         recorder = EpisodeRecorder(sample_config)
         
         obs_seq = [
-            Observation(slot=0, band=1, detection=False),
-            Observation(slot=2, band=0, detection=True),
-            Observation(slot=1, band=2, detection=False),
+            Observation(slot=0, bands=(1,), detections=(False,)),
+            Observation(slot=2, bands=(0,), detections=(True,)),
+            Observation(slot=1, bands=(2,), detections=(False,)),
         ]
         
         for obs in obs_seq:
@@ -107,17 +107,17 @@ class TestEpisodeRecorder:
         
         # Slot out of bounds
         with pytest.raises(IndexError, match="Observation slot"):
-            recorder.record_observation(Observation(slot=-1, band=0, detection=False))
+            recorder.record_observation(Observation(slot=-1, bands=(0,), detections=(False,)))
             
         with pytest.raises(IndexError, match="Observation slot"):
-            recorder.record_observation(Observation(slot=sample_config.n_slots, band=0, detection=False))
+            recorder.record_observation(Observation(slot=sample_config.n_slots, bands=(0,), detections=(False,)))
 
         # Band out of bounds
         with pytest.raises(ValueError, match="Observation band"):
-            recorder.record_observation(Observation(slot=0, band=-1, detection=False))
+            recorder.record_observation(Observation(slot=0, bands=(-1,), detections=(False,)))
             
         with pytest.raises(ValueError, match="Observation band"):
-            recorder.record_observation(Observation(slot=0, band=sample_config.n_bands, detection=False))
+            recorder.record_observation(Observation(slot=0, bands=(sample_config.n_bands,), detections=(False,)))
 
     def test_record_truth_matrix_validation(self, sample_config, sample_truth):
         recorder = EpisodeRecorder(sample_config)
@@ -139,14 +139,14 @@ class TestEpisodeRecorder:
         
         # 1. No truth matrix recorded yet
         for t in range(sample_config.n_slots):
-            recorder.record(t % sample_config.n_bands, False)
+            recorder.record((t % sample_config.n_bands,), (False,))
         with pytest.raises(RuntimeError, match="ground truth matrix was not recorded"):
             recorder.to_log()
 
         # 2. Incomplete episode steps recorded
         recorder_incomplete = EpisodeRecorder(sample_config)
         recorder_incomplete.record_truth(sample_truth)
-        recorder_incomplete.record(0, False)
+        recorder_incomplete.record((0,), (False,))
         with pytest.raises(ValueError, match="Expected.*steps, but only recorded"):
             recorder_incomplete.to_log()
 
@@ -161,14 +161,14 @@ class TestEpisodeRecorder:
             det = bool(sample_truth[band, t])
             actions.append(band)
             detections.append(det)
-            recorder.record(band, det)
+            recorder.record((band,), (det,))
             
         log = recorder.to_log()
         assert isinstance(log, EpisodeLog)
         assert log.config == sample_config
         np.testing.assert_array_equal(log.truth, sample_truth)
-        np.testing.assert_array_equal(log.actions, np.array(actions, dtype=np.intp))
-        np.testing.assert_array_equal(log.detections, np.array(detections, dtype=np.bool_))
+        np.testing.assert_array_equal(log.actions[:, 0], np.array(actions, dtype=np.intp))
+        np.testing.assert_array_equal(log.detections[:, 0], np.array(detections, dtype=np.bool_))
 
         # Check that we copy arrays so mutate operations on original don't affect log
         sample_truth[0, 0] = not sample_truth[0, 0]
@@ -183,7 +183,7 @@ class TestSerialization:
         recorder = EpisodeRecorder(sample_config)
         recorder.record_truth(sample_truth)
         for t in range(sample_config.n_slots):
-            recorder.record(t % sample_config.n_bands, bool(sample_truth[t % sample_config.n_bands, t]))
+            recorder.record((t % sample_config.n_bands,), (bool(sample_truth[t % sample_config.n_bands, t]),))
         return recorder.to_log()
 
     def test_json_roundtrip(self, full_log):

@@ -102,7 +102,7 @@ class TestDecayMechanics:
         s._beta[1] = 1.0
 
         for t in range(50):
-            obs = Observation(slot=t, band=0, detection=True) if t > 0 else None
+            obs = Observation(slot=t, bands=(0,), detections=(True,)) if t > 0 else None
             s.act(obs)
 
         # Band 1 was never updated, only decayed 50 times

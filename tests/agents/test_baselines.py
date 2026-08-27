@@ -29,7 +29,7 @@ class TestRoundRobinScheduler:
         scheduler = RoundRobinScheduler()
         scheduler.reset(config)
 
-        actions = [scheduler.act(None).band for _ in range(10)]
+        actions = [scheduler.act(None).bands[0] for _ in range(10)]
         assert actions == [0, 1, 2, 3, 0, 1, 2, 3, 0, 1]
 
     def test_custom_start_band(self):
@@ -37,17 +37,17 @@ class TestRoundRobinScheduler:
         scheduler = RoundRobinScheduler(start_band=1)
         scheduler.reset(config)
 
-        actions = [scheduler.act(None).band for _ in range(5)]
+        actions = [scheduler.act(None).bands[0] for _ in range(5)]
         assert actions == [1, 2, 0, 1, 2]
 
     def test_reset_restarts_sequence(self):
         config = make_test_config(n_bands=4, n_slots=5)
         scheduler = RoundRobinScheduler()
         scheduler.reset(config)
-        first_run = [scheduler.act(None).band for _ in range(5)]
+        first_run = [scheduler.act(None).bands[0] for _ in range(5)]
 
         scheduler.reset(config)
-        second_run = [scheduler.act(None).band for _ in range(5)]
+        second_run = [scheduler.act(None).bands[0] for _ in range(5)]
 
         assert first_run == second_run == [0, 1, 2, 3, 0]
 
@@ -67,11 +67,11 @@ class TestUniformRandomScheduler:
 
         sched1 = UniformRandomScheduler()
         sched1.reset(config)
-        seq1 = [sched1.act(None).band for _ in range(20)]
+        seq1 = [sched1.act(None).bands[0] for _ in range(20)]
 
         sched2 = UniformRandomScheduler()
         sched2.reset(config)
-        seq2 = [sched2.act(None).band for _ in range(20)]
+        seq2 = [sched2.act(None).bands[0] for _ in range(20)]
 
         assert seq1 == seq2
 
@@ -86,7 +86,7 @@ class TestUniformRandomScheduler:
         counts = np.zeros(n_bands, dtype=int)
         for _ in range(n_slots):
             action = scheduler.act(None)
-            counts[action.band] += 1
+            counts[action.bands[0]] += 1
 
         expected = n_slots / n_bands
         chi2 = np.sum((counts - expected) ** 2 / expected)
@@ -115,7 +115,7 @@ class TestPriorWeightedScheduler:
         counts = np.zeros(4, dtype=int)
         for _ in range(100_000):
             action = scheduler.act(None)
-            counts[action.band] += 1
+            counts[action.bands[0]] += 1
 
         proportions = counts / 100_000
         np.testing.assert_allclose(proportions, 0.25, atol=0.01)
@@ -129,7 +129,7 @@ class TestPriorWeightedScheduler:
         counts = np.zeros(4, dtype=int)
         for _ in range(100_000):
             action = scheduler.act(None)
-            counts[action.band] += 1
+            counts[action.bands[0]] += 1
 
         proportions = counts / 100_000
         np.testing.assert_allclose(proportions, priors, atol=0.015)
@@ -144,7 +144,7 @@ class TestPriorWeightedScheduler:
         counts = np.zeros(2, dtype=int)
         for _ in range(100_000):
             action = scheduler.act(None)
-            counts[action.band] += 1
+            counts[action.bands[0]] += 1
 
         proportions = counts / 100_000
         np.testing.assert_allclose(proportions, [0.25, 0.75], atol=0.01)
@@ -221,7 +221,7 @@ class TestOracleScheduler:
         env = ScriptedEnv(config, truth)
         log = env.run(scheduler)
 
-        assert log.actions.tolist() == active_sequence
+        assert log.actions[:, 0].tolist() == active_sequence
         assert np.all(log.detections)
         assert np.sum(log.detections) == 10
 
@@ -256,7 +256,7 @@ class TestOracleScheduler:
         scheduler = OracleScheduler(truth=truth)
         scheduler.reset(config)
 
-        actions = [scheduler.act(None).band for _ in range(5)]
+        actions = [scheduler.act(None).bands[0] for _ in range(5)]
         assert actions == [0, 1, 2, 0, 1]
 
     def test_idle_slots_fallback(self):
@@ -267,7 +267,7 @@ class TestOracleScheduler:
         scheduler = OracleScheduler(truth=truth)
         scheduler.reset(config)
 
-        actions = [scheduler.act(None).band for _ in range(6)]
+        actions = [scheduler.act(None).bands[0] for _ in range(6)]
         assert actions == [0, 1, 2, 0, 1, 2]
 
     def test_reset_restarts_sequence(self):
@@ -277,10 +277,10 @@ class TestOracleScheduler:
 
         scheduler = OracleScheduler(truth=truth)
         scheduler.reset(config)
-        first_run = [scheduler.act(None).band for _ in range(4)]
+        first_run = [scheduler.act(None).bands[0] for _ in range(4)]
 
         scheduler.reset(config)
-        second_run = [scheduler.act(None).band for _ in range(4)]
+        second_run = [scheduler.act(None).bands[0] for _ in range(4)]
 
         assert first_run == second_run == [1, 1, 1, 1]
 
@@ -338,15 +338,15 @@ class TestOracleScheduler:
         oracle_active_intercepts = 0
         for t in range(config.n_slots):
             action = oracle.act(None)
-            if truth[action.band, t]:
+            if truth[action.bands[0], t]:
                 oracle_active_intercepts += 1
 
         # Oracle must intercept an active transmission in 100% of slots with transmission
         assert oracle_active_intercepts == slots_with_transmission
 
         # Evaluate RoundRobin and Random on the exact same truth
-        rr_intercepts = sum(1 for t in range(config.n_slots) if truth[rr.act(None).band, t])
-        rnd_intercepts = sum(1 for t in range(config.n_slots) if truth[rnd.act(None).band, t])
+        rr_intercepts = sum(1 for t in range(config.n_slots) if truth[rr.act(None).bands[0], t])
+        rnd_intercepts = sum(1 for t in range(config.n_slots) if truth[rnd.act(None).bands[0], t])
 
         # Oracle strictly beats round-robin and uniform random
         assert oracle_active_intercepts > rr_intercepts

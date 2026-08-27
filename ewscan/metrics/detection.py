@@ -160,16 +160,17 @@ class DetectionMetrics:
 # ---------------------------------------------------------------------------
 
 def _scanned_truth(log: EpisodeLog) -> NDArray[np.bool_]:
-    """Return the truth value at each scanned (band, slot) pair.
+    """Return the truth value at each scanned (channel, slot) pair.
 
-    Returns a 1-D boolean array of length ``n_slots`` where entry *t* is
-    ``truth[actions[t], t]``.  Invalid action indices (out of band range)
+    Returns a 2-D boolean array of shape ``(n_slots, k)`` where entry *(t, j)*
+    is ``truth[actions[t, j], t]``.  Invalid action indices (out of band range)
     are treated as non-detections (False).
     """
     actions = log.actions
     valid = (actions >= 0) & (actions < log.n_bands)
     safe_actions = np.where(valid, actions, 0)
-    result = log.truth[safe_actions, np.arange(log.n_slots)]
+    slots = np.arange(log.n_slots)[:, None]
+    result = log.truth[safe_actions, slots]
     result[~valid] = False
     return result
 
@@ -277,12 +278,12 @@ def estimate_per_emitter_pd(log: EpisodeLog) -> tuple[EmitterPdEstimate, ...]:
             ))
             continue
 
-        # Slots where the scanner was tuned to this emitter's band
+        # Channel-slots where the scanner was tuned to this emitter's band
         scanned_this_band = log.actions == band
 
         # Of those, which ones had the band actually ON?
         # (truth is band-level, not per-emitter — see docstring caveat)
-        on_and_scanned = scanned_this_band & log.truth[band, :]
+        on_and_scanned = scanned_this_band & log.truth[band, :][:, None]
         n_scans_on = int(np.count_nonzero(on_and_scanned))
 
         if n_scans_on == 0:

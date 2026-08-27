@@ -77,17 +77,11 @@ class UCB1Scheduler(BaseLearningScheduler):
 
         # Step 1: Update statistics with incoming observation
         if obs is not None:
-            r = self._compute_reward(obs)
-            self._stats.update(obs, reward=r)
+            rewards = self._compute_rewards(obs)
+            self._stats.update(obs, rewards=rewards)
 
-        # Step 2: Band selection
-        # Phase 1: Unvisited arms exploration (pull each arm once)
-        unvisited = self._stats.unvisited_bands
-        if len(unvisited) > 0:
-            chosen_band = int(unvisited[0])
-            return ScanAction(band=chosen_band)
-
-        # Phase 2: UCB1 score computation
+        # Step 2: UCB1 score computation (unvisited arms score +inf, so the
+        # top-k selector pulls each once before exploiting)
         counts = self._stats.counts
         t = self._stats.total_pulls
 
@@ -96,18 +90,12 @@ class UCB1Scheduler(BaseLearningScheduler):
         else:
             means = self._stats.mean_detections
 
-        # UCB1 formula: hat{mu}_i + c * sqrt(2 * ln(t) / N_i)
-        bonus = self._c * np.sqrt(2.0 * np.log(t) / counts)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            bonus = self._c * np.sqrt(2.0 * np.log(t) / counts)
         ucb_values = means + bonus
         if self._staleness_weight > 0.0:
             ucb_values += self._staleness_weight * self._stats.staleness
 
-        # Select arm with maximum UCB value (break ties uniformly at random or deterministically)
-        max_val = np.max(ucb_values)
-        best_candidates = np.flatnonzero(np.isclose(ucb_values, max_val, rtol=1e-12, atol=1e-12))
-        if len(best_candidates) == 1:
-            chosen_band = int(best_candidates[0])
-        else:
-            chosen_band = int(self._rng.choice(best_candidates))
-
-        return ScanAction(band=chosen_band)
+        unvisited = self._stats.unvisited_bands
+        bands = self._select_top_k(ucb_values, self._k, unvisited=unvisited)
+        return ScanAction(bands=bands)

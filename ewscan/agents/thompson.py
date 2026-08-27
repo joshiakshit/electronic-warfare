@@ -131,14 +131,15 @@ class ThompsonSamplingScheduler(BaseLearningScheduler):
 
         # Step 1: Update statistics and Bayesian Beta posterior with incoming observation
         if obs is not None:
-            r = self._compute_reward(obs)
-            self._stats.update(obs, reward=r)
+            rewards = self._compute_rewards(obs)
+            self._stats.update(obs, rewards=rewards)
 
-            # Exact Beta-Bernoulli conjugate update
-            if obs.detection:
-                self._alpha[obs.band] += 1.0
-            else:
-                self._beta[obs.band] += 1.0
+            # Exact Beta-Bernoulli conjugate update per channel
+            for band, det in zip(obs.bands, obs.detections):
+                if det:
+                    self._alpha[band] += 1.0
+                else:
+                    self._beta[band] += 1.0
 
         # Step 2: Draw samples from posterior distributions
         # theta_hat_i ~ Beta(alpha_i, beta_i)
@@ -175,17 +176,9 @@ class ThompsonSamplingScheduler(BaseLearningScheduler):
         if self._staleness_weight > 0.0:
             scores = scores + self._staleness_weight * self._stats.staleness
 
-        # Select arm with maximum score, breaking ties uniformly at random
-        max_score = np.max(scores)
-        best_candidates = np.flatnonzero(
-            np.isclose(scores, max_score, rtol=1e-12, atol=1e-12)
-        )
-        if len(best_candidates) == 1:
-            chosen_band = int(best_candidates[0])
-        else:
-            chosen_band = int(self._rng.choice(best_candidates))
-
-        return ScanAction(band=chosen_band)
+        # Select the k highest-scoring distinct arms
+        bands = self._select_top_k(scores, self._k)
+        return ScanAction(bands=bands)
 
 
 # Convenient alias
@@ -247,13 +240,14 @@ class DiscountedThompsonScheduler(ThompsonSamplingScheduler):
 
         # Update stats and posterior with the observation
         if obs is not None:
-            r = self._compute_reward(obs)
-            self._stats.update(obs, reward=r)
+            rewards = self._compute_rewards(obs)
+            self._stats.update(obs, rewards=rewards)
 
-            if obs.detection:
-                self._alpha[obs.band] += 1.0
-            else:
-                self._beta[obs.band] += 1.0
+            for band, det in zip(obs.bands, obs.detections):
+                if det:
+                    self._alpha[band] += 1.0
+                else:
+                    self._beta[band] += 1.0
 
         # Sample and select (same logic as parent)
         sampled_thetas = self._rng.beta(self._alpha, self._beta)
@@ -286,13 +280,5 @@ class DiscountedThompsonScheduler(ThompsonSamplingScheduler):
         if self._staleness_weight > 0.0:
             scores = scores + self._staleness_weight * self._stats.staleness
 
-        max_score = np.max(scores)
-        best_candidates = np.flatnonzero(
-            np.isclose(scores, max_score, rtol=1e-12, atol=1e-12)
-        )
-        if len(best_candidates) == 1:
-            chosen_band = int(best_candidates[0])
-        else:
-            chosen_band = int(self._rng.choice(best_candidates))
-
-        return ScanAction(band=chosen_band)
+        bands = self._select_top_k(scores, self._k)
+        return ScanAction(bands=bands)
