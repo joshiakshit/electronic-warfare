@@ -127,15 +127,20 @@ class InterceptionMetrics:
 # ---------------------------------------------------------------------------
 
 def _scanned_hits(log: EpisodeLog) -> NDArray[np.bool_]:
-    """Compute boolean array indicating whether each slot was a successful hit.
+    """Compute a (n_slots, k) boolean array of per-channel hits.
 
-    A hit requires that:
-    1. The scanned band was transmitting in truth at slot t: ``truth[actions[t], t] == True``.
-    2. The detector registered a detection at slot t: ``detections[t] == True``.
+    Entry (t, j) is a hit when:
+    1. The scanned band was transmitting: ``truth[actions[t, j], t] == True``.
+    2. The detector registered a detection: ``detections[t, j] == True``.
     """
     if log.n_slots == 0:
-        return np.empty(0, dtype=np.bool_)
-    scanned_truth = log.truth[log.actions, np.arange(log.n_slots)]
+        return np.empty((0, log.k), dtype=np.bool_)
+    actions = log.actions
+    valid = (actions >= 0) & (actions < log.n_bands)
+    safe = np.where(valid, actions, 0)
+    slots = np.arange(log.n_slots)[:, None]
+    scanned_truth = log.truth[safe, slots]
+    scanned_truth[~valid] = False
     return log.detections & scanned_truth
 
 
@@ -251,7 +256,7 @@ def estimate_per_emitter_interception(
             continue
 
         scanned_this_band = log.actions == band
-        emitter_hits = hits & scanned_this_band
+        emitter_hits = (hits & scanned_this_band).any(axis=1)
         n_hits = int(np.count_nonzero(emitter_hits))
 
         results.append(

@@ -184,10 +184,15 @@ def extract_bursts(truth_row: NDArray[np.bool_]) -> list[tuple[int, int]]:
 
 
 def _compute_scanned_hits(log: EpisodeLog) -> NDArray[np.bool_]:
-    """Compute boolean mask of hits (true detections on transmitting bands)."""
+    """Compute a (n_slots, k) mask of per-channel hits."""
     if log.n_slots == 0:
-        return np.empty(0, dtype=np.bool_)
-    scanned_truth = log.truth[log.actions, np.arange(log.n_slots)]
+        return np.empty((0, log.k), dtype=np.bool_)
+    actions = log.actions
+    valid = (actions >= 0) & (actions < log.n_bands)
+    safe = np.where(valid, actions, 0)
+    slots = np.arange(log.n_slots)[:, None]
+    scanned_truth = log.truth[safe, slots]
+    scanned_truth[~valid] = False
     return log.detections & scanned_truth
 
 
@@ -240,7 +245,7 @@ def estimate_per_emitter_time_error(
         penalized_errors: list[float] = []
 
         scanned_this_band = log.actions == band
-        band_hits = hits & scanned_this_band
+        band_hits = (hits & scanned_this_band).any(axis=1)
 
         for start, end in raw_bursts:
             duration = end - start + 1
