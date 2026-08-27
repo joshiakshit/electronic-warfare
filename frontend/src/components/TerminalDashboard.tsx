@@ -146,8 +146,9 @@ export const TerminalDashboard = ({ scenarios, schedulers, winSize, setWinSize, 
       const row = [];
       for (let s = startSlot; s < endSlot; s++) {
         const tx = activeLog.truth[b][s];
-        const scanned = activeLog.actions[s] === b;
-        const det = activeLog.detections[s];
+        const chan = activeLog.actions[s].indexOf(b);
+        const scanned = chan !== -1;
+        const det = scanned ? activeLog.detections[s][chan] : false;
 
         let bgColor = "bg-transparent";
         let dot = null;
@@ -213,38 +214,41 @@ export const TerminalDashboard = ({ scenarios, schedulers, winSize, setWinSize, 
     const startLogSlot = Math.max(0, currentSlot - 50);
 
     for (let s = startLogSlot; s <= currentSlot; s++) {
-      const b = activeLog.actions[s];
-      if (b === undefined) continue;
+      const bandsAtSlot = activeLog.actions[s];
+      if (bandsAtSlot === undefined) continue;
 
-      const tx = activeLog.truth[b][s];
-      const det = activeLog.detections[s];
+      for (let j = 0; j < bandsAtSlot.length; j++) {
+        const b = bandsAtSlot[j];
+        const tx = activeLog.truth[b][s];
+        const det = activeLog.detections[s][j];
 
-      let msg = "";
-      let colorClass = "";
+        let msg = "";
+        let colorClass = "";
 
-      if (tx && det) {
-        msg = `HIT: Intercepted`;
-        colorClass = "text-ew-accent";
-      } else if (!tx && det) {
-        msg = `FALSE ALARM: Ghost`;
-        colorClass = "text-[#f59e0b]";
-      } else if (tx && !det) {
-        msg = `MISSED: Lost`;
-        colorClass = "text-[#ef4444]";
-      } else {
-        msg = `IDLE: Clear`;
-        colorClass = "text-ew-text-dim";
-      }
+        if (tx && det) {
+          msg = `HIT: Intercepted`;
+          colorClass = "text-ew-accent";
+        } else if (!tx && det) {
+          msg = `FALSE ALARM: Ghost`;
+          colorClass = "text-[#f59e0b]";
+        } else if (tx && !det) {
+          msg = `MISSED: Lost`;
+          colorClass = "text-[#ef4444]";
+        } else {
+          msg = `IDLE: Clear`;
+          colorClass = "text-ew-text-dim";
+        }
 
-      logs.push(
-        <div key={`log-${s}`} className="flex flex-col mb-1.5 pb-1.5 border-b border-ew-border-subtle last:border-0 leading-tight">
-          <div className="flex items-start gap-2">
-            <span className="text-ew-text-dimmer shrink-0 opacity-70">[{String(s).padStart(4, '0')}]</span>
-            <span className="text-ew-text-muted shrink-0">[B-{b}]</span>
-            <span className={`${colorClass} truncate font-semibold`}>{msg}</span>
+        logs.push(
+          <div key={`log-${s}-${j}`} className="flex flex-col mb-1.5 pb-1.5 border-b border-ew-border-subtle last:border-0 leading-tight">
+            <div className="flex items-start gap-2">
+              <span className="text-ew-text-dimmer shrink-0 opacity-70">[{String(s).padStart(4, '0')}]</span>
+              <span className="text-ew-text-muted shrink-0">[B-{b}]</span>
+              <span className={`${colorClass} truncate font-semibold`}>{msg}</span>
+            </div>
           </div>
-        </div>
-      );
+        );
+      }
     }
     return logs;
   };
@@ -281,7 +285,7 @@ export const TerminalDashboard = ({ scenarios, schedulers, winSize, setWinSize, 
         <div className="flex gap-10 items-end pb-1">
           <div className="flex flex-col">
             <span className="text-[10px] text-ew-text-dim uppercase tracking-wider font-semibold">Active Band</span>
-            <span className="text-lg font-light text-ew-accent font-mono">B-{activeLog.actions[currentSlot] ?? 0}</span>
+            <span className="text-lg font-light text-ew-accent font-mono">B-{(activeLog.actions[currentSlot] ?? [0]).join(", B-")}</span>
           </div>
           <div className="flex flex-col">
             <span className="text-[10px] text-ew-text-dim uppercase tracking-wider font-semibold">Intercept Ratio</span>
