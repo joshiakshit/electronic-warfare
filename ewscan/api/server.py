@@ -29,6 +29,7 @@ class SimulationRequest(BaseModel):
     scenario_name: str
     scheduler_name: str
     seed: int = 42
+    k: int = 1
 
 def _result_from_log(log: EpisodeLog, scheduler_name: str, seed: int) -> EpisodeResult:
     detection = estimate_detection_metrics(log)
@@ -102,7 +103,7 @@ def simulate(req: SimulationRequest):
             rr_res = active_res
             oracle_res = active_res
         else:
-            config = get_scenario(req.scenario_name, seed=req.seed)
+            config = get_scenario(req.scenario_name, seed=req.seed, k=req.k)
             active_sched = _build_scheduler_by_name(req.scheduler_name, config)
             active_res = run_episode(config, active_sched, seed=req.seed)
             

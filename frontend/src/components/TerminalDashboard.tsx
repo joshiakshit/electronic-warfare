@@ -15,6 +15,7 @@ export const TerminalDashboard = ({ scenarios, schedulers, winSize, setWinSize, 
   const [scenario, setScenario] = useState("synthetic_log");
   const [scheduler, setScheduler] = useState("ucb1");
   const [seed, setSeed] = useState(42);
+  const [k, setK] = useState(1);
 
   const [simulationData, setSimulationData] = useState<any>(null);
   const [currentSlot, setCurrentSlot] = useState(0);
@@ -38,7 +39,7 @@ export const TerminalDashboard = ({ scenarios, schedulers, winSize, setWinSize, 
         const res = await fetch(`${apiBase}/api/simulate`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ scenario_name: scenario, scheduler_name: scheduler, seed }),
+          body: JSON.stringify({ scenario_name: scenario, scheduler_name: scheduler, seed, k }),
           signal: controller.signal
         });
         const data = await res.json();
@@ -58,7 +59,7 @@ export const TerminalDashboard = ({ scenarios, schedulers, winSize, setWinSize, 
     };
     fetchSim();
     return () => controller.abort();
-  }, [scenario, scheduler, seed]);
+  }, [scenario, scheduler, seed, k]);
 
   useEffect(() => {
     if (isPlaying && simulationData) {
@@ -452,6 +453,17 @@ export const TerminalDashboard = ({ scenarios, schedulers, winSize, setWinSize, 
               type="number"
               value={seed}
               onChange={e => setSeed(Number(e.target.value))}
+              className="w-full bg-ew-bg border border-ew-border rounded-md text-[11px] font-semibold text-ew-text px-3 py-2 outline-none hover:border-ew-accent transition-colors"
+            />
+          </div>
+
+          <div className="flex flex-col gap-1 w-20">
+            <label className="text-[10px] uppercase text-ew-text-dim font-semibold tracking-wider">Channels</label>
+            <input
+              type="number"
+              min={1}
+              value={k}
+              onChange={e => setK(Math.max(1, Number(e.target.value)))}
               className="w-full bg-ew-bg border border-ew-border rounded-md text-[11px] font-semibold text-ew-text px-3 py-2 outline-none hover:border-ew-accent transition-colors"
             />
           </div>
