@@ -32,6 +32,7 @@ class BaseLearningScheduler(Scheduler):
 
         self._stats: BandStatistics | None = None
         self._n_bands: int | None = None
+        self._k: int | None = None
         self._threat_map: NDArray[np.float64] | None = None
         self._rng: np.random.Generator | None = None
 
@@ -48,6 +49,7 @@ class BaseLearningScheduler(Scheduler):
             raise ValueError(f"n_bands must be positive, got {config.n_bands}")
 
         self._n_bands = config.n_bands
+        self._k = config.k
         self._stats = BandStatistics(config.n_bands)
 
         # Build threat map
@@ -68,22 +70,64 @@ class BaseLearningScheduler(Scheduler):
         else:
             self._rng = make_generators(config.seed)["scheduler"]
 
-    def _compute_reward(self, obs: Observation) -> float:
-        """Compute reward for an observation based on configuration."""
+    def _compute_rewards(self, obs: Observation) -> list[float]:
+        """Compute per-band rewards for a parallel observation.
+
+        Returns one reward per band in ``obs.bands``, in order. Staleness is
+        read before any statistics update, so all k bands see the same slot age.
+        """
         assert self._threat_map is not None
         assert self._stats is not None
         assert self._n_bands is not None
 
-        if self._reward_fn is not None:
-            staleness = self._stats.get_staleness(obs.band)
-            threat = float(self._threat_map[obs.band])
-            return self._reward_fn.compute(
-                detection=obs.detection,
-                threat_level=threat,
-                staleness=staleness,
-                n_bands=self._n_bands,
-            )
-        elif self._use_threat_weighting:
-            return float(obs.detection) * float(self._threat_map[obs.band])
-        else:
-            return float(obs.detection)
+        rewards: list[float] = []
+        for band, detection in zip(obs.bands, obs.detections):
+            if self._reward_fn is not None:
+                staleness = self._stats.get_staleness(band)
+                threat = float(self._threat_map[band])
+                rewards.append(
+                    self._reward_fn.compute(
+                        detection=detection,
+                        threat_level=threat,
+                        staleness=staleness,
+                        n_bands=self._n_bands,
+                    )
+                )
+            elif self._use_threat_weighting:
+                rewards.append(float(detection) * float(self._threat_map[band]))
+            else:
+                rewards.append(float(detection))
+        return rewards
+
+    def _select_top_k(
+        self,
+        values: NDArray[np.float64],
+        k: int,
+        unvisited: NDArray[np.int64] | None = None,
+    ) -> tuple[int, ...]:
+        """Pick k distinct band indices.
+
+        Fills from ``unvisited`` (ascending index) first, then by descending
+        value with uniform random tie-breaking. For k=1 with no unvisited this
+        reproduces the single-arm argmax-with-random-tie-break behaviour.
+        """
+        assert self._rng is not None
+        chosen: list[int] = []
+        if unvisited is not None:
+            for b in unvisited:
+                if len(chosen) >= k:
+                    break
+                chosen.append(int(b))
+        if len(chosen) >= k:
+            return tuple(chosen)
+
+        vals = np.array(values, dtype=np.float64, copy=True)
+        for b in chosen:
+            vals[b] = -np.inf
+        while len(chosen) < k:
+            max_val = np.max(vals)
+            best = np.flatnonzero(np.isclose(vals, max_val, rtol=1e-12, atol=1e-12))
+            pick = int(best[0]) if len(best) == 1 else int(self._rng.choice(best))
+            chosen.append(pick)
+            vals[pick] = -np.inf
+        return tuple(chosen)

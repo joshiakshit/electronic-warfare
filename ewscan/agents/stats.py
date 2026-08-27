@@ -6,6 +6,8 @@ and per-band staleness / slot-age tracking for learning schedulers.
 
 from __future__ import annotations
 
+from typing import Sequence
+
 import numpy as np
 from numpy.typing import NDArray
 
@@ -68,15 +70,17 @@ class BandStatistics:
         if self._n_bands is None or self._counts is None or self._staleness is None:
             raise RuntimeError("BandStatistics must be reset before use")
 
-    def update(self, obs: Observation, reward: float | None = None) -> None:
-        """Update statistics with a new scan observation.
+    def update(
+        self, obs: Observation, rewards: "Sequence[float] | None" = None
+    ) -> None:
+        """Update statistics with a new parallel scan observation.
 
         Parameters
         ----------
         obs : Observation
-            The observation returned by the environment.
-        reward : float | None, optional
-            Optional reward signal obtained from this scan slot.
+            The observation returned by the environment (k bands, k detections).
+        rewards : Sequence[float] | None, optional
+            Optional per-band reward signals, aligned with ``obs.bands``.
         """
         self._check_initialized()
         assert self._counts is not None
@@ -86,29 +90,28 @@ class BandStatistics:
         assert self._last_scanned is not None
         assert self._n_bands is not None
 
-        band = obs.band
-        if not (0 <= band < self._n_bands):
-            raise IndexError(
-                f"Band index {band} out of range for n_bands={self._n_bands}"
-            )
+        bands = obs.bands
+        for band in bands:
+            if not (0 <= band < self._n_bands):
+                raise IndexError(
+                    f"Band index {band} out of range for n_bands={self._n_bands}"
+                )
 
-        # Update visit count and hit count
-        self._counts[band] += 1
-        if obs.detection:
-            self._hits[band] += 1
+        # Update per-band visit, hit, reward, and last-scanned
+        for i, band in enumerate(bands):
+            self._counts[band] += 1
+            if obs.detections[i]:
+                self._hits[band] += 1
+            if rewards is not None:
+                self._total_rewards[band] += float(rewards[i])
+            self._last_scanned[band] = obs.slot
 
-        # Update total rewards if reward is provided
-        if reward is not None:
-            self._total_rewards[band] += float(reward)
-
-        # Update slot age / staleness:
-        # All bands age by 1 slot, and the scanned band resets to 0
+        # All bands age by one slot; the k scanned bands reset to 0
         self._staleness += 1
-        self._staleness[band] = 0
+        for band in bands:
+            self._staleness[band] = 0
 
-        # Update last scanned slot
-        self._last_scanned[band] = obs.slot
-        self._total_pulls += 1
+        self._total_pulls += len(bands)
 
     @property
     def n_bands(self) -> int:

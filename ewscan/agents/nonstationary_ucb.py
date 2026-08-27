@@ -59,32 +59,30 @@ class DUCB1Scheduler(BaseLearningScheduler):
             raise RuntimeError("Scheduler must be reset before calling act()")
 
         if obs is not None:
-            r = self._compute_reward(obs)
-            self._stats.update(obs, reward=r)
+            rewards = self._compute_rewards(obs)
+            self._stats.update(obs, rewards=rewards)
 
             self._d_counts *= self._gamma
             self._d_vals *= self._gamma
             self._d_total_pulls *= self._gamma
 
-            self._d_counts[obs.band] += 1.0
-            self._d_vals[obs.band] += r
-            self._d_total_pulls += 1.0
-
-        unvisited = self._stats.unvisited_bands
-        if len(unvisited) > 0:
-            return ScanAction(band=int(unvisited[0]))
+            for band, r in zip(obs.bands, rewards):
+                self._d_counts[band] += 1.0
+                self._d_vals[band] += r
+                self._d_total_pulls += 1.0
 
         means = self._d_vals / np.maximum(self._d_counts, 1e-12)
-        bonus = self._c * np.sqrt(2.0 * np.log(self._d_total_pulls) / np.maximum(self._d_counts, 1e-12))
+        with np.errstate(divide="ignore", invalid="ignore"):
+            bonus = self._c * np.sqrt(
+                2.0 * np.log(self._d_total_pulls) / np.maximum(self._d_counts, 1e-12)
+            )
         ucb_values = means + bonus
         if self._staleness_weight > 0.0:
             ucb_values += self._staleness_weight * self._stats.staleness
 
-        max_val = np.max(ucb_values)
-        best = np.flatnonzero(np.isclose(ucb_values, max_val, rtol=1e-12, atol=1e-12))
-        if len(best) == 1:
-            return ScanAction(band=int(best[0]))
-        return ScanAction(band=int(self._rng.choice(best)))
+        unvisited = self._stats.unvisited_bands
+        bands = self._select_top_k(ucb_values, self._k, unvisited=unvisited)
+        return ScanAction(bands=bands)
 
 
 class SWUCB1Scheduler(BaseLearningScheduler):
@@ -142,39 +140,36 @@ class SWUCB1Scheduler(BaseLearningScheduler):
             raise RuntimeError("Scheduler must be reset before calling act()")
 
         if obs is not None:
-            r = self._compute_reward(obs)
-            self._stats.update(obs, reward=r)
+            rewards = self._compute_rewards(obs)
+            self._stats.update(obs, rewards=rewards)
 
-            if self._steps_recorded >= self._window_size:
-                old_band = int(self._history_band[self._ptr])
-                old_val = float(self._history_val[self._ptr])
-                self._w_counts[old_band] -= 1
-                self._w_vals[old_band] -= old_val
+            for band, r in zip(obs.bands, rewards):
+                if self._steps_recorded >= self._window_size:
+                    old_band = int(self._history_band[self._ptr])
+                    old_val = float(self._history_val[self._ptr])
+                    self._w_counts[old_band] -= 1
+                    self._w_vals[old_band] -= old_val
 
-            self._history_band[self._ptr] = obs.band
-            self._history_val[self._ptr] = r
-            self._w_counts[obs.band] += 1
-            self._w_vals[obs.band] += r
-            self._ptr = (self._ptr + 1) % self._window_size
-            self._steps_recorded += 1
+                self._history_band[self._ptr] = band
+                self._history_val[self._ptr] = r
+                self._w_counts[band] += 1
+                self._w_vals[band] += r
+                self._ptr = (self._ptr + 1) % self._window_size
+                self._steps_recorded += 1
 
         # Use global stats for initial exploration (not window counts) to avoid
         # deadlocking into round-robin when window_size < n_bands
         unvisited = self._stats.unvisited_bands
-        if len(unvisited) > 0:
-            return ScanAction(band=int(unvisited[0]))
 
         t = min(self._steps_recorded, self._window_size)
         # Clip counts to avoid negative drift from floating-point subtraction
         safe_counts = np.maximum(self._w_counts, 1)
         means = self._w_vals / safe_counts
-        bonus = self._c * np.sqrt(2.0 * np.log(t) / safe_counts)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            bonus = self._c * np.sqrt(2.0 * np.log(t) / safe_counts)
         ucb_values = means + bonus
         if self._staleness_weight > 0.0:
             ucb_values += self._staleness_weight * self._stats.staleness
 
-        max_val = np.max(ucb_values)
-        best = np.flatnonzero(np.isclose(ucb_values, max_val, rtol=1e-12, atol=1e-12))
-        if len(best) == 1:
-            return ScanAction(band=int(best[0]))
-        return ScanAction(band=int(self._rng.choice(best)))
+        bands = self._select_top_k(ucb_values, self._k, unvisited=unvisited)
+        return ScanAction(bands=bands)

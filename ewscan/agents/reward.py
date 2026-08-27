@@ -71,6 +71,7 @@ class RewardFunction:
         """
         n_bands = log.n_bands
         n_slots = log.n_slots
+        k = log.config.k
         cd = self.cooldown if self.cooldown is not None else n_bands
 
         threat_map = np.full(n_bands, self.baseline_threat, dtype=np.float64)
@@ -82,18 +83,25 @@ class RewardFunction:
         rewards = np.empty(n_slots, dtype=np.float64)
 
         for t in range(n_slots):
-            band = int(log.actions[t])
-            det = float(log.detections[t])
-            s = int(staleness[band])
-
-            r_hit = self.w_threat * threat_map[band] * det
-            r_miss = -self.c_miss * (1.0 - det)
-            r_novelty = self.w_novelty * min(s / n_bands, 1.0)
-            r_decay = -self.w_decay * max(0.0, 1.0 - s / cd) if cd > 0 else 0.0
-
-            rewards[t] = r_hit + r_miss + r_novelty + r_decay
+            bands_t = log.actions[t]
+            dets_t = log.detections[t]
+            r = 0.0
+            for j in range(k):
+                band = int(bands_t[j])
+                if band < 0 or band >= n_bands:
+                    continue
+                det = float(dets_t[j])
+                s = int(staleness[band])
+                r += self.w_threat * threat_map[band] * det
+                r += -self.c_miss * (1.0 - det)
+                r += self.w_novelty * min(s / n_bands, 1.0)
+                r += -self.w_decay * max(0.0, 1.0 - s / cd) if cd > 0 else 0.0
+            rewards[t] = r
 
             staleness += 1
-            staleness[band] = 0
+            for j in range(k):
+                band = int(bands_t[j])
+                if 0 <= band < n_bands:
+                    staleness[band] = 0
 
         return rewards
