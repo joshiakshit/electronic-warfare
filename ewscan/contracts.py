@@ -21,18 +21,32 @@ class Band:
 
 @dataclass(frozen=True)
 class Observation:
-    """Sensor feedback from one scan step, delivered to the scheduler."""
+    """Sensor feedback from one scan step, delivered to the scheduler.
+
+    Parallel receiver: ``bands[i]`` is the tuned sub-band and ``detections[i]``
+    its detection result. The two tuples share the same order and length k.
+    """
 
     slot: int
-    band: int
-    detection: bool
+    bands: tuple[int, ...]
+    detections: tuple[bool, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "bands", tuple(int(b) for b in self.bands))
+        object.__setattr__(self, "detections", tuple(bool(d) for d in self.detections))
 
 
 @dataclass(frozen=True)
 class ScanAction:
-    """Scheduler's choice: which band to scan next."""
+    """Scheduler's choice: the k distinct bands to scan in parallel next slot."""
 
-    band: int
+    bands: tuple[int, ...]
+
+    def __post_init__(self) -> None:
+        bands = tuple(int(b) for b in self.bands)
+        object.__setattr__(self, "bands", bands)
+        if len(set(bands)) != len(bands):
+            raise ValueError(f"Duplicate bands in ScanAction: {bands}")
 
 
 @dataclass(frozen=True)
@@ -63,11 +77,9 @@ class EpisodeConfig:
     seed: int = 0
 
     def __post_init__(self) -> None:
-        if self.k != 1:
+        if not (1 <= self.k <= self.n_bands):
             raise ValueError(
-                f"Only k=1 (single-band scanning) is currently supported, got k={self.k}. "
-                "Multi-band scanning (k>1) requires redesigning ScanAction, "
-                "Observation, and EpisodeRecorder."
+                f"k must satisfy 1 <= k <= n_bands, got k={self.k}, n_bands={self.n_bands}"
             )
 
 
@@ -81,6 +93,27 @@ class EpisodeLog:
     actions: NDArray[np.intp]
     detections: NDArray[np.bool_]
 
+    def __post_init__(self) -> None:
+        ns, nb, k = self.config.n_slots, self.config.n_bands, self.config.k
+        # For k=1, accept a 1D (n_slots,) array and store it as (n_slots, 1) so
+        # downstream code always sees the 2D shape.
+        if k == 1 and self.actions.ndim == 1:
+            self.actions = self.actions.reshape(ns, 1)
+        if k == 1 and self.detections.ndim == 1:
+            self.detections = self.detections.reshape(ns, 1)
+        if self.truth.shape != (nb, ns):
+            raise ValueError(
+                f"truth shape {self.truth.shape} does not match (n_bands, n_slots) ({nb}, {ns})"
+            )
+        if self.actions.shape != (ns, k):
+            raise ValueError(
+                f"actions shape {self.actions.shape} does not match (n_slots, k) ({ns}, {k})"
+            )
+        if self.detections.shape != (ns, k):
+            raise ValueError(
+                f"detections shape {self.detections.shape} does not match (n_slots, k) ({ns}, {k})"
+            )
+
     @property
     def n_bands(self) -> int:
         return self.config.n_bands
@@ -88,6 +121,10 @@ class EpisodeLog:
     @property
     def n_slots(self) -> int:
         return self.config.n_slots
+
+    @property
+    def k(self) -> int:
+        return self.config.k
 
 
 class Emitter(ABC):
