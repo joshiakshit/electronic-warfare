@@ -36,7 +36,7 @@ from ewscan.agents.reward import RewardFunction
 from ewscan.agents.thompson import ThompsonSamplingScheduler
 from ewscan.agents.ucb import UCB1Scheduler
 from ewscan.config import load_config
-from ewscan.contracts import EpisodeConfig, Scheduler
+from ewscan.contracts import EpisodeConfig, Scheduler, ThreatPrior
 from ewscan.experiments.runner import EpisodeResult, run_episode
 from ewscan.metrics.aggregation import (
     AggregateMetrics,
@@ -62,6 +62,7 @@ DEFAULT_SCHEDULER_NAMES: list[str] = [
 SWEEP_CSV_COLUMNS: list[str] = [
     "scenario",
     "scheduler",
+    "track",
     "seed",
     "n_bands",
     "n_slots",
@@ -144,6 +145,23 @@ def _build_scheduler_by_name(name: str, config: EpisodeConfig | None = None) -> 
         raise ValueError(
             f"Unknown scheduler name '{name}'. Available: {', '.join(DEFAULT_SCHEDULER_NAMES)}, stub"
         )
+
+
+# Schedulers that consume an explicit external threat prior belong to the
+# prior-aided benchmark track, kept separate from blind results.
+PRIOR_AIDED_SCHEDULERS: frozenset[str] = frozenset({"prior_weighted", "prior"})
+
+
+def _threat_prior_for(name: str, config: EpisodeConfig | None) -> ThreatPrior | None:
+    """Build an explicit ThreatPrior for a prior-aided scheduler, else None."""
+    name_clean = name.strip().lower().replace("-", "_")
+    if name_clean not in PRIOR_AIDED_SCHEDULERS or config is None:
+        return None
+    weights = np.full(config.n_bands, 0.1, dtype=np.float64)
+    for em in config.emitters:
+        if 0 <= em.band < config.n_bands:
+            weights[em.band] = max(weights[em.band], float(em.threat_level))
+    return ThreatPrior(weights=tuple(weights.tolist()), provenance="sweep:emitter_threat")
 
 
 def _clone_scheduler(sched: Scheduler) -> Scheduler:
@@ -571,6 +589,7 @@ class SweepRunner:
             for sched_name, sched_factory in resolved_schedulers:
                 scenario_sched_results: list[EpisodeResult] = []
 
+                threat_prior = _threat_prior_for(sched_name, config)
                 for seed in seeds_list:
                     scheduler_instance = sched_factory()
                     ep_res = run_episode(
@@ -580,6 +599,7 @@ class SweepRunner:
                         rf=self.rf,
                         miss_penalty=self.miss_penalty,
                         pd_threshold=self.pd_threshold,
+                        threat_prior=threat_prior,
                     )
 
                     episode_results.append(ep_res)

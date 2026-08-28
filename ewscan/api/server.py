@@ -43,6 +43,7 @@ def _result_from_log(log: EpisodeLog, scheduler_name: str, seed: int) -> Episode
         scheduler_name=scheduler_name,
         seed=seed,
         log=log,
+        track="oracle" if scheduler_name == "oracle" else "blind",
         detection=detection,
         interception=interception,
         first_intercept=first_intercept,

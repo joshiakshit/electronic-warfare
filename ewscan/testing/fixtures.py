@@ -23,6 +23,8 @@ from ewscan.contracts import (
     Observation,
     ScanAction,
     Scheduler,
+    ThreatPrior,
+    scheduler_config_from_episode,
 )
 
 
@@ -195,7 +197,12 @@ class ScriptedEnv:
     (no noise). Used to test the runner and metrics without real emitters.
     """
 
-    def __init__(self, config: EpisodeConfig, truth: NDArray[np.bool_]):
+    def __init__(
+        self,
+        config: EpisodeConfig,
+        truth: NDArray[np.bool_],
+        threat_prior: ThreatPrior | None = None,
+    ):
         if truth.shape != (config.n_bands, config.n_slots):
             raise ValueError(
                 f"Truth shape {truth.shape} does not match config "
@@ -203,6 +210,7 @@ class ScriptedEnv:
             )
         self.config = config
         self.truth = truth
+        self._threat_prior = threat_prior
         self._slot = 0
 
     def reset(self) -> None:
@@ -228,7 +236,12 @@ class ScriptedEnv:
     def run(self, scheduler: Scheduler) -> EpisodeLog:
         """Run a full episode with the given scheduler and return the log."""
         self.reset()
-        scheduler.reset(self.config)
+        if self._threat_prior is not None:
+            scheduler.reset(
+                scheduler_config_from_episode(self.config, threat_prior=self._threat_prior)
+            )
+        else:
+            scheduler.reset(self.config)
 
         actions = np.zeros((self.config.n_slots, self.config.k), dtype=np.intp)
         detections = np.zeros((self.config.n_slots, self.config.k), dtype=np.bool_)

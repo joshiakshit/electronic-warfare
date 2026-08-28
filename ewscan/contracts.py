@@ -106,6 +106,119 @@ class EpisodeConfig:
         object.__setattr__(self, "detector_capability", capability)
 
 
+@dataclass(frozen=True)
+class ThreatPrior:
+    """External, possibly noisy band-threat prior for prior-aided runs.
+
+    ``weights[b]`` is the prior threat weight for band b. ``provenance`` records
+    where the prior came from so blind and prior-aided results stay separable.
+    """
+
+    weights: tuple[float, ...]
+    provenance: str
+
+    def __post_init__(self) -> None:
+        weights = tuple(float(w) for w in self.weights)
+        object.__setattr__(self, "weights", weights)
+        if len(weights) == 0:
+            raise ValueError("ThreatPrior weights must be non-empty")
+        for w in weights:
+            if not math.isfinite(w) or w < 0.0:
+                raise ValueError(
+                    f"ThreatPrior weights must be finite and non-negative, got {w}"
+                )
+        if not isinstance(self.provenance, str) or not self.provenance.strip():
+            raise ValueError("ThreatPrior requires a non-empty provenance string")
+
+
+@dataclass(frozen=True)
+class SchedulerConfig:
+    """Scheduler-visible configuration. Carries no emitter tuple or truth.
+
+    This is the only configuration a blind scheduler receives. It exposes what
+    a real operator would know: dimensions, detector capability, and an optional
+    external ThreatPrior. Emitter bands, types, SNRs, threat levels, and
+    transition parameters are absent by construction.
+    """
+
+    n_bands: int
+    n_slots: int
+    k: int
+    detector_capability: DetectorCapability
+    seed: int = 0
+    dwell: int = 1
+    retune_cost_slots: int = 0
+    threat_prior: ThreatPrior | None = None
+
+    def __post_init__(self) -> None:
+        n_bands = _require_integer("n_bands", self.n_bands, 1)
+        _require_integer("n_slots", self.n_slots, 1)
+        if not isinstance(self.k, Integral) or isinstance(self.k, bool):
+            raise ValueError(f"k must be a positive integer, got {self.k!r}")
+        k = int(self.k)
+        if not 1 <= k <= n_bands:
+            raise ValueError(
+                f"k must satisfy 1 <= k <= n_bands, got k={k}, n_bands={n_bands}"
+            )
+        if not isinstance(self.detector_capability, DetectorCapability):
+            raise ValueError("detector_capability must be a DetectorCapability")
+        if not isinstance(self.seed, Integral) or isinstance(self.seed, bool):
+            raise ValueError(f"seed must be an integer, got {self.seed!r}")
+        _require_integer("retune_cost_slots", self.retune_cost_slots, 0)
+        _require_integer("dwell", self.dwell, 1)
+        if self.threat_prior is not None:
+            if not isinstance(self.threat_prior, ThreatPrior):
+                raise ValueError("threat_prior must be a ThreatPrior or None")
+            if len(self.threat_prior.weights) != n_bands:
+                raise ValueError(
+                    f"threat_prior has {len(self.threat_prior.weights)} weights, "
+                    f"expected n_bands={n_bands}"
+                )
+        object.__setattr__(self, "n_bands", n_bands)
+        object.__setattr__(self, "n_slots", int(self.n_slots))
+        object.__setattr__(self, "k", k)
+        object.__setattr__(self, "seed", int(self.seed))
+        object.__setattr__(self, "dwell", int(self.dwell))
+        object.__setattr__(self, "retune_cost_slots", int(self.retune_cost_slots))
+
+
+def scheduler_config_from_episode(
+    config: EpisodeConfig,
+    threat_prior: ThreatPrior | None = None,
+) -> SchedulerConfig:
+    """Build a blind scheduler-visible config, dropping every emitter secret.
+
+    Supply ``threat_prior`` only for an explicit prior-aided run.
+    """
+    return SchedulerConfig(
+        n_bands=config.n_bands,
+        n_slots=config.n_slots,
+        k=config.k,
+        detector_capability=config.detector_capability,
+        seed=config.seed,
+        dwell=config.dwell,
+        retune_cost_slots=config.retune_cost_slots,
+        threat_prior=threat_prior,
+    )
+
+
+def as_scheduler_config(
+    config: "SchedulerConfig | EpisodeConfig",
+) -> SchedulerConfig:
+    """Return a SchedulerConfig, deriving a blind view from an EpisodeConfig.
+
+    An EpisodeConfig is converted to the blind scheduler view so legacy callers
+    that still pass one cannot leak emitter data into a scheduler.
+    """
+    if isinstance(config, SchedulerConfig):
+        return config
+    if isinstance(config, EpisodeConfig):
+        return scheduler_config_from_episode(config)
+    raise TypeError(
+        f"Expected SchedulerConfig or EpisodeConfig, got {type(config).__name__}"
+    )
+
+
 def _require_integer(name: str, value: Any, minimum: int) -> int:
     if not isinstance(value, Integral) or isinstance(value, bool) or value < minimum:
         qualifier = "positive" if minimum == 1 else "non-negative"

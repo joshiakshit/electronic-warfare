@@ -13,7 +13,14 @@ from ewscan.agents.baselines import RoundRobinScheduler, UniformRandomScheduler
 from ewscan.agents.reward import RewardFunction
 from ewscan.agents.stats import BandStatistics
 from ewscan.agents.ucb import UCB1Scheduler
-from ewscan.contracts import EmitterInfo, Observation, ScanAction, Scheduler
+from ewscan.contracts import (
+    EmitterInfo,
+    Observation,
+    ScanAction,
+    Scheduler,
+    ThreatPrior,
+    scheduler_config_from_episode,
+)
 from ewscan.env.environment import RFEnvironment
 from ewscan.testing.fixtures import ScriptedEnv, make_test_config
 
@@ -139,8 +146,9 @@ class TestUCB1WithRewardFunction:
             EmitterInfo(band=1, snr=20.0, threat_level=0.1, emitter_type="cw"),
         )
         config = make_test_config(n_bands=2, n_slots=10, emitters=emitters)
+        prior = ThreatPrior(weights=(1.0, 0.1), provenance="test-intel")
         scheduler = UCB1Scheduler(reward_fn=rf)
-        scheduler.reset(config)
+        scheduler.reset(scheduler_config_from_episode(config, threat_prior=prior))
 
         # Initial sweep
         scheduler.act(None)  # 0

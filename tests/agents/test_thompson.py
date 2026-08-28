@@ -16,7 +16,7 @@ from ewscan.agents.thompson import (
     BetaThompsonSamplingScheduler,
     ThompsonSamplingScheduler,
 )
-from ewscan.contracts import EmitterInfo, Observation, ScanAction, Scheduler
+from ewscan.contracts import EmitterInfo, Observation, ScanAction, Scheduler, ThreatPrior
 from ewscan.env.environment import RFEnvironment
 from ewscan.experiments.runner import _build_scheduler_by_name, run_episode
 from ewscan.testing.fixtures import ScriptedEnv, make_test_config
@@ -256,7 +256,8 @@ class TestThompsonSamplingThreatWeightingAndReward:
             rng.random(1000) < 0.3,
         ])
 
-        env = ScriptedEnv(config, truth)
+        prior = ThreatPrior(weights=(0.1, 1.0), provenance="test-intel")
+        env = ScriptedEnv(config, truth, threat_prior=prior)
         scheduler = ThompsonSamplingScheduler(use_threat_weighting=True, seed=42)
         log = env.run(scheduler)
 
@@ -278,7 +279,8 @@ class TestThompsonSamplingThreatWeightingAndReward:
             rng.random(500) < 0.7,
         ])
 
-        env = ScriptedEnv(config, truth)
+        prior = ThreatPrior(weights=(1.0, 0.2), provenance="test-intel")
+        env = ScriptedEnv(config, truth, threat_prior=prior)
         scheduler = ThompsonSamplingScheduler(reward_fn=rf, seed=42)
         log = env.run(scheduler)
 

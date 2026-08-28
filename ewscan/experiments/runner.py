@@ -20,7 +20,15 @@ import numpy as np
 
 from ewscan.agents.reward import RewardFunction
 from ewscan.config import load_config
-from ewscan.contracts import EpisodeConfig, EpisodeLog, Observation, ScanAction, Scheduler
+from ewscan.contracts import (
+    EpisodeConfig,
+    EpisodeLog,
+    Observation,
+    ScanAction,
+    Scheduler,
+    ThreatPrior,
+    scheduler_config_from_episode,
+)
 from ewscan.env.environment import RFEnvironment
 from ewscan.env.recorder import EpisodeRecorder, save_episode_log
 from ewscan.metrics.detection import DetectionMetrics, estimate_detection_metrics
@@ -65,6 +73,7 @@ class EpisodeResult:
     scheduler_name: str
     seed: int
     log: EpisodeLog
+    track: str
     detection: DetectionMetrics
     interception: InterceptionMetrics
     first_intercept: FirstInterceptMetrics
@@ -94,6 +103,7 @@ class EpisodeResult:
 
         return {
             f"{prefix}scheduler": self.scheduler_name,
+            f"{prefix}track": self.track,
             f"{prefix}seed": self.seed,
             f"{prefix}n_bands": self.config.n_bands,
             f"{prefix}n_slots": self.config.n_slots,
@@ -160,6 +170,7 @@ def run_episode(
     miss_penalty: float | None = None,
     pd_threshold: float = 0.5,
     env: RFEnvironment | None = None,
+    threat_prior: ThreatPrior | None = None,
 ) -> EpisodeResult:
     """Execute a single episode with a scheduler and compute all 7 figures of merit.
 
@@ -212,13 +223,17 @@ def run_episode(
 
     truth = environment.truth
 
-    # Inject truth to oracle schedulers (must happen before reset, since
-    # OracleScheduler.reset() validates that truth is already set)
+    # Only the Oracle receives the generated truth matrix and the full config.
+    # Every other scheduler gets the blind scheduler-visible view, optionally
+    # carrying an explicit ThreatPrior for a prior-aided run.
     if hasattr(scheduler, "set_truth"):
         scheduler.set_truth(truth)
-
-    # Reset scheduler (OracleScheduler.reset validates truth shape here)
-    scheduler.reset(ep_config)
+        scheduler.reset(ep_config)
+        track = "oracle"
+    else:
+        sched_config = scheduler_config_from_episode(ep_config, threat_prior=threat_prior)
+        scheduler.reset(sched_config)
+        track = "prior_aided" if threat_prior is not None else "blind"
 
     # Initialize recorder and record ground truth
     recorder = EpisodeRecorder(ep_config)
@@ -255,6 +270,7 @@ def run_episode(
         scheduler_name=scheduler.name,
         seed=effective_seed,
         log=log,
+        track=track,
         detection=detection,
         interception=interception,
         first_intercept=first_intercept,
@@ -294,6 +310,7 @@ class EpisodeRunner:
         scheduler: Scheduler,
         seed: int | None = None,
         env: RFEnvironment | None = None,
+        threat_prior: ThreatPrior | None = None,
     ) -> EpisodeResult:
         """Execute a single episode with the configured evaluation parameters.
 
@@ -321,6 +338,7 @@ class EpisodeRunner:
             miss_penalty=self.miss_penalty,
             pd_threshold=self.pd_threshold,
             env=env,
+            threat_prior=threat_prior,
         )
 
 
