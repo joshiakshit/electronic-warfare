@@ -236,17 +236,34 @@ class RFEnvironment:
         # activity across bands. Fixed emitters return a constant current_band.
         for em in self._emitters:
             em_power_lin = 10.0 ** (em.snr / 10.0)
-            for t in range(self._n_slots):
-                on = em.step()
-                b = em.current_band
-                if not (0 <= b < self._n_bands):
-                    raise ValueError(
-                        f"Emitter reported band {b} at slot {t}, out of range "
-                        f"[0, {self._n_bands - 1}]"
-                    )
-                if on:
-                    self._truth[b, t] = True
-                    power_matrix[b, t] += em_power_lin
+            activity = em.activity(self._n_slots)
+            if activity is None:
+                for t in range(self._n_slots):
+                    on = em.step()
+                    b = em.current_band
+                    if not (0 <= b < self._n_bands):
+                        raise ValueError(
+                            f"Emitter reported band {b} at slot {t}, out of range "
+                            f"[0, {self._n_bands - 1}]"
+                        )
+                    if on:
+                        self._truth[b, t] = True
+                        power_matrix[b, t] += em_power_lin
+                continue
+
+            on_arr, band_arr = activity
+            band_arr = np.asarray(band_arr, dtype=np.intp)
+            out_of_range = (band_arr < 0) | (band_arr >= self._n_bands)
+            if out_of_range.any():
+                t = int(np.argmax(out_of_range))
+                raise ValueError(
+                    f"Emitter reported band {int(band_arr[t])} at slot {t}, out of range "
+                    f"[0, {self._n_bands - 1}]"
+                )
+            on_idx = np.flatnonzero(on_arr)
+            bands_on = band_arr[on_idx]
+            self._truth[bands_on, on_idx] = True
+            np.add.at(power_matrix, (bands_on, on_idx), em_power_lin)
 
         # Compute combined SNR matrix in dB
         with np.errstate(divide="ignore"):

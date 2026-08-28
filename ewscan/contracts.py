@@ -174,6 +174,14 @@ class Emitter(ABC):
         their static band; frequency-agile emitters override this."""
         return self.band
 
+    def activity(
+        self, n_slots: int
+    ) -> tuple[NDArray[np.bool_], NDArray[np.intp]] | None:
+        """Optional vectorized fast path: (on_per_slot, band_per_slot) for the
+        whole episode, or None to fall back to the step() loop. Emitters whose
+        state depends on RNG draws made in sequence must return None."""
+        return None
+
     @property
     @abstractmethod
     def info(self) -> EmitterInfo: ...

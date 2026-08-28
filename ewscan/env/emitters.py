@@ -9,6 +9,7 @@ Provides concrete implementations of the Emitter ABC:
 from __future__ import annotations
 
 import numpy as np
+from numpy.typing import NDArray
 
 from ewscan.contracts import Emitter, EmitterInfo
 
@@ -171,6 +172,19 @@ class PeriodicEmitter(Emitter):
         self._slot += 1
         return is_on
 
+    def activity(
+        self, n_slots: int
+    ) -> tuple[NDArray[np.bool_], NDArray[np.intp]] | None:
+        if self.jitter != 0:
+            return None
+        t = np.arange(n_slots)
+        on = np.zeros(n_slots, dtype=np.bool_)
+        after_phase = t >= self.phase
+        rel = (t[after_phase] - self.phase) % self.period
+        on[after_phase] = rel < self.dwell
+        band = np.full(n_slots, self.band, dtype=np.intp)
+        return on, band
+
     @property
     def info(self) -> EmitterInfo:
         return EmitterInfo(
@@ -211,6 +225,13 @@ class StaticCWEmitter(Emitter):
         if self._rng is None:
             raise RuntimeError("Emitter must be reset() before calling step()")
         return True
+
+    def activity(
+        self, n_slots: int
+    ) -> tuple[NDArray[np.bool_], NDArray[np.intp]] | None:
+        on = np.ones(n_slots, dtype=np.bool_)
+        band = np.full(n_slots, self.band, dtype=np.intp)
+        return on, band
 
     @property
     def info(self) -> EmitterInfo:
@@ -378,6 +399,17 @@ class BeamEmitter(Emitter):
         snr_eff = self.snr_peak * np.exp(-(delta ** 2) / (2.0 * self.beamwidth ** 2))
         self._slot += 1
         return bool(snr_eff >= self.floor)
+
+    def activity(
+        self, n_slots: int
+    ) -> tuple[NDArray[np.bool_], NDArray[np.intp]] | None:
+        two_pi = 2.0 * np.pi
+        t = np.arange(n_slots, dtype=np.float64)
+        delta = (self.theta0 - self.omega * t + np.pi) % two_pi - np.pi
+        snr_eff = self.snr_peak * np.exp(-(delta ** 2) / (2.0 * self.beamwidth ** 2))
+        on = snr_eff >= self.floor
+        band = np.full(n_slots, self.band, dtype=np.intp)
+        return on, band
 
     @property
     def info(self) -> EmitterInfo:
