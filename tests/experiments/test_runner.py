@@ -309,3 +309,10 @@ class TestEpisodeRunner:
 
         exit_code_sched = main(["--config", "configs/mvp.yaml", "--scheduler", "unknown_sched"])
         assert exit_code_sched == 1
+
+
+def test_run_episode_stops_at_hard_deadline():
+    config = make_test_config(n_bands=2, n_slots=10, k=1)
+
+    with pytest.raises(TimeoutError, match="deadline"):
+        run_episode(config, RoundRobinScheduler(), deadline=0.0)

@@ -13,7 +13,7 @@ interface TerminalDashboardProps {
 }
 
 export const TerminalDashboard = ({ scenarios, schedulers, winSize, setWinSize, theme, setTheme }: TerminalDashboardProps) => {
-  const [scenario, setScenario] = useState("synthetic_log");
+  const [scenario, setScenario] = useState("periodic_radar");
   const [scheduler, setScheduler] = useState("ucb1");
   const [seed, setSeed] = useState(42);
   const [k, setK] = useState(1);

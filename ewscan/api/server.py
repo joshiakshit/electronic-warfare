@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import logging
 import threading
 import time
 from typing import Any
@@ -26,6 +27,7 @@ from ewscan.metrics.time_error import estimate_time_error_metrics
 
 MAX_K = 64
 MAX_RUN_SECONDS = 15.0
+logger = logging.getLogger(__name__)
 _run_lock = threading.BoundedSemaphore(value=1)
 _cors_origins = tuple(
     origin.strip()
@@ -156,7 +158,7 @@ def _serialize_result(res: EpisodeResult, *, debug: bool) -> dict[str, Any]:
 
 @app.get("/api/scenarios")
 def get_scenarios() -> dict[str, list[str]]:
-    return {"scenarios": ["synthetic_log", *list_scenarios()]}
+    return {"scenarios": list(list_scenarios())}
 
 
 @app.get("/api/schedulers")
@@ -170,19 +172,22 @@ def simulate(req: SimulationRequest) -> dict[str, Any]:
         raise HTTPException(status_code=429, detail="A simulation is already running")
     try:
         started = time.perf_counter()
+        deadline = started + MAX_RUN_SECONDS
         scheduler = build_scheduler(req.scheduler_name)
-        if req.scenario_name == "synthetic_log":
-            if req.k != 1:
-                raise HTTPException(status_code=422, detail="synthetic_log requires k=1")
-            log = _synthetic_log(req.seed)
-            active = _result_from_log(log, "round_robin", req.seed)
-            baseline = active
-            oracle = active
-        else:
-            config = get_scenario(req.scenario_name, seed=req.seed, k=req.k)
-            active = run_episode(config, scheduler, seed=req.seed)
-            baseline = run_episode(config, build_scheduler("round_robin"), seed=req.seed)
-            oracle = run_episode(config, build_scheduler("oracle"), seed=req.seed)
+        config = get_scenario(req.scenario_name, seed=req.seed, k=req.k)
+        active = run_episode(config, scheduler, seed=req.seed, deadline=deadline)
+        baseline = run_episode(
+            config,
+            build_scheduler("round_robin"),
+            seed=req.seed,
+            deadline=deadline,
+        )
+        oracle = run_episode(
+            config,
+            build_scheduler("oracle"),
+            seed=req.seed,
+            deadline=deadline,
+        )
         if time.perf_counter() - started > MAX_RUN_SECONDS:
             raise HTTPException(status_code=503, detail="Simulation exceeded the time budget")
         return {
@@ -194,7 +199,10 @@ def simulate(req: SimulationRequest) -> dict[str, Any]:
         raise
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except TimeoutError as exc:
+        raise HTTPException(status_code=503, detail="Simulation exceeded the time budget") from exc
     except Exception as exc:
+        logger.exception("Simulation failed")
         raise HTTPException(status_code=500, detail="Simulation failed") from exc
     finally:
         _run_lock.release()

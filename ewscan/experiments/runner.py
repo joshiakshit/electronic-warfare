@@ -193,6 +193,7 @@ def run_episode(
     pd_threshold: float = 0.5,
     env: RFEnvironment | None = None,
     threat_prior: ThreatPrior | None = None,
+    deadline: float | None = None,
 ) -> EpisodeResult:
     """Execute a single episode with a scheduler and compute all 7 figures of merit.
 
@@ -220,6 +221,12 @@ def run_episode(
     """
     effective_seed = int(seed) if seed is not None else int(config.seed)
 
+    def check_deadline() -> None:
+        if deadline is not None and time.perf_counter() >= deadline:
+            raise TimeoutError("episode deadline exceeded")
+
+    check_deadline()
+
     if effective_seed != config.seed:
         ep_config = EpisodeConfig(
             n_bands=config.n_bands,
@@ -242,6 +249,7 @@ def run_episode(
     else:
         environment = env
         environment.reset(seed=effective_seed)
+    check_deadline()
 
     truth = environment.truth
 
@@ -272,6 +280,7 @@ def run_episode(
     overrides = np.zeros(ep_config.n_slots, dtype=np.bool_)
     has_arbitration = False
     for t in range(ep_config.n_slots):
+        check_deadline()
         action = scheduler.act(obs)
         predictions[t] = int(getattr(scheduler, "predicted_band", -1))
         if all(
@@ -371,6 +380,7 @@ class EpisodeRunner:
         seed: int | None = None,
         env: RFEnvironment | None = None,
         threat_prior: ThreatPrior | None = None,
+        deadline: float | None = None,
     ) -> EpisodeResult:
         """Execute a single episode with the configured evaluation parameters.
 
@@ -399,6 +409,7 @@ class EpisodeRunner:
             pd_threshold=self.pd_threshold,
             env=env,
             threat_prior=threat_prior,
+            deadline=deadline,
         )
 
 
