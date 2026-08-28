@@ -363,6 +363,14 @@ def _build_scheduler_by_name(name: str, config: EpisodeConfig | None = None) -> 
         from ewscan.agents.pomdp import BeliefScheduler
 
         return BeliefScheduler()
+    elif name_clean == "whittle":
+        from ewscan.agents.whittle import WhittleScheduler
+
+        return WhittleScheduler()
+    elif name_clean == "sniper":
+        from ewscan.agents.sniper import SniperScheduler
+
+        return SniperScheduler()
     elif name_clean == "stub":
         from ewscan.testing.fixtures import StubScheduler
 
@@ -371,7 +379,7 @@ def _build_scheduler_by_name(name: str, config: EpisodeConfig | None = None) -> 
         raise ValueError(
             f"Unknown scheduler name '{name}'. Available: round_robin, uniform_random, "
             f"prior_weighted, oracle, ucb1, sliding_window_ucb, discounted_ucb, "
-            f"thompson_sampling, discounted_thompson, belief, stub"
+            f"thompson_sampling, discounted_thompson, belief, whittle, sniper, stub"
         )
 
 
@@ -392,7 +400,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "-s",
         type=str,
         default="round_robin",
-        help="Scheduler name: round_robin, uniform_random, prior_weighted, oracle, ucb1, sliding_window_ucb, discounted_ucb, thompson_sampling, belief, stub (default: round_robin).",
+        help="Scheduler name: round_robin, uniform_random, prior_weighted, oracle, ucb1, sliding_window_ucb, discounted_ucb, thompson_sampling, belief, whittle, sniper, stub (default: round_robin).",
     )
     parser.add_argument(
         "--seed",
