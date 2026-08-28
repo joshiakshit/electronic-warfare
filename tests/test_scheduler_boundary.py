@@ -209,3 +209,23 @@ class TestOracleOnlyTruth:
         oracle = OracleScheduler()
         run_episode(cfg, oracle, seed=1)
         assert oracle.truth is not None
+
+    def test_non_oracle_set_truth_method_does_not_receive_truth(self):
+        from ewscan.experiments.runner import run_episode
+
+        class TruthProbe(UCB1Scheduler):
+            truth_received = False
+
+            def set_truth(self, truth):
+                self.truth_received = True
+
+        cfg = _config(
+            emitters=(EmitterInfo(band=0, snr=20.0, threat_level=1.0, emitter_type="cw"),),
+            n_slots=10,
+        )
+        scheduler = TruthProbe(seed=0)
+
+        result = run_episode(cfg, scheduler, seed=1)
+
+        assert scheduler.truth_received is False
+        assert result.track == "blind"

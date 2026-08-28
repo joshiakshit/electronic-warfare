@@ -18,6 +18,7 @@ from typing import Any, Sequence
 
 import numpy as np
 
+from ewscan.agents.baselines import OracleScheduler
 from ewscan.agents.reward import RewardFunction
 from ewscan.config import load_config
 from ewscan.contracts import (
@@ -247,7 +248,7 @@ def run_episode(
     # Only the Oracle receives the generated truth matrix and the full config.
     # Every other scheduler gets the blind scheduler-visible view, optionally
     # carrying an explicit ThreatPrior for a prior-aided run.
-    if hasattr(scheduler, "set_truth"):
+    if isinstance(scheduler, OracleScheduler):
         scheduler.set_truth(truth)
         scheduler.reset(ep_config)
         track = "oracle"

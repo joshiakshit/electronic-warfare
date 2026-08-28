@@ -51,6 +51,37 @@ def test_valid_slots_wrong_shape_rejected():
         )
 
 
+def test_settling_slots_default_to_invalid():
+    cfg = _config()
+    truth, actions, detections = _ok_arrays(cfg)
+    settling = np.array([False, True, False], dtype=bool)
+
+    log = EpisodeLog(
+        config=cfg,
+        truth=truth,
+        actions=actions,
+        detections=detections,
+        settling_slots=settling,
+    )
+
+    np.testing.assert_array_equal(log.valid_slots, ~settling)
+
+
+def test_settling_slot_cannot_be_marked_valid():
+    cfg = _config()
+    truth, actions, detections = _ok_arrays(cfg)
+
+    with pytest.raises(ValueError, match="settling slots must be invalid"):
+        EpisodeLog(
+            config=cfg,
+            truth=truth,
+            actions=actions,
+            detections=detections,
+            settling_slots=np.array([False, True, False], dtype=bool),
+            valid_slots=np.ones(cfg.n_slots, dtype=bool),
+        )
+
+
 def test_emitter_truth_requires_emitter_bands():
     cfg = _config()
     truth, actions, detections = _ok_arrays(cfg)

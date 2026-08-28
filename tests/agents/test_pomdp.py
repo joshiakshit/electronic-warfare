@@ -82,7 +82,13 @@ class TestSettlingSkipsCorrection:
         scheduler.act(None)
         belief_before_settling = scheduler.belief.copy()
 
-        settling_obs = Observation(slot=0, bands=(0,), detections=(True,), settling=True)
+        settling_obs = Observation(
+            slot=0,
+            bands=(0,),
+            detections=(True,),
+            settling=True,
+            valid=False,
+        )
         scheduler.act(settling_obs)
         actual = scheduler.belief.copy()
 
