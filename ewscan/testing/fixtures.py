@@ -31,7 +31,7 @@ def make_test_config(
     n_slots: int = 20,
     k: int = 1,
     seed: int = 0,
-    detection_threshold: float = 3.0,
+    detection_threshold: float | None = None,
     pfa: float = 1e-3,
     emitters: tuple[EmitterInfo, ...] = (),
 ) -> EpisodeConfig:
@@ -139,7 +139,7 @@ def synthetic_log(
         n_slots=n_slots,
         k=1,
         emitters=_build_default_emitters(n_bands),
-        detection_threshold=3.0,
+        detection_threshold=None,
         pfa=1e-3,
         seed=seed,
     )

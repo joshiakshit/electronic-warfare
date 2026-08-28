@@ -299,15 +299,11 @@ class TestDetectionModel:
 
         assert seq1 == seq2
 
-    def test_custom_threshold_overrides(self) -> None:
-        """If an explicit threshold is given, it is used instead of -ln(pfa)."""
+    def test_mismatched_custom_threshold_raises(self) -> None:
+        """An explicit threshold cannot override the configured Pfa."""
         pfa = 1e-3
-        custom_threshold = 2.0  # different from -ln(1e-3) ≈ 6.9
-        dm = DetectionModel(pfa=pfa, threshold=custom_threshold)
-        assert dm.threshold == custom_threshold
-        assert dm.pfa == pfa  # stored as-is
-        # Actual Pfa implied by threshold = exp(-2) ≈ 0.135
-        assert abs(dm.get_pfa() - np.exp(-2.0)) < 1e-12
+        with pytest.raises(ValueError, match="does not match pfa"):
+            DetectionModel(pfa=pfa, threshold=2.0)
 
 
 class TestDetectBatch:

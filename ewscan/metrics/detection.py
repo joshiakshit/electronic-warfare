@@ -47,7 +47,7 @@ from dataclasses import dataclass, field
 import numpy as np
 from numpy.typing import NDArray
 
-from ewscan.contracts import EpisodeLog
+from ewscan.contracts import DetectorCapability, EpisodeLog
 
 
 # ---------------------------------------------------------------------------
@@ -149,6 +149,7 @@ class DetectionMetrics:
     sensitivity into a single result object.
     """
 
+    capability: DetectorCapability
     pd: PdEstimate
     pfa: PfaEstimate
     per_emitter_pd: tuple[EmitterPdEstimate, ...]
@@ -407,6 +408,7 @@ def estimate_detection_metrics(
     sens = estimate_sensitivity(log, pd_threshold=pd_threshold)
 
     return DetectionMetrics(
+        capability=log.config.detector_capability,
         pd=pd_est,
         pfa=pfa_est,
         per_emitter_pd=per_emitter,

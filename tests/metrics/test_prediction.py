@@ -31,7 +31,7 @@ def _make_test_log(n_bands: int = 4, n_slots: int = 4) -> EpisodeLog:
         n_slots=n_slots,
         k=1,
         emitters=(),
-        detection_threshold=3.0,
+        detection_threshold=None,
         pfa=1e-3,
         seed=0,
     )

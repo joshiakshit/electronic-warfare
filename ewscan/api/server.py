@@ -56,6 +56,13 @@ def _serialize_result(res: EpisodeResult) -> Dict[str, Any]:
     log = res.log
     return {
         "scheduler_name": res.scheduler_name,
+        "detector": {
+            "requested_pfa": res.detection.capability.requested_pfa,
+            "effective_pfa": res.detection.capability.effective_pfa,
+            "threshold": res.detection.capability.threshold,
+            "dwell": res.detection.capability.dwell,
+            "nominal_pd": res.detection.capability.nominal_pd,
+        },
         "metrics": {
             "interception_ratio": float(res.interception.interception_ratio.ratio) if np.isfinite(res.interception.interception_ratio.ratio) else 0.0,
             "average_reward": float(res.reward.average_reward) if np.isfinite(res.reward.average_reward) else 0.0,

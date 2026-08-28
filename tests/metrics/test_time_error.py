@@ -37,7 +37,7 @@ def _make_log(
     detections: np.ndarray,
     emitters: tuple[EmitterInfo, ...] = (),
     pfa: float = 1e-3,
-    detection_threshold: float = 3.0,
+    detection_threshold: float | None = None,
 ) -> EpisodeLog:
     """Convenience builder for custom test logs."""
     config = EpisodeConfig(
@@ -106,9 +106,9 @@ class TestVerificationCriterion:
         truth[2, 20:25] = True  # Band 2 burst at [20, 24]
 
         emitters = (
-            EmitterInfo(band=0, snr=20.0, threat_level=1.0, emitter_type="burst"),
-            EmitterInfo(band=1, snr=20.0, threat_level=1.0, emitter_type="burst"),
-            EmitterInfo(band=2, snr=20.0, threat_level=1.0, emitter_type="burst"),
+            EmitterInfo(band=0, snr=20.0, threat_level=1.0, emitter_type="cw"),
+            EmitterInfo(band=1, snr=20.0, threat_level=1.0, emitter_type="cw"),
+            EmitterInfo(band=2, snr=20.0, threat_level=1.0, emitter_type="cw"),
         )
         config = make_test_config(n_bands=n_bands, n_slots=n_slots, emitters=emitters)
 
@@ -141,9 +141,9 @@ class TestVerificationCriterion:
         truth[2, 21:26] = True  # Band 2 burst at [21, 25] -> RR scans band 2 at slot 23 -> error = 23-21 = 2
 
         emitters = (
-            EmitterInfo(band=0, snr=20.0, threat_level=1.0, emitter_type="burst"),
-            EmitterInfo(band=1, snr=20.0, threat_level=1.0, emitter_type="burst"),
-            EmitterInfo(band=2, snr=20.0, threat_level=1.0, emitter_type="burst"),
+            EmitterInfo(band=0, snr=20.0, threat_level=1.0, emitter_type="cw"),
+            EmitterInfo(band=1, snr=20.0, threat_level=1.0, emitter_type="cw"),
+            EmitterInfo(band=2, snr=20.0, threat_level=1.0, emitter_type="cw"),
         )
         config = make_test_config(n_bands=n_bands, n_slots=n_slots, emitters=emitters)
 
@@ -168,9 +168,9 @@ class TestVerificationCriterion:
         truth[2, 50:70] = True
 
         emitters = (
-            EmitterInfo(band=0, snr=20.0, threat_level=1.0, emitter_type="burst"),
-            EmitterInfo(band=1, snr=20.0, threat_level=1.0, emitter_type="burst"),
-            EmitterInfo(band=2, snr=20.0, threat_level=1.0, emitter_type="burst"),
+            EmitterInfo(band=0, snr=20.0, threat_level=1.0, emitter_type="cw"),
+            EmitterInfo(band=1, snr=20.0, threat_level=1.0, emitter_type="cw"),
+            EmitterInfo(band=2, snr=20.0, threat_level=1.0, emitter_type="cw"),
         )
         config = make_test_config(n_bands=n_bands, n_slots=n_slots, emitters=emitters, seed=42)
 
@@ -244,7 +244,7 @@ class TestHandCraftedBurstError:
 
     def test_known_burst_errors_and_penalties(self):
         emitters = (
-            EmitterInfo(band=0, snr=20.0, threat_level=1.0, emitter_type="burst"),
+            EmitterInfo(band=0, snr=20.0, threat_level=1.0, emitter_type="cw"),
         )
         # 1 band, 10 slots.
         # Burst 1: [1, 3] (duration 3). Scanned at slot 2 -> error = 2 - 1 = 1.
@@ -285,7 +285,7 @@ class TestFalseAlarmsAndEdgeCases:
     def test_false_alarm_before_burst_does_not_count(self):
         """A false alarm at slot 0 when burst is [2, 4] must not register as an intercept."""
         emitters = (
-            EmitterInfo(band=0, snr=20.0, threat_level=1.0, emitter_type="burst"),
+            EmitterInfo(band=0, snr=20.0, threat_level=1.0, emitter_type="cw"),
         )
         truth = np.zeros((1, 6), dtype=np.bool_)
         truth[0, 2:5] = True  # Burst at [2, 4]
@@ -323,7 +323,7 @@ class TestFalseAlarmsAndEdgeCases:
     def test_no_bursts_in_episode(self):
         """All-silent episode returns NaNs."""
         emitters = (
-            EmitterInfo(band=0, snr=20.0, threat_level=1.0, emitter_type="burst"),
+            EmitterInfo(band=0, snr=20.0, threat_level=1.0, emitter_type="cw"),
         )
         truth = np.zeros((1, 5), dtype=np.bool_)
         actions = np.zeros(5, dtype=np.intp)
@@ -340,7 +340,7 @@ class TestFalseAlarmsAndEdgeCases:
     def test_zero_intercepted_bursts(self):
         """When bursts occur but none are intercepted, mean_time_error is NaN while penalized is finite."""
         emitters = (
-            EmitterInfo(band=0, snr=20.0, threat_level=1.0, emitter_type="burst"),
+            EmitterInfo(band=0, snr=20.0, threat_level=1.0, emitter_type="cw"),
         )
         truth = np.ones((1, 5), dtype=np.bool_)  # 1 burst [0, 4] (duration 5)
         actions = np.zeros(5, dtype=np.intp)

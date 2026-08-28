@@ -36,7 +36,7 @@ def sample_config() -> EpisodeConfig:
             EmitterInfo(band=0, snr=10.0, threat_level=0.5, emitter_type="cw"),
             EmitterInfo(band=2, snr=15.0, threat_level=0.8, emitter_type="periodic", params={"period": 5}),
         ),
-        detection_threshold=3.0,
+        detection_threshold=None,
         pfa=1e-3,
         seed=42,
     )

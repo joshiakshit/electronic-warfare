@@ -313,7 +313,7 @@ class TestOracleScheduler:
             n_slots=200,
             emitters=emitters,
             pfa=1e-6,
-            detection_threshold=3.0,
+            detection_threshold=None,
             seed=42,
         )
 
@@ -351,4 +351,3 @@ class TestOracleScheduler:
         # Oracle strictly beats round-robin and uniform random
         assert oracle_active_intercepts > rr_intercepts
         assert oracle_active_intercepts > rnd_intercepts
-

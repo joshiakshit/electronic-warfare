@@ -1,7 +1,6 @@
 n_bands: 16
 n_slots: 2000
 k: 1
-detection_threshold: 3.0
 pfa: 0.0001
 seed: 42
 emitters:

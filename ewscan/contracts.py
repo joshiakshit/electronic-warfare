@@ -12,6 +12,8 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+from ewscan.detector import DetectorCapability, make_detector_capability
+
 
 @dataclass(frozen=True)
 class Band:
@@ -83,23 +85,25 @@ class EpisodeConfig:
     n_slots: int
     k: int
     emitters: tuple[EmitterInfo, ...]
-    detection_threshold: float
-    pfa: float
+    detection_threshold: float | None = None
+    pfa: float = 1e-4
     seed: int = 0
     retune_cost_slots: int = 0
     dwell: int = 1
+    detector_capability: DetectorCapability = field(init=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "emitters", tuple(self.emitters))
-        validate_episode_config(self)
+        capability = validate_episode_config(self)
         object.__setattr__(self, "n_bands", int(self.n_bands))
         object.__setattr__(self, "n_slots", int(self.n_slots))
         object.__setattr__(self, "k", int(self.k))
-        object.__setattr__(self, "detection_threshold", float(self.detection_threshold))
+        object.__setattr__(self, "detection_threshold", capability.threshold)
         object.__setattr__(self, "pfa", float(self.pfa))
         object.__setattr__(self, "seed", int(self.seed))
         object.__setattr__(self, "retune_cost_slots", int(self.retune_cost_slots))
         object.__setattr__(self, "dwell", int(self.dwell))
+        object.__setattr__(self, "detector_capability", capability)
 
 
 def _require_integer(name: str, value: Any, minimum: int) -> int:
@@ -252,7 +256,7 @@ def _validate_beam_params(params: Any, prefix: str) -> None:
         _require_number(f"{prefix}.params.floor", params["floor"])
 
 
-def validate_episode_config(config: EpisodeConfig) -> None:
+def validate_episode_config(config: EpisodeConfig) -> DetectorCapability:
     """Validate one episode at every public construction boundary."""
     n_bands = _require_integer("n_bands", config.n_bands, 1)
     _require_integer("n_slots", config.n_slots, 1)
@@ -263,18 +267,24 @@ def validate_episode_config(config: EpisodeConfig) -> None:
         raise ValueError(
             f"k must satisfy 1 <= k <= n_bands, got k={k}, n_bands={n_bands}"
         )
-    threshold = _require_number("detection_threshold", config.detection_threshold)
-    if threshold <= 0.0:
-        raise ValueError(
-            f"detection_threshold must be positive, got {threshold}"
-        )
+    if config.detection_threshold is not None:
+        threshold = _require_number("detection_threshold", config.detection_threshold)
+        if threshold <= 0.0:
+            raise ValueError(
+                f"detection_threshold must be positive, got {threshold}"
+            )
     _require_probability("pfa", config.pfa, open_interval=True)
     if not isinstance(config.seed, Integral) or isinstance(config.seed, bool):
         raise ValueError(f"seed must be an integer, got {config.seed!r}")
     _require_integer("retune_cost_slots", config.retune_cost_slots, 0)
-    _require_integer("dwell", config.dwell, 1)
+    dwell = _require_integer("dwell", config.dwell, 1)
     for index, emitter in enumerate(config.emitters):
         _validate_emitter(emitter, n_bands, index)
+    return make_detector_capability(
+        pfa=config.pfa,
+        threshold=config.detection_threshold,
+        dwell=dwell,
+    )
 
 
 @dataclass

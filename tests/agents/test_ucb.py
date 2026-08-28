@@ -266,7 +266,7 @@ class TestUCB1WithRFEnvironment:
             n_slots=500,
             emitters=emitters,
             pfa=1e-5,
-            detection_threshold=3.0,
+            detection_threshold=None,
             seed=42,
         )
 

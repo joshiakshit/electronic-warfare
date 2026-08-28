@@ -7,12 +7,14 @@ Bayesian filter over the online p01/p10 transition estimates from
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 from numpy.typing import NDArray
 
 from ewscan.agents.base import BaseLearningScheduler
 from ewscan.agents.transition import TransitionEstimator
-from ewscan.contracts import EpisodeConfig, Observation, ScanAction
+from ewscan.contracts import DetectorCapability, EpisodeConfig, Observation, ScanAction
 
 
 class BeliefTracker:
@@ -72,6 +74,7 @@ class BeliefScheduler(BaseLearningScheduler):
     ) -> None:
         super().__init__(seed=seed)
         self._pd_nominal = float(pd_nominal)
+        self._detector_capability: DetectorCapability | None = None
         self._transition: TransitionEstimator | None = None
         self._belief_tracker: BeliefTracker | None = None
 
@@ -86,10 +89,24 @@ class BeliefScheduler(BaseLearningScheduler):
             raise RuntimeError("Scheduler must be reset before accessing belief")
         return self._belief_tracker.belief.copy()
 
+    @property
+    def detector_capability(self) -> DetectorCapability:
+        if self._detector_capability is None:
+            raise RuntimeError("Scheduler must be reset before accessing detector capability")
+        return self._detector_capability
+
     def reset(self, config: EpisodeConfig) -> None:
         super().reset(config)
+        self._detector_capability = replace(
+            config.detector_capability,
+            nominal_pd=self._pd_nominal,
+        )
         self._transition = TransitionEstimator(config.n_bands)
-        self._belief_tracker = BeliefTracker(config.n_bands, self._pd_nominal, config.pfa)
+        self._belief_tracker = BeliefTracker(
+            config.n_bands,
+            self._detector_capability.nominal_pd,
+            self._detector_capability.effective_pfa,
+        )
         self._belief_tracker.reset(self._transition.p01(), self._transition.p10())
 
     def act(self, obs: Observation | None) -> ScanAction:

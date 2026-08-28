@@ -99,6 +99,11 @@ class EpisodeResult:
             f"{prefix}n_slots": self.config.n_slots,
             f"{prefix}k": self.config.k,
             f"{prefix}duration_seconds": self.duration_seconds,
+            f"{prefix}detector_requested_pfa": self.detection.capability.requested_pfa,
+            f"{prefix}detector_effective_pfa": self.detection.capability.effective_pfa,
+            f"{prefix}detector_threshold": self.detection.capability.threshold,
+            f"{prefix}detector_dwell": self.detection.capability.dwell,
+            f"{prefix}detector_nominal_pd": self.detection.capability.nominal_pd,
             # Figure of Merit 1: Detection
             f"{prefix}pd": self.detection.pd.pd,
             f"{prefix}pfa": self.detection.pfa.pfa,

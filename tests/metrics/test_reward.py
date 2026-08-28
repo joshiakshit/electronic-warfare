@@ -44,7 +44,7 @@ def _make_test_log(
         n_slots=n_slots,
         k=1,
         emitters=(EmitterInfo(band=0, snr=20.0, threat_level=threat_level, emitter_type="cw"),),
-        detection_threshold=3.0,
+        detection_threshold=None,
         pfa=1e-3,
         seed=0,
         retune_cost_slots=retune_cost_slots,
@@ -59,25 +59,14 @@ def _make_test_log(
 
 
 class TestEmptyLog:
-    def test_zero_slots_returns_nans_and_zeros(self):
-        log = _make_test_log(n_slots=0, truth=np.zeros((4, 0), dtype=bool), actions=np.array([], dtype=np.intp), detections=np.array([], dtype=bool))
-        metrics = estimate_reward_metrics(log)
-
-        assert metrics.n_slots == 0
-        assert metrics.total_reward == 0.0
-        assert math.isnan(metrics.average_reward)
-        assert metrics.total_hit_reward == 0.0
-        assert metrics.total_miss_cost == 0.0
-        assert metrics.total_novelty_bonus == 0.0
-        assert metrics.total_revisit_decay == 0.0
-        assert math.isnan(metrics.average_hit_reward)
-        assert math.isnan(metrics.average_miss_cost)
-        assert math.isnan(metrics.average_novelty_bonus)
-        assert math.isnan(metrics.average_revisit_decay)
-        assert len(metrics.per_slot_rewards) == 0
-
-        avg_reward = estimate_average_reward(log)
-        assert math.isnan(avg_reward)
+    def test_zero_slots_is_rejected(self):
+        with pytest.raises(ValueError, match="n_slots"):
+            _make_test_log(
+                n_slots=0,
+                truth=np.zeros((4, 0), dtype=bool),
+                actions=np.array([], dtype=np.intp),
+                detections=np.array([], dtype=bool),
+            )
 
 
 class TestRewardAccumulatorAgreement:

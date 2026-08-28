@@ -47,7 +47,7 @@ def _golden_k2_log() -> EpisodeLog:
                 params={"period": 4, "dwell": 2, "phase": 1},
             ),
         ),
-        detection_threshold=3.0,
+        detection_threshold=None,
         pfa=1e-3,
         seed=0,
     )
@@ -70,12 +70,12 @@ class TestContracts:
 
     def test_config_rejects_k_out_of_range(self):
         with pytest.raises(ValueError, match="1 <= k <= n_bands"):
-            EpisodeConfig(4, 10, 5, (), 3.0, 1e-3)
+            EpisodeConfig(4, 10, 5, (), None, 1e-3)
         with pytest.raises(ValueError, match="1 <= k <= n_bands"):
-            EpisodeConfig(4, 10, 0, (), 3.0, 1e-3)
+            EpisodeConfig(4, 10, 0, (), None, 1e-3)
 
     def test_config_allows_k_equal_n_bands(self):
-        cfg = EpisodeConfig(4, 10, 4, (), 3.0, 1e-3)
+        cfg = EpisodeConfig(4, 10, 4, (), None, 1e-3)
         assert cfg.k == 4
 
     def test_log_exposes_k_and_enforces_2d(self):
@@ -85,7 +85,7 @@ class TestContracts:
         assert log.detections.shape == (4, 2)
 
     def test_log_rejects_wrong_action_shape(self):
-        cfg = EpisodeConfig(3, 4, 2, (), 3.0, 1e-3)
+        cfg = EpisodeConfig(3, 4, 2, (), None, 1e-3)
         truth = np.zeros((3, 4), dtype=np.bool_)
         bad = np.zeros(4, dtype=np.intp)  # 1D, should be (4, 2)
         with pytest.raises(ValueError, match="actions shape"):
@@ -99,7 +99,7 @@ class TestEnvironment:
             n_slots=5,
             k=k,
             emitters=(EmitterInfo(band=0, snr=20.0, threat_level=1.0, emitter_type="cw"),),
-            detection_threshold=3.0,
+            detection_threshold=None,
             pfa=1e-3,
             seed=0,
         )

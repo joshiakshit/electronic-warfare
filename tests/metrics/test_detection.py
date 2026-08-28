@@ -49,7 +49,7 @@ def _make_log(
     detections: np.ndarray,
     emitters: tuple[EmitterInfo, ...] = (),
     pfa: float = 1e-3,
-    detection_threshold: float = 3.0,
+    detection_threshold: float | None = None,
 ) -> EpisodeLog:
     """Convenience builder for hand-crafted episode logs."""
     config = EpisodeConfig(

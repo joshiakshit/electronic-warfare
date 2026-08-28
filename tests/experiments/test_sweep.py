@@ -66,7 +66,7 @@ def _build_test_scenario(seed: int = 42, n_slots: int = 60) -> EpisodeConfig:
         n_slots=n_slots,
         emitters=emitters,
         pfa=1e-3,
-        detection_threshold=3.0,
+        detection_threshold=None,
         seed=seed,
     )
 

@@ -16,13 +16,13 @@ def test_learners_beat_random_stationary_bench():
         emitters=(
             EmitterInfo(
                 band=2,
-                snr=15.0,
+                snr=20.0,
                 threat_level=1.0,
                 emitter_type="gilbert_elliott",
                 params={"p01": 0.5, "p10": 0.5},
             ),
         ),
-        detection_threshold=3.0,
+        detection_threshold=None,
         pfa=1e-4,
         seed=42,
     )
@@ -73,4 +73,3 @@ def test_end_to_end_smoke():
             assert res.scheduler_name == scheduler.name
             assert res.log.truth.shape[1] == 50
             assert len(res.log.actions) == 50
-

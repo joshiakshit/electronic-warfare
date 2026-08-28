@@ -36,7 +36,7 @@ def make_sparse_bursty_scenario(
     n_bands: int = 16,
     n_slots: int = 2000,
     k: int = 1,
-    detection_threshold: float = 3.0,
+    detection_threshold: float | None = None,
     pfa: float = 1e-4,
     seed: int = 42,
 ) -> EpisodeConfig:
@@ -92,7 +92,7 @@ def make_mixed_threat_scenario(
     n_bands: int = 16,
     n_slots: int = 2000,
     k: int = 1,
-    detection_threshold: float = 3.0,
+    detection_threshold: float | None = None,
     pfa: float = 1e-4,
     seed: int = 42,
 ) -> EpisodeConfig:
@@ -157,7 +157,7 @@ def make_periodic_radar_scenario(
     n_bands: int = 16,
     n_slots: int = 2000,
     k: int = 1,
-    detection_threshold: float = 3.0,
+    detection_threshold: float | None = None,
     pfa: float = 1e-4,
     seed: int = 42,
 ) -> EpisodeConfig:

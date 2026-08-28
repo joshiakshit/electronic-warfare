@@ -137,7 +137,7 @@ class TestTruthMatrix:
                     params={"period": 10, "dwell": 2},
                 ),
             ),
-            detection_threshold=3.0,
+            detection_threshold=None,
             pfa=1e-3,
             seed=42,
         )
@@ -251,7 +251,7 @@ class TestTruthMatrix:
                     params={"period": 3, "dwell": 1, "jitter": 0, "phase": 0},
                 ),
             ),
-            detection_threshold=3.0,
+            detection_threshold=None,
             pfa=1e-3,
             seed=7,
         )
@@ -341,7 +341,8 @@ class TestEnvironmentLifecycle:
         assert Environment is RFEnvironment
 
     def test_environment_properties_and_custom_detection(self):
-        dm = DetectionModel(pfa=1e-2, threshold=4.5)
+        pfa = float(np.exp(-4.5))
+        dm = DetectionModel(pfa=pfa, threshold=4.5)
         info = EmitterInfo(band=1, snr=12.0, threat_level=0.5, emitter_type="cw")
         env = RFEnvironment(
             n_bands=5,
@@ -360,7 +361,7 @@ class TestEnvironmentLifecycle:
         assert isinstance(env.config, EpisodeConfig)
         assert env.config.n_bands == 5
         assert env.config.detection_threshold == 4.5
-        assert env.config.pfa == 1e-2
+        assert env.config.pfa == pfa
 
     def test_invalid_emitter_type_in_sequence_raises(self):
         with pytest.raises(TypeError, match="Expected Emitter or EmitterInfo"):
@@ -489,7 +490,7 @@ class TestDeterminismAndIndependence:
                     params={"period": 6, "dwell": 2, "jitter": 1},
                 ),
             ),
-            detection_threshold=3.0,
+            detection_threshold=None,
             pfa=1e-3,
             seed=777,
         )
@@ -520,7 +521,7 @@ class TestDeterminismAndIndependence:
                     params={"p01": 0.2, "p10": 0.3},
                 ),
             ),
-            detection_threshold=3.0,
+            detection_threshold=None,
             pfa=1e-3,
             seed=42,
         )

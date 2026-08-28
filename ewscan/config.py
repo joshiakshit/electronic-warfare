@@ -20,7 +20,7 @@ def config_from_dict(data: dict[str, Any]) -> EpisodeConfig:
         raise ConfigError(f"Configuration data must be a dictionary, got {type(data).__name__}")
 
     # Check required fields
-    required_fields = ["n_bands", "n_slots", "k", "detection_threshold", "pfa"]
+    required_fields = ["n_bands", "n_slots", "k", "pfa"]
     missing = [field for field in required_fields if field not in data]
     if missing:
         raise ConfigError(f"Missing required configuration fields: {', '.join(missing)}")
@@ -47,14 +47,15 @@ def config_from_dict(data: dict[str, Any]) -> EpisodeConfig:
     if not (0.0 < pfa < 1.0):
         raise ConfigError(f"'pfa' must be in (0.0, 1.0), got {pfa}")
 
-    detection_threshold = data["detection_threshold"]
-    if not isinstance(detection_threshold, (int, float)) or isinstance(detection_threshold, bool):
-        raise ConfigError(f"'detection_threshold' must be a number, got {detection_threshold!r}")
-    detection_threshold = float(detection_threshold)
-    if detection_threshold <= 0.0:
-        raise ConfigError(
-            f"'detection_threshold' must be positive, got {detection_threshold}"
-        )
+    detection_threshold = data.get("detection_threshold")
+    if detection_threshold is not None:
+        if not isinstance(detection_threshold, (int, float)) or isinstance(detection_threshold, bool):
+            raise ConfigError(f"'detection_threshold' must be a number, got {detection_threshold!r}")
+        detection_threshold = float(detection_threshold)
+        if detection_threshold <= 0.0:
+            raise ConfigError(
+                f"'detection_threshold' must be positive, got {detection_threshold}"
+            )
 
     seed = data.get("seed", 0)
     if not isinstance(seed, int) or isinstance(seed, bool):

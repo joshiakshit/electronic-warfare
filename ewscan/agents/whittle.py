@@ -9,13 +9,15 @@ C-3), never by bisecting m per belief point.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 from numpy.typing import NDArray
 
 from ewscan.agents.base import BaseLearningScheduler
 from ewscan.agents.pomdp import BeliefTracker
 from ewscan.agents.transition import TransitionEstimator
-from ewscan.contracts import EpisodeConfig, Observation, ScanAction
+from ewscan.contracts import DetectorCapability, EpisodeConfig, Observation, ScanAction
 
 _GRID_CACHE: dict[tuple[float, float, float, float, float, int, int, int], tuple[NDArray[np.float64], NDArray[np.float64]]] = {}
 
@@ -140,6 +142,7 @@ class WhittleScheduler(BaseLearningScheduler):
         self._sweeps = int(sweeps)
         self._recompute_interval = int(recompute_interval)
         self._pfa: float | None = None
+        self._detector_capability: DetectorCapability | None = None
         self._transition: TransitionEstimator | None = None
         self._belief_tracker: BeliefTracker | None = None
         self._belief_grid: NDArray[np.float64] | None = None
@@ -150,11 +153,25 @@ class WhittleScheduler(BaseLearningScheduler):
     def name(self) -> str:
         return "whittle"
 
+    @property
+    def detector_capability(self) -> DetectorCapability:
+        if self._detector_capability is None:
+            raise RuntimeError("Scheduler must be reset before accessing detector capability")
+        return self._detector_capability
+
     def reset(self, config: EpisodeConfig) -> None:
         super().reset(config)
-        self._pfa = config.pfa
+        self._detector_capability = replace(
+            config.detector_capability,
+            nominal_pd=self._pd_nominal,
+        )
+        self._pfa = self._detector_capability.effective_pfa
         self._transition = TransitionEstimator(config.n_bands)
-        self._belief_tracker = BeliefTracker(config.n_bands, self._pd_nominal, config.pfa)
+        self._belief_tracker = BeliefTracker(
+            config.n_bands,
+            self._detector_capability.nominal_pd,
+            self._detector_capability.effective_pfa,
+        )
         self._belief_tracker.reset(self._transition.p01(), self._transition.p10())
         self._slots_since_recompute = 0
         self._recompute_index()

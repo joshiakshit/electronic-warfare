@@ -21,7 +21,7 @@ def _config(**overrides: object) -> EpisodeConfig:
         "n_slots": 8,
         "k": 1,
         "emitters": (),
-        "detection_threshold": 3.0,
+        "detection_threshold": None,
         "pfa": 1e-3,
         "seed": 0,
         "retune_cost_slots": 0,
@@ -99,7 +99,6 @@ def test_yaml_uses_the_same_pfa_validation() -> None:
         "n_bands": 4,
         "n_slots": 8,
         "k": 1,
-        "detection_threshold": 3.0,
         "pfa": 0.0,
     }
     with pytest.raises(ConfigError, match="pfa"):

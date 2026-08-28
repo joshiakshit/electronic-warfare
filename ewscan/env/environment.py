@@ -70,6 +70,10 @@ class RFEnvironment:
                     dwell=config.dwell,
                 )
             )
+            if self._detection_model.capability != config.detector_capability:
+                raise ValueError(
+                    "detection_model capability must match the EpisodeConfig capability"
+                )
             self._config = config
         else:
             if n_bands <= 0:
@@ -118,12 +122,14 @@ class RFEnvironment:
                 self._detection_model = detection_model
                 pfa_val = detection_model.pfa
                 det_thresh = detection_model.threshold
+                dwell_val = detection_model.dwell
             else:
                 self._detection_model = DetectionModel(
                     pfa=pfa, threshold=detection_threshold, dwell=dwell
                 )
                 pfa_val = pfa
                 det_thresh = self._detection_model.threshold
+                dwell_val = dwell
 
             self._config = EpisodeConfig(
                 n_bands=self._n_bands,
@@ -134,7 +140,7 @@ class RFEnvironment:
                 pfa=pfa_val,
                 seed=self._seed,
                 retune_cost_slots=retune_cost_slots,
-                dwell=dwell,
+                dwell=dwell_val,
             )
 
         # Validate emitter band assignments

@@ -188,8 +188,14 @@ class TestMultiSeedEpisodeAggregation:
 
         emitters = (
             EmitterInfo(band=0, snr=20.0, threat_level=1.0, emitter_type="cw"),
-            EmitterInfo(band=1, snr=15.0, threat_level=0.8, emitter_type="bursty"),
-            EmitterInfo(band=2, snr=10.0, threat_level=0.5, emitter_type="periodic"),
+            EmitterInfo(band=1, snr=15.0, threat_level=0.8, emitter_type="cw"),
+            EmitterInfo(
+                band=2,
+                snr=10.0,
+                threat_level=0.5,
+                emitter_type="periodic",
+                params={"period": 4},
+            ),
         )
 
         for s in range(5):
