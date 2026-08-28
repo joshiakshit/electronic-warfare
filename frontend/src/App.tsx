@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { fetchApi, type ScenarioResponse, type SchedulerResponse } from './api';
 import { TerminalDashboard } from './components/TerminalDashboard';
 
 type Theme = 'dark' | 'light';
@@ -21,15 +22,14 @@ function App() {
   useEffect(() => {
     const apiBase = import.meta.env.VITE_API_URL || 'http://localhost:8000';
     Promise.all([
-      fetch(`${apiBase}/api/scenarios`).then(r => r.json()),
-      fetch(`${apiBase}/api/schedulers`).then(r => r.json())
+      fetchApi<ScenarioResponse>(`${apiBase}/api/scenarios`),
+      fetchApi<SchedulerResponse>(`${apiBase}/api/schedulers`)
     ]).then(([scenData, schedData]) => {
       setScenarios(scenData.scenarios);
       setSchedulers(schedData.schedulers);
       setLoading(false);
     }).catch(err => {
-      console.error(err);
-      setError('Failed to connect to backend. Is the API server running?');
+      setError(err instanceof Error ? err.message : 'Failed to connect to backend.');
       setLoading(false);
     });
   }, []);

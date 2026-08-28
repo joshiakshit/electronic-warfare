@@ -281,8 +281,6 @@ class TestEpisodeRunner:
         assert isinstance(_build_scheduler_by_name("swucb1"), SWUCB1Scheduler)
         assert isinstance(_build_scheduler_by_name("discounted_ucb"), DUCB1Scheduler)
         assert isinstance(_build_scheduler_by_name("ducb1"), DUCB1Scheduler)
-        assert isinstance(_build_scheduler_by_name("stub"), StubScheduler)
-
         with pytest.raises(ValueError, match="Unknown scheduler name"):
             _build_scheduler_by_name("non_existent_sched")
 

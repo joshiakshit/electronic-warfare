@@ -31,6 +31,7 @@ from ewscan.contracts import (
 )
 from ewscan.env.environment import RFEnvironment
 from ewscan.env.recorder import EpisodeRecorder, save_episode_log
+from ewscan.experiments.registry import build_scheduler
 from ewscan.metrics.detection import DetectionMetrics, estimate_detection_metrics
 from ewscan.metrics.first_intercept import FirstInterceptMetrics, estimate_first_intercept_metrics
 from ewscan.metrics.interception import InterceptionMetrics, estimate_interception_metrics
@@ -401,67 +402,8 @@ class EpisodeRunner:
 
 
 def _build_scheduler_by_name(name: str, config: EpisodeConfig | None = None) -> Scheduler:
-    """Instantiate a scheduler by name."""
-    name_clean = name.strip().lower().replace("-", "_")
-
-    if name_clean == "round_robin":
-        from ewscan.agents.baselines import RoundRobinScheduler
-
-        return RoundRobinScheduler()
-    elif name_clean in ("uniform_random", "random"):
-        from ewscan.agents.baselines import UniformRandomScheduler
-
-        return UniformRandomScheduler()
-    elif name_clean in ("prior_weighted", "prior"):
-        from ewscan.agents.baselines import PriorWeightedScheduler
-
-        return PriorWeightedScheduler()
-    elif name_clean == "oracle":
-        from ewscan.agents.baselines import OracleScheduler
-
-        return OracleScheduler()
-    elif name_clean == "ucb1":
-        from ewscan.agents.ucb import UCB1Scheduler
-
-        return UCB1Scheduler()
-    elif name_clean in ("sliding_window_ucb", "sw_ucb", "swucb1"):
-        from ewscan.agents.nonstationary_ucb import SWUCB1Scheduler
-
-        return SWUCB1Scheduler()
-    elif name_clean in ("discounted_ucb", "d_ucb", "ducb1"):
-        from ewscan.agents.nonstationary_ucb import DUCB1Scheduler
-
-        return DUCB1Scheduler()
-    elif name_clean in ("thompson", "thompson_sampling", "ts"):
-        from ewscan.agents.thompson import ThompsonSamplingScheduler
-
-        return ThompsonSamplingScheduler()
-    elif name_clean in ("discounted_thompson", "discounted_thompson_sampling", "d_ts", "dts"):
-        from ewscan.agents.thompson import DiscountedThompsonScheduler
-
-        return DiscountedThompsonScheduler()
-    elif name_clean == "belief":
-        from ewscan.agents.pomdp import BeliefScheduler
-
-        return BeliefScheduler()
-    elif name_clean == "whittle":
-        from ewscan.agents.whittle import WhittleScheduler
-
-        return WhittleScheduler()
-    elif name_clean == "sniper":
-        from ewscan.agents.sniper import SniperScheduler
-
-        return SniperScheduler()
-    elif name_clean == "stub":
-        from ewscan.testing.fixtures import StubScheduler
-
-        return StubScheduler()
-    else:
-        raise ValueError(
-            f"Unknown scheduler name '{name}'. Available: round_robin, uniform_random, "
-            f"prior_weighted, oracle, ucb1, sliding_window_ucb, discounted_ucb, "
-            f"thompson_sampling, discounted_thompson, belief, whittle, sniper, stub"
-        )
+    """Compatibility wrapper for the shared scheduler registry."""
+    return build_scheduler(name)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

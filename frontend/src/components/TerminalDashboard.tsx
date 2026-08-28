@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { Play, Pause, SkipBack, ChevronDown, Activity, PanelRight, X, RotateCcw, Settings } from 'lucide-react';
 import { SettingsModal } from './SettingsModal';
+import { fetchApi, type SimulationResponse } from '../api';
 
 interface TerminalDashboardProps {
   scenarios: string[];
@@ -17,11 +18,11 @@ export const TerminalDashboard = ({ scenarios, schedulers, winSize, setWinSize, 
   const [seed, setSeed] = useState(42);
   const [k, setK] = useState(1);
 
-  const [simulationData, setSimulationData] = useState<any>(null);
+  const [simulationData, setSimulationData] = useState<SimulationResponse | null>(null);
   const [currentSlot, setCurrentSlot] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [mlConfidence, setMlConfidence] = useState(85);
+  const [error, setError] = useState<string | null>(null);
 
   const [showResults, setShowResults] = useState(true);
   const [sidebarPct, setSidebarPct] = useState(20);
@@ -36,21 +37,21 @@ export const TerminalDashboard = ({ scenarios, schedulers, winSize, setWinSize, 
       setLoading(true);
       try {
         const apiBase = import.meta.env.VITE_API_URL || 'http://localhost:8000';
-        const res = await fetch(`${apiBase}/api/simulate`, {
+        const data = await fetchApi<SimulationResponse>(`${apiBase}/api/simulate`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ scenario_name: scenario, scheduler_name: scheduler, seed, k }),
+          body: JSON.stringify({ scenario_name: scenario, scheduler_name: scheduler, seed, k, debug: true }),
           signal: controller.signal
         });
-        const data = await res.json();
         if (!controller.signal.aborted) {
           setSimulationData(data);
+          setError(null);
           setCurrentSlot(0);
           setIsPlaying(false);
         }
       } catch (err) {
         if (err instanceof DOMException && err.name === 'AbortError') return;
-        console.error("Failed to fetch simulation", err);
+        setError(err instanceof Error ? err.message : 'Simulation request failed.');
       } finally {
         if (!controller.signal.aborted) {
           setLoading(false);
@@ -64,28 +65,16 @@ export const TerminalDashboard = ({ scenarios, schedulers, winSize, setWinSize, 
   useEffect(() => {
     if (isPlaying && simulationData) {
       const maxSlots = simulationData.active.log.n_slots;
-      if (currentSlot >= maxSlots - 1) {
-        setIsPlaying(false);
-        return;
-      }
-      const timer = setTimeout(() => setCurrentSlot(c => c + 1), 100);
+      const timer = setTimeout(() => {
+        if (currentSlot >= maxSlots - 1) {
+          setIsPlaying(false);
+        } else {
+          setCurrentSlot(slot => slot + 1);
+        }
+      }, 100);
       return () => clearTimeout(timer);
     }
   }, [isPlaying, currentSlot, simulationData]);
-
-  useEffect(() => {
-    if (isPlaying && scheduler !== 'round_robin') {
-      const interval = setInterval(() => {
-        setMlConfidence(prev => {
-          const change = (Math.random() - 0.5) * 6;
-          return Math.max(78, Math.min(99.5, prev + change));
-        });
-      }, 400);
-      return () => clearInterval(interval);
-    } else if (scheduler === 'round_robin') {
-      setMlConfidence(0);
-    }
-  }, [isPlaying, scheduler]);
 
   useEffect(() => {
     if (logContainerRef.current) {
@@ -118,8 +107,12 @@ export const TerminalDashboard = ({ scenarios, schedulers, winSize, setWinSize, 
     document.addEventListener('mouseup', onMouseUp);
   };
 
-  if (loading || !simulationData) {
+  if (loading) {
     return <div className="h-screen w-full flex items-center justify-center bg-ew-bg text-ew-accent font-mono">FETCHING E-WAVE TELEMETRY...</div>;
+  }
+
+  if (error || !simulationData) {
+    return <div className="h-screen w-full flex items-center justify-center bg-ew-bg text-[#ef4444] font-mono">{error ?? 'No simulation data available.'}</div>;
   }
 
   const activeLog = simulationData.active.log;
@@ -127,6 +120,7 @@ export const TerminalDashboard = ({ scenarios, schedulers, winSize, setWinSize, 
   const n_bands = activeLog.n_bands;
   const n_slots = activeLog.n_slots;
   const isComplete = currentSlot >= n_slots - 1;
+  const percent = (value: number | null) => value === null ? 'N/A' : `${(value * 100).toFixed(1)}%`;
 
   const effectiveWinSize = Math.min(winSize, n_slots);
   const startSlot = Math.max(0, Math.min(currentSlot - Math.floor(effectiveWinSize / 2), n_slots - effectiveWinSize));
@@ -223,22 +217,13 @@ export const TerminalDashboard = ({ scenarios, schedulers, winSize, setWinSize, 
         const tx = activeLog.truth[b][s];
         const det = activeLog.detections[s][j];
 
-        let msg = "";
-        let colorClass = "";
-
-        if (tx && det) {
-          msg = `HIT: Intercepted`;
-          colorClass = "text-ew-accent";
-        } else if (!tx && det) {
-          msg = `FALSE ALARM: Ghost`;
-          colorClass = "text-[#f59e0b]";
-        } else if (tx && !det) {
-          msg = `MISSED: Lost`;
-          colorClass = "text-[#ef4444]";
-        } else {
-          msg = `IDLE: Clear`;
-          colorClass = "text-ew-text-dim";
-        }
+        const [msg, colorClass] = tx && det
+          ? ['HIT: Intercepted', 'text-ew-accent']
+          : !tx && det
+            ? ['FALSE ALARM: Ghost', 'text-[#f59e0b]']
+            : tx
+              ? ['MISSED: Lost', 'text-[#ef4444]']
+              : ['IDLE: Clear', 'text-ew-text-dim'];
 
         logs.push(
           <div key={`log-${s}-${j}`} className="flex flex-col mb-1.5 pb-1.5 border-b border-ew-border-subtle last:border-0 leading-tight">
@@ -289,12 +274,12 @@ export const TerminalDashboard = ({ scenarios, schedulers, winSize, setWinSize, 
             <span className="text-lg font-light text-ew-accent font-mono">B-{(activeLog.actions[currentSlot] ?? [0]).join(", B-")}</span>
           </div>
           <div className="flex flex-col">
-            <span className="text-[10px] text-ew-text-dim uppercase tracking-wider font-semibold">Intercept Ratio</span>
-            <span className="text-lg font-light text-ew-text font-mono">{(metrics.interception_ratio * 100).toFixed(1)}%</span>
+            <span className="text-[10px] text-ew-text-dim uppercase tracking-wider font-semibold">Final Intercept Ratio</span>
+            <span className="text-lg font-light text-ew-text font-mono">{percent(metrics.interception_ratio)}</span>
           </div>
           <div className="flex flex-col">
-            <span className="text-[10px] text-ew-text-dim uppercase tracking-wider font-semibold">Detection Prob</span>
-            <span className="text-lg font-light text-ew-text font-mono">{(metrics.pd * 100).toFixed(1)}%</span>
+            <span className="text-[10px] text-ew-text-dim uppercase tracking-wider font-semibold">Final Detection Prob</span>
+            <span className="text-lg font-light text-ew-text font-mono">{percent(metrics.pd)}</span>
           </div>
         </div>
       </div>
@@ -469,23 +454,7 @@ export const TerminalDashboard = ({ scenarios, schedulers, winSize, setWinSize, 
           </div>
         </div>
 
-        {/* ML Status Indicator & Settings */}
         <div className="flex items-center gap-6 ml-4">
-          <div className="flex flex-col justify-center w-56">
-            <div className="flex justify-between text-[10px] uppercase font-bold tracking-wider mb-2">
-              <span className="text-ew-text-muted">ML Confidence</span>
-              <span className={scheduler === 'round_robin' ? 'opacity-50' : 'text-ew-accent'}>
-                {scheduler === 'round_robin' ? 'N/A' : `${mlConfidence.toFixed(1)}%`}
-              </span>
-            </div>
-            <div className="w-full h-1.5 bg-ew-bg border border-ew-border-subtle rounded-full overflow-hidden">
-              <div
-                className={`h-full transition-all duration-300 ease-linear ${scheduler === 'round_robin' ? 'bg-ew-border w-0' : 'bg-ew-accent'}`}
-                style={{ width: scheduler === 'round_robin' ? '0%' : `${mlConfidence}%` }}
-              ></div>
-            </div>
-          </div>
-
           <button
             onClick={() => setSettingsOpen(true)}
             className="w-10 h-10 rounded-full bg-ew-bg border border-ew-border flex items-center justify-center text-ew-text-muted hover:text-ew-accent hover:border-ew-accent transition-colors"
