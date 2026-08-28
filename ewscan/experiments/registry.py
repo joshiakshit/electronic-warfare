@@ -22,7 +22,6 @@ def _factories() -> dict[str, SchedulerFactory]:
     from ewscan.agents.sniper import SniperScheduler
     from ewscan.agents.thompson import DiscountedThompsonScheduler, ThompsonSamplingScheduler
     from ewscan.agents.ucb import UCB1Scheduler
-    from ewscan.agents.whittle import WhittleScheduler
 
     return {
         "round_robin": RoundRobinScheduler,
@@ -35,7 +34,6 @@ def _factories() -> dict[str, SchedulerFactory]:
         "thompson_sampling": ThompsonSamplingScheduler,
         "discounted_thompson": DiscountedThompsonScheduler,
         "belief": BeliefScheduler,
-        "whittle": WhittleScheduler,
         "sniper": SniperScheduler,
     }
 

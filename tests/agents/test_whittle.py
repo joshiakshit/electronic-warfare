@@ -5,12 +5,9 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from ewscan.agents.thompson import ThompsonSamplingScheduler
-from ewscan.agents.ucb import UCB1Scheduler
 from ewscan.agents.whittle import WhittleScheduler, solve_whittle_grid
 from ewscan.contracts import Scheduler
 from ewscan.experiments.runner import run_episode
-from ewscan.experiments.scenarios import make_mixed_threat_scenario
 from ewscan.testing.fixtures import make_test_config
 
 ANCHOR_P01 = 0.1
@@ -122,41 +119,9 @@ class TestSchedulerLegality:
 
 
 class TestPerformanceGate:
-    """Test 5: the Sprint 3 gate. Whittle mean interception ratio must beat
-    UCB1 and Thompson Sampling over >= 20 seeds on mixed_threat.
-    """
+    """Objective 5 rejects Whittle from release paths after its quality gate fails."""
 
-    @pytest.mark.slow
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "Sprint 3 gate NOT MET. Whittle 0.2600 vs ucb1 0.4794, thompson 0.5385 "
-            "over 20 seeds. The index math is correct (matches the C-5 anchors); the "
-            "belief it consumes is uninformative because TransitionEstimator's gap==1 "
-            "filter never forms pairs at k=1 across 16 bands, so p01/p10 stay at the "
-            "0.5 prior. See project memories/sprint3_whittle_gate_finding.md"
-        ),
-    )
-    def test_beats_ucb1_and_thompson_on_mixed_threat(self):
-        n_seeds = 20
-        base_config = make_mixed_threat_scenario()
+    def test_failed_approach_is_not_user_selectable(self):
+        from ewscan.experiments.registry import scheduler_names
 
-        ratios = {"whittle": [], "ucb1": [], "thompson_sampling": []}
-        builders = {
-            "whittle": lambda seed: WhittleScheduler(seed=seed),
-            "ucb1": lambda seed: UCB1Scheduler(seed=seed),
-            "thompson_sampling": lambda seed: ThompsonSamplingScheduler(seed=seed),
-        }
-        for seed in range(n_seeds):
-            for label, builder in builders.items():
-                scheduler = builder(seed)
-                result = run_episode(base_config, scheduler, seed=seed)
-                ratios[label].append(result.interception.interception_ratio.ratio)
-
-        means = {label: float(np.mean(vals)) for label, vals in ratios.items()}
-        print("whittle mean interception ratio:", means["whittle"])
-        print("ucb1 mean interception ratio:", means["ucb1"])
-        print("thompson_sampling mean interception ratio:", means["thompson_sampling"])
-
-        assert means["whittle"] >= means["ucb1"]
-        assert means["whittle"] >= means["thompson_sampling"]
+        assert "whittle" not in scheduler_names()

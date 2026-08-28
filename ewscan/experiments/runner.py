@@ -424,7 +424,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "-s",
         type=str,
         default="round_robin",
-        help="Scheduler name: round_robin, uniform_random, prior_weighted, oracle, ucb1, sliding_window_ucb, discounted_ucb, thompson_sampling, belief, whittle, sniper, stub (default: round_robin).",
+        help="Scheduler name from the shared release registry (default: round_robin).",
     )
     parser.add_argument(
         "--seed",

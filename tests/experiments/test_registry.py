@@ -18,3 +18,9 @@ def test_runner_and_sweep_share_the_registry():
 def test_registry_rejects_unknown_scheduler():
     with pytest.raises(ValueError, match="Unknown scheduler name"):
         build_scheduler("not-a-scheduler")
+
+
+def test_registry_excludes_rejected_whittle_scheduler():
+    assert "whittle" not in scheduler_names()
+    with pytest.raises(ValueError, match="Unknown scheduler name"):
+        build_scheduler("whittle")

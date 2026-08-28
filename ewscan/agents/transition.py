@@ -11,6 +11,8 @@ Neither reads emitter parameters or the truth matrix.
 
 from __future__ import annotations
 
+from collections import deque
+
 import numpy as np
 from numpy.typing import NDArray
 
@@ -86,10 +88,8 @@ class TransitionEstimator:
 class GapAwareTransitionEstimator:
     """Gap-aware two-state HMM estimator using T^d belief propagation.
 
-    Propagates belief across arbitrary gaps using the closed-form T^d.
-    Learns p01/p10 via method of moments: estimates pi_on from the mean
-    corrected belief, measures the d-step transition frequency, then inverts
-    the matrix power formula to recover one-step rates.
+    Propagates belief across arbitrary gaps. A forward-backward bridge adds
+    expected one-step transition counts for every unobserved gap.
     """
 
     def __init__(
@@ -99,12 +99,16 @@ class GapAwareTransitionEstimator:
         p10_init: float = 0.5,
         pd: float = 0.9,
         pfa: float = 0.01,
-        rate_update_interval: int = 10,
+        rate_update_interval: int = 50,
+        fit_window: int = 1024,
     ) -> None:
         self._n_bands = n_bands
         self._pd = float(pd)
         self._pfa = float(pfa)
         self._rate_update_interval = int(rate_update_interval)
+        self._fit_window = int(fit_window)
+        self._p01_init = float(p01_init)
+        self._p10_init = float(p10_init)
 
         self._p01 = np.full(n_bands, p01_init, dtype=np.float64)
         self._p10 = np.full(n_bands, p10_init, dtype=np.float64)
@@ -114,11 +118,10 @@ class GapAwareTransitionEstimator:
         self._obs_count = np.zeros(n_bands, dtype=np.int64)
         self._prev_belief = np.full(n_bands, 0.5, dtype=np.float64)
 
-        # Moment accumulators for rate estimation
-        self._sum_belief = np.zeros(n_bands, dtype=np.float64)
-        self._sum_f01 = np.zeros(n_bands, dtype=np.float64)
-        self._sum_from0 = np.zeros(n_bands, dtype=np.float64)
-        self._sum_gap = np.zeros(n_bands, dtype=np.float64)
+        self._expected_counts = np.zeros((n_bands, 2, 2), dtype=np.float64)
+        self._events: list[deque[tuple[int, bool]]] = [
+            deque(maxlen=self._fit_window) for _ in range(n_bands)
+        ]
         self._n_pairs = np.zeros(n_bands, dtype=np.int64)
         self._since_update = np.zeros(n_bands, dtype=np.int64)
 
@@ -144,59 +147,121 @@ class GapAwareTransitionEstimator:
             return
         self._belief[band] = np.clip((l_on * b) / denom, 0.0, 1.0)
 
-    def _accumulate_pair(
-        self, band: int, gap: int,
-        b_prev_corrected: float, b_curr_corrected: float,
-    ) -> None:
-        """Accumulate d-step soft transition statistics from endpoint beliefs."""
+    def _bridge_statistics(
+        self,
+        band: int,
+        start_belief: float,
+        gap: int,
+        detection: bool,
+    ) -> tuple[float, NDArray[np.float64]]:
+        """Return the terminal posterior and expected transitions over one gap."""
         if gap < 1:
-            return
-        s_prev_off = 1.0 - b_prev_corrected
-        s_curr_on = b_curr_corrected
+            raise ValueError(f"gap must be positive, got {gap}")
 
-        self._sum_f01[band] += s_prev_off * s_curr_on
-        self._sum_from0[band] += s_prev_off
-        self._sum_gap[band] += gap
-        self._n_pairs[band] += 1
+        transition = np.array(
+            [
+                [1.0 - self._p01[band], self._p01[band]],
+                [self._p10[band], 1.0 - self._p10[band]],
+            ],
+            dtype=np.float64,
+        )
+        likelihood = np.array(
+            [
+                self._pfa if detection else 1.0 - self._pfa,
+                self._pd if detection else 1.0 - self._pd,
+            ],
+            dtype=np.float64,
+        )
+
+        forward = np.empty((gap + 1, 2), dtype=np.float64)
+        forward[0] = (1.0 - start_belief, start_belief)
+        for step in range(1, gap + 1):
+            forward[step] = forward[step - 1] @ transition
+
+        evidence = float(forward[gap] @ likelihood)
+        if evidence < 1e-15:
+            return float(forward[gap, 1]), np.zeros((2, 2), dtype=np.float64)
+
+        backward = np.empty((gap + 1, 2), dtype=np.float64)
+        backward[gap] = likelihood
+        for step in range(gap - 1, -1, -1):
+            backward[step] = transition @ backward[step + 1]
+
+        counts = np.zeros((2, 2), dtype=np.float64)
+        for step in range(gap):
+            counts += (
+                forward[step, :, None]
+                * transition
+                * backward[step + 1, None, :]
+                / evidence
+            )
+
+        posterior = forward[gap] * likelihood / evidence
+        return float(posterior[1]), counts
 
     def _maybe_update_rates(self, band: int) -> None:
-        """Reestimate p01/p10 using matrix power inversion."""
-        self._since_update[band] += 1
-        if self._since_update[band] < self._rate_update_interval:
-            return
-        self._since_update[band] = 0
-
-        n_obs = int(self._obs_count[band])
+        """Reestimate p01/p10 from accumulated expected transition counts."""
         n_pairs = int(self._n_pairs[band])
-        if n_obs < 4 or n_pairs < 2:
+        if n_pairs < 10 or (
+            n_pairs != 10 and n_pairs % self._rate_update_interval != 0
+        ):
             return
 
-        pi_on = self._sum_belief[band] / n_obs
-        pi_on = np.clip(pi_on, 0.02, 0.98)
-        pi_off = 1.0 - pi_on
-
-        # d-step OFF->ON transition frequency
-        if self._sum_from0[band] < 0.5:
+        events = tuple(self._events[band])
+        if len(events) < 4:
             return
-        f01_d = self._sum_f01[band] / self._sum_from0[band]
-        f01_d = np.clip(f01_d, 0.01, 0.99)
 
-        mean_gap = self._sum_gap[band] / max(n_pairs, 1)
-        mean_gap = max(mean_gap, 1.0)
+        if abs(1.0 - self._p01[band] - self._p10[band]) < 0.01:
+            detection_rate = sum(detection for _, detection in events) / len(events)
+            detector_span = self._pd - self._pfa
+            stationary_on = (
+                (detection_rate - self._pfa) / detector_span
+                if abs(detector_span) > 1e-12
+                else 0.5
+            )
+            stationary_on = float(np.clip(stationary_on, 0.02, 0.98))
+            initial_rate = 0.4
+            self._p01[band] = stationary_on * initial_rate
+            self._p10[band] = (1.0 - stationary_on) * initial_rate
 
-        # Invert [T^d]_{01} = pi_on * (1 - lambda^d)
-        # lambda^d = 1 - f01_d / pi_on
-        ratio = f01_d / pi_on
-        ratio = np.clip(ratio, 0.01, 0.99)
-        lam_d = 1.0 - ratio
-        lam_d = np.clip(lam_d, 1e-8, 1.0 - 1e-8)
-        lam = lam_d ** (1.0 / mean_gap)
-        lam = np.clip(lam, 0.0, 0.998)
+        for _ in range(4):
+            total_counts = np.zeros((2, 2), dtype=np.float64)
+            rate_sum = self._p01[band] + self._p10[band]
+            belief = self._p01[band] / rate_sum if rate_sum > 1e-15 else 0.5
+            self._belief[band] = belief
+            self._correct(band, events[0][1])
+            belief = float(self._belief[band])
 
-        s = 1.0 - lam
-        s = np.clip(s, 0.002, 0.998)
-        self._p01[band] = np.clip(pi_on * s, 0.001, 0.999)
-        self._p10[band] = np.clip(pi_off * s, 0.001, 0.999)
+            for (previous_slot, _), (slot, detection) in zip(events, events[1:]):
+                gap = slot - previous_slot
+                if gap < 1:
+                    continue
+                belief, counts = self._bridge_statistics(
+                    band,
+                    belief,
+                    gap,
+                    detection,
+                )
+                total_counts += counts
+
+            prior_weight = 0.5
+            off_total = float(total_counts[0].sum())
+            on_total = float(total_counts[1].sum())
+            self._p01[band] = np.clip(
+                (total_counts[0, 1] + prior_weight * self._p01_init)
+                / (off_total + prior_weight),
+                0.001,
+                0.999,
+            )
+            self._p10[band] = np.clip(
+                (total_counts[1, 0] + prior_weight * self._p10_init)
+                / (on_total + prior_weight),
+                0.001,
+                0.999,
+            )
+
+        self._expected_counts[band] = total_counts
+        self._belief[band] = belief
 
     def observe(self, band: int, slot: int, det: bool) -> None:
         """Process one (band, slot, detection) observation."""
@@ -206,22 +271,24 @@ class GapAwareTransitionEstimator:
         if prev_slot >= 0:
             gap = slot - prev_slot
             if gap > 0:
-                self._belief[band] = self._propagate_belief(band, gap)
-
-        self._correct(band, det)
-        self._sum_belief[band] += self._belief[band]
-
-        if prev_slot >= 0:
-            gap = slot - prev_slot
-            if gap > 0:
-                self._accumulate_pair(
-                    band, gap, b_prev_corrected, self._belief[band],
+                posterior, counts = self._bridge_statistics(
+                    band,
+                    b_prev_corrected,
+                    gap,
+                    det,
                 )
+                self._belief[band] = posterior
+                self._expected_counts[band] += counts
+                self._n_pairs[band] += 1
+        else:
+            self._correct(band, det)
 
         self._prev_belief[band] = self._belief[band]
         self._last_slot[band] = slot
         self._obs_count[band] += 1
+        self._events[band].append((slot, bool(det)))
         self._maybe_update_rates(band)
+        self._prev_belief[band] = self._belief[band]
 
     def p01(self) -> NDArray[np.float64]:
         return self._p01.copy()
@@ -241,15 +308,14 @@ class GapAwareTransitionEstimator:
         return 1.0 / (1.0 + self._n_pairs[band] * 0.1)
 
     def reset(self) -> None:
-        self._p01[:] = 0.5
-        self._p10[:] = 0.5
+        self._p01[:] = self._p01_init
+        self._p10[:] = self._p10_init
         self._belief[:] = 0.5
         self._prev_belief[:] = 0.5
         self._last_slot[:] = -1
         self._obs_count[:] = 0
-        self._sum_belief[:] = 0.0
-        self._sum_f01[:] = 0.0
-        self._sum_from0[:] = 0.0
-        self._sum_gap[:] = 0.0
+        self._expected_counts[:] = 0.0
+        for events in self._events:
+            events.clear()
         self._n_pairs[:] = 0
         self._since_update[:] = 0
