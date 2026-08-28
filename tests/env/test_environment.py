@@ -32,7 +32,7 @@ from ewscan.env import (
     emitter_from_info,
     generate_truth_matrix,
 )
-from ewscan.rng import make_generators
+from ewscan.rng import make_emitter_generators, make_generators
 
 
 # ---------------------------------------------------------------------------
@@ -205,8 +205,7 @@ class TestTruthMatrix:
         truth = env.truth
 
         # Reset emitters with the same child RNGs and step individually to verify OR
-        gens = make_generators(99)
-        child_rngs = gens["emitter"].spawn(2)
+        child_rngs = make_emitter_generators(99, 2)
         ge1_test = GilbertElliottEmitter(band=2, p01=0.2, p10=0.3, initial_state=0)
         ge2_test = GilbertElliottEmitter(band=2, p01=0.4, p10=0.1, initial_state=1)
         ge1_test.reset(child_rngs[0])

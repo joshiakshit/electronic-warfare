@@ -39,7 +39,13 @@ def _golden_k2_log() -> EpisodeLog:
         k=k,
         emitters=(
             EmitterInfo(band=0, snr=20.0, threat_level=1.0, emitter_type="cw"),
-            EmitterInfo(band=1, snr=15.0, threat_level=0.8, emitter_type="periodic"),
+            EmitterInfo(
+                band=1,
+                snr=15.0,
+                threat_level=0.8,
+                emitter_type="periodic",
+                params={"period": 4, "dwell": 2, "phase": 1},
+            ),
         ),
         detection_threshold=3.0,
         pfa=1e-3,

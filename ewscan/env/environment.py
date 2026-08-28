@@ -20,7 +20,7 @@ from ewscan.contracts import (
 )
 from ewscan.env.detection import DetectionModel
 from ewscan.env.emitters import emitter_from_info
-from ewscan.rng import make_generators
+from ewscan.rng import make_emitter_generators, make_generators
 
 
 class RFEnvironment:
@@ -220,8 +220,7 @@ class RFEnvironment:
         self._detection_model.reset(generators["detection"])
 
         # Reset emitters with independent child RNGs spawned from emitter subsystem
-        emitter_rng = generators["emitter"]
-        child_rngs = emitter_rng.spawn(len(self._emitters))
+        child_rngs = make_emitter_generators(self._seed, len(self._emitters))
         for em, rng_i in zip(self._emitters, child_rngs):
             em.reset(rng_i)
 

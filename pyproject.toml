@@ -26,8 +26,8 @@ dev = [
     "pytest-cov>=4.0",
 ]
 
-[tool.setuptools]
-packages = ["ewscan"]
+[tool.setuptools.packages.find]
+include = ["ewscan*"]
 
 [tool.setuptools.package-data]
 ewscan = ["py.typed"]

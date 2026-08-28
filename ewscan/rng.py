@@ -67,6 +67,18 @@ def make_generators(seed: int | np.random.SeedSequence) -> Dict[str, np.random.G
     }
 
 
+def make_emitter_generators(
+    seed: int | np.random.SeedSequence,
+    count: int,
+) -> tuple[np.random.Generator, ...]:
+    """Return independent emitter generators using SeedSequence spawning."""
+    if count < 0:
+        raise ValueError(f"count must be non-negative, got {count}")
+    root = seed if isinstance(seed, np.random.SeedSequence) else np.random.SeedSequence(seed)
+    emitter_sequence = root.spawn(len(SUBSYSTEMS))[SUBSYSTEMS.index("emitter")]
+    return tuple(np.random.default_rng(child) for child in emitter_sequence.spawn(count))
+
+
 def spawn_episode_seed(root_seed: int, episode_index: int) -> np.random.SeedSequence:
     """Derive a per-episode ``SeedSequence`` from a root seed and episode index.
 

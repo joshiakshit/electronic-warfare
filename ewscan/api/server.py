@@ -1,7 +1,7 @@
 from typing import Dict, Any, List
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import numpy as np
 
 from ewscan.contracts import EpisodeLog
@@ -29,7 +29,7 @@ class SimulationRequest(BaseModel):
     scenario_name: str
     scheduler_name: str
     seed: int = 42
-    k: int = 1
+    k: int = Field(default=1, ge=1)
 
 def _result_from_log(log: EpisodeLog, scheduler_name: str, seed: int) -> EpisodeResult:
     detection = estimate_detection_metrics(log)
@@ -121,5 +121,9 @@ def simulate(req: SimulationRequest):
             "baseline": _serialize_result(rr_res),
             "oracle": _serialize_result(oracle_res) if oracle_res else None
         }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc

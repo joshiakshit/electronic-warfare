@@ -148,7 +148,7 @@ class TestValidConfig:
             n_slots=100,
             k=1,
             emitters=(
-                EmitterInfo(band=0, snr=10.0, threat_level=0.5, emitter_type="test"),
+                EmitterInfo(band=0, snr=10.0, threat_level=0.5, emitter_type="cw"),
             ),
             detection_threshold=2.0,
             pfa=0.01,
