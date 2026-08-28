@@ -102,3 +102,41 @@ def test_irregular_scan_gaps_still_recover_true_period():
     detections = np.array(detections, dtype=bool)
 
     assert estimate_period(slots, detections) == 10
+
+
+def _sparse_observations(
+    period: int, dwell: int, scan_rate: float, seed: int
+) -> tuple[np.ndarray, np.ndarray]:
+    rng = np.random.default_rng(seed)
+    slots = np.flatnonzero(rng.random(2000) < scan_rate)
+    return slots, (slots % period) < dwell
+
+
+def test_sparse_period_20_recovers_at_twelve_percent_scan_rate():
+    slots, detections = _sparse_observations(20, 1, 0.12, seed=5)
+
+    assert estimate_period(slots, detections, sparse=True) == 20
+
+
+def test_sparse_periods_recover_across_radar_scan_rates():
+    recovered = 0
+    for scan_rate in (0.10, 0.15, 0.20):
+        for period, dwell in ((20, 3), (35, 4), (50, 5)):
+            slots, detections = _sparse_observations(period, dwell, scan_rate, seed=period)
+            recovered += estimate_period(slots, detections, sparse=True) == period
+
+    assert recovered >= 7
+
+
+def test_sparse_period_prefers_fundamental_over_harmonic():
+    slots, detections = _sparse_observations(20, 3, 0.10, seed=20)
+
+    assert estimate_period(slots, detections, sparse=True) == 20
+
+
+def test_sparse_aperiodic_series_returns_none():
+    rng = np.random.default_rng(99)
+    slots = np.flatnonzero(rng.random(2000) < 0.12)
+    detections = rng.random(len(slots)) < 0.15
+
+    assert estimate_period(slots, detections, sparse=True) is None
