@@ -222,8 +222,10 @@ def run_episode(
     # Execute episode time-stepping loop
     start_time = time.perf_counter()
     obs: Observation | None = None
-    for _ in range(ep_config.n_slots):
+    predictions = np.full(ep_config.n_slots, -1, dtype=np.intp)
+    for t in range(ep_config.n_slots):
         action = scheduler.act(obs)
+        predictions[t] = int(getattr(scheduler, "predicted_band", -1))
         obs = environment.step(action)
         recorder.record_observation(obs)
     duration = time.perf_counter() - start_time
@@ -236,7 +238,11 @@ def run_episode(
     interception = estimate_interception_metrics(log)
     first_intercept = estimate_first_intercept_metrics(log)
     reward = estimate_reward_metrics(log, rf=rf)
-    prediction = estimate_prediction_metrics(log)
+    # active=True only when a predictor produced at least one real prediction
+    had_prediction = bool(np.any(predictions >= 0))
+    prediction = estimate_prediction_metrics(
+        log, predictions=predictions if had_prediction else None
+    )
     time_error = estimate_time_error_metrics(log, miss_penalty=miss_penalty)
 
     return EpisodeResult(
