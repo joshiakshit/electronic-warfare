@@ -23,6 +23,8 @@ from ewscan.contracts import (
     Observation,
     ScanAction,
     Scheduler,
+    ThreatPrior,
+    scheduler_config_from_episode,
 )
 
 
@@ -31,7 +33,7 @@ def make_test_config(
     n_slots: int = 20,
     k: int = 1,
     seed: int = 0,
-    detection_threshold: float = 3.0,
+    detection_threshold: float | None = None,
     pfa: float = 1e-3,
     emitters: tuple[EmitterInfo, ...] = (),
 ) -> EpisodeConfig:
@@ -139,7 +141,7 @@ def synthetic_log(
         n_slots=n_slots,
         k=1,
         emitters=_build_default_emitters(n_bands),
-        detection_threshold=3.0,
+        detection_threshold=None,
         pfa=1e-3,
         seed=seed,
     )
@@ -195,7 +197,12 @@ class ScriptedEnv:
     (no noise). Used to test the runner and metrics without real emitters.
     """
 
-    def __init__(self, config: EpisodeConfig, truth: NDArray[np.bool_]):
+    def __init__(
+        self,
+        config: EpisodeConfig,
+        truth: NDArray[np.bool_],
+        threat_prior: ThreatPrior | None = None,
+    ):
         if truth.shape != (config.n_bands, config.n_slots):
             raise ValueError(
                 f"Truth shape {truth.shape} does not match config "
@@ -203,6 +210,7 @@ class ScriptedEnv:
             )
         self.config = config
         self.truth = truth
+        self._threat_prior = threat_prior
         self._slot = 0
 
     def reset(self) -> None:
@@ -228,7 +236,12 @@ class ScriptedEnv:
     def run(self, scheduler: Scheduler) -> EpisodeLog:
         """Run a full episode with the given scheduler and return the log."""
         self.reset()
-        scheduler.reset(self.config)
+        if self._threat_prior is not None:
+            scheduler.reset(
+                scheduler_config_from_episode(self.config, threat_prior=self._threat_prior)
+            )
+        else:
+            scheduler.reset(self.config)
 
         actions = np.zeros((self.config.n_slots, self.config.k), dtype=np.intp)
         detections = np.zeros((self.config.n_slots, self.config.k), dtype=np.bool_)

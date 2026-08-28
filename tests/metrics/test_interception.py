@@ -39,7 +39,7 @@ def _make_log(
     detections: np.ndarray,
     emitters: tuple[EmitterInfo, ...] = (),
     pfa: float = 1e-3,
-    detection_threshold: float = 3.0,
+    detection_threshold: float | None = None,
 ) -> EpisodeLog:
     """Convenience builder for custom test logs."""
     config = EpisodeConfig(
@@ -153,7 +153,7 @@ class TestOracleVsRandom:
 
         emitters = tuple(
             EmitterInfo(
-                band=b, snr=20.0, threat_level=1.0, emitter_type="dynamic"
+                band=b, snr=20.0, threat_level=1.0, emitter_type="cw"
             )
             for b in range(n_bands)
         )
@@ -162,7 +162,7 @@ class TestOracleVsRandom:
             n_slots=n_slots,
             k=1,
             emitters=emitters,
-            detection_threshold=3.0,
+            detection_threshold=None,
             pfa=1e-3,
             seed=seed,
         )
@@ -268,30 +268,21 @@ class TestEdgeCases:
         assert rate.n_hits == 0
         assert rate.n_slots == 10
 
-    def test_empty_log_zero_slots(self):
-        """Log with n_slots=0 returns NaNs cleanly."""
+    def test_empty_log_zero_slots_is_rejected(self):
+        """Episode configuration requires a positive slot count."""
         truth = np.zeros((2, 0), dtype=np.bool_)
         actions = np.array([], dtype=np.intp)
         detections = np.array([], dtype=np.bool_)
 
-        log = _make_log(n_bands=2, n_slots=0, truth=truth,
-                        actions=actions, detections=detections)
-
-        ratio = estimate_interception_ratio(log)
-        rate = estimate_intercept_rate(log)
-        per_emitter = estimate_per_emitter_interception(log)
-
-        assert math.isnan(ratio.ratio)
-        assert math.isnan(rate.rate)
-        assert ratio.n_hits == 0
-        assert rate.n_slots == 0
-        assert per_emitter == ()
+        with pytest.raises(ValueError, match="n_slots"):
+            _make_log(n_bands=2, n_slots=0, truth=truth,
+                      actions=actions, detections=detections)
 
     def test_emitter_never_transmits(self):
         """Emitter configured on a band that stays silent has NaN interception ratio."""
         emitters = (
             EmitterInfo(band=0, snr=20.0, threat_level=1.0, emitter_type="cw"),
-            EmitterInfo(band=1, snr=10.0, threat_level=0.5, emitter_type="silent"),
+            EmitterInfo(band=1, snr=10.0, threat_level=0.5, emitter_type="cw"),
         )
         truth = np.array([
             [True, True, True],

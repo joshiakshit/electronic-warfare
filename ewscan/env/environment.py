@@ -20,7 +20,7 @@ from ewscan.contracts import (
 )
 from ewscan.env.detection import DetectionModel
 from ewscan.env.emitters import emitter_from_info
-from ewscan.rng import make_generators
+from ewscan.rng import make_emitter_generators, make_generators
 
 
 class RFEnvironment:
@@ -70,6 +70,10 @@ class RFEnvironment:
                     dwell=config.dwell,
                 )
             )
+            if self._detection_model.capability != config.detector_capability:
+                raise ValueError(
+                    "detection_model capability must match the EpisodeConfig capability"
+                )
             self._config = config
         else:
             if n_bands <= 0:
@@ -118,12 +122,14 @@ class RFEnvironment:
                 self._detection_model = detection_model
                 pfa_val = detection_model.pfa
                 det_thresh = detection_model.threshold
+                dwell_val = detection_model.dwell
             else:
                 self._detection_model = DetectionModel(
                     pfa=pfa, threshold=detection_threshold, dwell=dwell
                 )
                 pfa_val = pfa
                 det_thresh = self._detection_model.threshold
+                dwell_val = dwell
 
             self._config = EpisodeConfig(
                 n_bands=self._n_bands,
@@ -134,7 +140,7 @@ class RFEnvironment:
                 pfa=pfa_val,
                 seed=self._seed,
                 retune_cost_slots=retune_cost_slots,
-                dwell=dwell,
+                dwell=dwell_val,
             )
 
         # Validate emitter band assignments
@@ -151,6 +157,12 @@ class RFEnvironment:
         )
         self._snr_matrix: NDArray[np.float64] = np.zeros(
             (self._n_bands, self._n_slots), dtype=np.float64
+        )
+        self._emitter_truth: NDArray[np.bool_] = np.zeros(
+            (len(self._emitters), self._n_slots), dtype=np.bool_
+        )
+        self._emitter_bands: NDArray[np.intp] = np.zeros(
+            (len(self._emitters), self._n_slots), dtype=np.intp
         )
         self._previous_bands: tuple[int, ...] | None = None
         self._settling_remaining = 0
@@ -202,6 +214,20 @@ class RFEnvironment:
             raise RuntimeError("Environment must be reset() before accessing truth")
         return self._truth.copy()
 
+    @property
+    def emitter_truth(self) -> NDArray[np.bool_]:
+        """Per-emitter ON state [n_emitters x n_slots]."""
+        if not self._is_reset:
+            raise RuntimeError("Environment must be reset() before accessing emitter_truth")
+        return self._emitter_truth.copy()
+
+    @property
+    def emitter_bands(self) -> NDArray[np.intp]:
+        """Per-emitter occupied band per slot [n_emitters x n_slots]."""
+        if not self._is_reset:
+            raise RuntimeError("Environment must be reset() before accessing emitter_bands")
+        return self._emitter_bands.copy()
+
     def reset(self, seed: int | None = None) -> None:
         """Reset the environment state and generate truth for a new episode.
 
@@ -220,8 +246,7 @@ class RFEnvironment:
         self._detection_model.reset(generators["detection"])
 
         # Reset emitters with independent child RNGs spawned from emitter subsystem
-        emitter_rng = generators["emitter"]
-        child_rngs = emitter_rng.spawn(len(self._emitters))
+        child_rngs = make_emitter_generators(self._seed, len(self._emitters))
         for em, rng_i in zip(self._emitters, child_rngs):
             em.reset(rng_i)
 
@@ -231,13 +256,26 @@ class RFEnvironment:
         self._settling_remaining = 0
         self._truth = np.zeros((self._n_bands, self._n_slots), dtype=np.bool_)
         power_matrix = np.zeros((self._n_bands, self._n_slots), dtype=np.float64)
+        n_em = len(self._emitters)
+        self._emitter_truth = np.zeros((n_em, self._n_slots), dtype=np.bool_)
+        self._emitter_bands = np.zeros((n_em, self._n_slots), dtype=np.intp)
 
         # Read each emitter's band per slot so frequency-agile emitters place
         # activity across bands. Fixed emitters return a constant current_band.
-        for em in self._emitters:
-            em_power_lin = 10.0 ** (em.snr / 10.0)
+        for i, em in enumerate(self._emitters):
+            power_lin = em.power_linear(self._n_slots)
+            if power_lin is None:
+                power_lin = np.full(self._n_slots, 10.0 ** (em.snr / 10.0), dtype=np.float64)
+            else:
+                power_lin = np.asarray(power_lin, dtype=np.float64)
+                if power_lin.shape != (self._n_slots,):
+                    raise ValueError(
+                        f"power_linear must return shape ({self._n_slots},), got {power_lin.shape}"
+                    )
             activity = em.activity(self._n_slots)
             if activity is None:
+                on_arr = np.zeros(self._n_slots, dtype=np.bool_)
+                band_arr = np.zeros(self._n_slots, dtype=np.intp)
                 for t in range(self._n_slots):
                     on = em.step()
                     b = em.current_band
@@ -246,24 +284,26 @@ class RFEnvironment:
                             f"Emitter reported band {b} at slot {t}, out of range "
                             f"[0, {self._n_bands - 1}]"
                         )
-                    if on:
-                        self._truth[b, t] = True
-                        power_matrix[b, t] += em_power_lin
-                continue
+                    on_arr[t] = on
+                    band_arr[t] = b
+            else:
+                on_arr, band_arr = activity
+                on_arr = np.asarray(on_arr, dtype=np.bool_)
+                band_arr = np.asarray(band_arr, dtype=np.intp)
+                out_of_range = (band_arr < 0) | (band_arr >= self._n_bands)
+                if out_of_range.any():
+                    t = int(np.argmax(out_of_range))
+                    raise ValueError(
+                        f"Emitter reported band {int(band_arr[t])} at slot {t}, out of "
+                        f"range [0, {self._n_bands - 1}]"
+                    )
 
-            on_arr, band_arr = activity
-            band_arr = np.asarray(band_arr, dtype=np.intp)
-            out_of_range = (band_arr < 0) | (band_arr >= self._n_bands)
-            if out_of_range.any():
-                t = int(np.argmax(out_of_range))
-                raise ValueError(
-                    f"Emitter reported band {int(band_arr[t])} at slot {t}, out of range "
-                    f"[0, {self._n_bands - 1}]"
-                )
+            self._emitter_truth[i] = on_arr
+            self._emitter_bands[i] = band_arr
             on_idx = np.flatnonzero(on_arr)
             bands_on = band_arr[on_idx]
             self._truth[bands_on, on_idx] = True
-            np.add.at(power_matrix, (bands_on, on_idx), em_power_lin)
+            np.add.at(power_matrix, (bands_on, on_idx), power_lin[on_idx])
 
         # Compute combined SNR matrix in dB
         with np.errstate(divide="ignore"):
@@ -325,19 +365,25 @@ class RFEnvironment:
                 self._config.retune_cost_slots * distance
             ))
         settling = self._settling_remaining > 0
-        detections = tuple(
-            self._detection_model.detect(
-                0.0 if settling else float(self._snr_matrix[b, t]),
-                False if settling else bool(self._truth[b, t]),
+        # A settling slot is unavailable sensor data: take no detector draw and
+        # mark the observation invalid so no learner or metric scores it.
+        if settling:
+            detections = tuple(False for _ in bands)
+        else:
+            detections = tuple(
+                self._detection_model.detect(
+                    float(self._snr_matrix[b, t]),
+                    bool(self._truth[b, t]),
+                )
+                for b in bands
             )
-            for b in bands
-        )
         obs = Observation(
             slot=t,
             bands=bands,
             detections=detections,
             retune_event=retune_event,
             settling=settling,
+            valid=not settling,
         )
 
         self._previous_bands = bands

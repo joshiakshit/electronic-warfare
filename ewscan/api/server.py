@@ -1,7 +1,7 @@
 from typing import Dict, Any, List
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import numpy as np
 
 from ewscan.contracts import EpisodeLog
@@ -11,7 +11,7 @@ from ewscan.metrics.detection import estimate_detection_metrics
 from ewscan.metrics.first_intercept import estimate_first_intercept_metrics
 from ewscan.metrics.interception import estimate_interception_metrics
 from ewscan.metrics.prediction import estimate_prediction_metrics
-from ewscan.metrics.reward import estimate_reward_metrics
+from ewscan.metrics.reward import estimate_evaluation_utility, estimate_reward_metrics
 from ewscan.metrics.time_error import estimate_time_error_metrics
 from ewscan.testing.fixtures import synthetic_log
 
@@ -29,13 +29,14 @@ class SimulationRequest(BaseModel):
     scenario_name: str
     scheduler_name: str
     seed: int = 42
-    k: int = 1
+    k: int = Field(default=1, ge=1)
 
 def _result_from_log(log: EpisodeLog, scheduler_name: str, seed: int) -> EpisodeResult:
     detection = estimate_detection_metrics(log)
     interception = estimate_interception_metrics(log)
     first_intercept = estimate_first_intercept_metrics(log)
     reward = estimate_reward_metrics(log)
+    evaluation = estimate_evaluation_utility(log)
     prediction = estimate_prediction_metrics(log)
     time_error = estimate_time_error_metrics(log)
     return EpisodeResult(
@@ -43,10 +44,12 @@ def _result_from_log(log: EpisodeLog, scheduler_name: str, seed: int) -> Episode
         scheduler_name=scheduler_name,
         seed=seed,
         log=log,
+        track="oracle" if scheduler_name == "oracle" else "blind",
         detection=detection,
         interception=interception,
         first_intercept=first_intercept,
         reward=reward,
+        evaluation=evaluation,
         prediction=prediction,
         time_error=time_error,
         duration_seconds=0.0,
@@ -56,6 +59,13 @@ def _serialize_result(res: EpisodeResult) -> Dict[str, Any]:
     log = res.log
     return {
         "scheduler_name": res.scheduler_name,
+        "detector": {
+            "requested_pfa": res.detection.capability.requested_pfa,
+            "effective_pfa": res.detection.capability.effective_pfa,
+            "threshold": res.detection.capability.threshold,
+            "dwell": res.detection.capability.dwell,
+            "nominal_pd": res.detection.capability.nominal_pd,
+        },
         "metrics": {
             "interception_ratio": float(res.interception.interception_ratio.ratio) if np.isfinite(res.interception.interception_ratio.ratio) else 0.0,
             "average_reward": float(res.reward.average_reward) if np.isfinite(res.reward.average_reward) else 0.0,
@@ -121,5 +131,9 @@ def simulate(req: SimulationRequest):
             "baseline": _serialize_result(rr_res),
             "oracle": _serialize_result(oracle_res) if oracle_res else None
         }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc

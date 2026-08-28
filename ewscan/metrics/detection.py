@@ -47,7 +47,8 @@ from dataclasses import dataclass, field
 import numpy as np
 from numpy.typing import NDArray
 
-from ewscan.contracts import EpisodeLog
+from ewscan.contracts import DetectorCapability, EpisodeLog
+from ewscan.metrics._emitter import emitter_activity
 
 
 # ---------------------------------------------------------------------------
@@ -149,6 +150,7 @@ class DetectionMetrics:
     sensitivity into a single result object.
     """
 
+    capability: DetectorCapability
     pd: PdEstimate
     pfa: PfaEstimate
     per_emitter_pd: tuple[EmitterPdEstimate, ...]
@@ -175,6 +177,11 @@ def _scanned_truth(log: EpisodeLog) -> NDArray[np.bool_]:
     return result
 
 
+def _valid_slot_mask(log: EpisodeLog) -> NDArray[np.bool_]:
+    """Per-channel validity mask (n_slots, k): invalid slots score nothing."""
+    return log.valid_slots[:, None]
+
+
 def estimate_pd(log: EpisodeLog) -> PdEstimate:
     """Estimate the aggregate probability of detection from an episode log.
 
@@ -188,7 +195,7 @@ def estimate_pd(log: EpisodeLog) -> PdEstimate:
     PdEstimate
         The aggregate Pd estimate with supporting counts.
     """
-    scanned_on = _scanned_truth(log)  # bool[n_slots]: was the scanned band ON?
+    scanned_on = _scanned_truth(log) & _valid_slot_mask(log)
     n_scans_on = int(np.count_nonzero(scanned_on))
     if n_scans_on == 0:
         return PdEstimate(pd=float("nan"), n_hits=0, n_scans_on=0)
@@ -217,7 +224,7 @@ def estimate_pfa(log: EpisodeLog) -> PfaEstimate:
         The aggregate Pfa estimate with supporting counts.
     """
     scanned_on = _scanned_truth(log)
-    scanned_off = ~scanned_on
+    scanned_off = ~scanned_on & _valid_slot_mask(log)
     n_scans_off = int(np.count_nonzero(scanned_off))
     if n_scans_off == 0:
         return PfaEstimate(pfa=float("nan"), n_false_alarms=0, n_scans_off=0)
@@ -265,25 +272,13 @@ def estimate_per_emitter_pd(log: EpisodeLog) -> tuple[EmitterPdEstimate, ...]:
 
     for idx, emitter_info in enumerate(log.config.emitters):
         band = emitter_info.band
+        on, em_bands = emitter_activity(log, idx)
 
-        # Skip emitters with out-of-range bands
-        if band < 0 or band >= log.n_bands:
-            results.append(EmitterPdEstimate(
-                emitter_index=idx,
-                band=band,
-                snr=emitter_info.snr,
-                pd=float("nan"),
-                n_hits=0,
-                n_scans_on=0,
-            ))
-            continue
-
-        # Channel-slots where the scanner was tuned to this emitter's band
-        scanned_this_band = log.actions == band
-
-        # Of those, which ones had the band actually ON?
-        # (truth is band-level, not per-emitter — see docstring caveat)
-        on_and_scanned = scanned_this_band & log.truth[band, :][:, None]
+        # Channel-slots where the scanner was tuned to this emitter's occupied
+        # band while it was transmitting (per-emitter truth handles hoppers and
+        # co-resident emitters).
+        scanned_emitter = log.actions == em_bands[:, None]
+        on_and_scanned = scanned_emitter & on[:, None] & _valid_slot_mask(log)
         n_scans_on = int(np.count_nonzero(on_and_scanned))
 
         if n_scans_on == 0:
@@ -407,6 +402,7 @@ def estimate_detection_metrics(
     sens = estimate_sensitivity(log, pd_threshold=pd_threshold)
 
     return DetectionMetrics(
+        capability=log.config.detector_capability,
         pd=pd_est,
         pfa=pfa_est,
         per_emitter_pd=per_emitter,

@@ -121,7 +121,18 @@ def estimate_reward_metrics(
     revisit_decays = np.empty(n_slots, dtype=np.float64)
     retune_penalties = np.zeros(n_slots, dtype=np.float64)
 
+    valid_slots = log.valid_slots
     for t in range(n_slots):
+        # A settling/invalid slot is not a learning sample: it accrues no
+        # reward and does not age or reset band staleness (mirrors the learner).
+        if not valid_slots[t]:
+            hit_rewards[t] = 0.0
+            miss_costs[t] = 0.0
+            novelty_bonuses[t] = 0.0
+            revisit_decays[t] = 0.0
+            retune_penalties[t] = 0.0
+            per_slot_rewards[t] = 0.0
+            continue
         bands_t = log.actions[t]
         dets_t = log.detections[t]
         r_hit = r_miss = r_novelty = r_decay = 0.0
@@ -173,6 +184,83 @@ def estimate_reward_metrics(
         average_revisit_decay=tot_decay / n_slots,
         average_retune_penalty=tot_retune / n_slots,
         per_slot_rewards=per_slot_rewards,
+        n_slots=n_slots,
+    )
+
+
+@dataclass(frozen=True)
+class EvaluationUtility:
+    """Truth-based evaluation utility, distinct from the learner reward.
+
+    Credits a channel only for a true positive (scanned band truly transmitting
+    and detected). A false alarm earns nothing. A missed real transmission costs
+    ``c_miss``. Retune events cost ``c_retune``. Invalid slots are skipped.
+    """
+
+    total_utility: float
+    average_utility: float
+    n_true_positive: int
+    n_false_negative: int
+    n_false_alarm: int
+    total_retune_penalty: float
+    miss_cost_used: float
+    n_slots: int
+
+
+def estimate_evaluation_utility(
+    log: EpisodeLog,
+    rf: RewardFunction | None = None,
+) -> EvaluationUtility:
+    """Compute the truth-based evaluation utility for an episode log."""
+    if rf is None:
+        rf = RewardFunction()
+
+    n_slots = log.n_slots
+    n_bands = log.n_bands
+    k = log.config.k
+
+    threat_map = np.full(n_bands, rf.baseline_threat, dtype=np.float64)
+    for em in log.config.emitters:
+        if 0 <= em.band < n_bands:
+            threat_map[em.band] = max(threat_map[em.band], em.threat_level)
+
+    total = 0.0
+    n_tp = n_fn = n_fa = 0
+    total_retune = 0.0
+    valid_slots = log.valid_slots
+
+    for t in range(n_slots):
+        if not valid_slots[t]:
+            continue
+        bands_t = log.actions[t]
+        dets_t = log.detections[t]
+        for j in range(k):
+            band = int(bands_t[j])
+            if band < 0 or band >= n_bands:
+                continue
+            truly_on = bool(log.truth[band, t])
+            det = bool(dets_t[j])
+            if truly_on and det:
+                total += rf.w_threat * float(threat_map[band])
+                n_tp += 1
+            elif truly_on and not det:
+                total += -rf.c_miss
+                n_fn += 1
+            elif (not truly_on) and det:
+                n_fa += 1
+        if log.config.retune_cost_slots > 0 and log.retune_events[t]:
+            total += -rf.c_retune
+            total_retune += -rf.c_retune
+
+    average = total / n_slots if n_slots > 0 else float("nan")
+    return EvaluationUtility(
+        total_utility=total,
+        average_utility=average,
+        n_true_positive=n_tp,
+        n_false_negative=n_fn,
+        n_false_alarm=n_fa,
+        total_retune_penalty=total_retune,
+        miss_cost_used=rf.c_miss,
         n_slots=n_slots,
     )
 

@@ -39,33 +39,18 @@ from __future__ import annotations
 
 import numpy as np
 
+from ewscan.detector import (
+    DetectorCapability,
+    make_detector_capability,
+    pfa_from_threshold,
+    pfa_from_threshold_dlook,
+    threshold_from_pfa,
+)
+
 
 # ---------------------------------------------------------------------------
 # ROC equations -- pure functions, no state
 # ---------------------------------------------------------------------------
-
-def threshold_from_pfa(pfa: float) -> float:
-    """Compute the detection threshold λ from a desired false-alarm rate.
-
-    Parameters
-    ----------
-    pfa:
-        Probability of false alarm, must satisfy 0 < pfa < 1.
-
-    Returns
-    -------
-    float
-        Detection threshold λ = -ln(pfa).
-
-    Raises
-    ------
-    ValueError
-        If *pfa* is outside (0, 1).
-    """
-    if not (0.0 < pfa < 1.0):
-        raise ValueError(f"pfa must be in (0, 1), got {pfa}")
-    return -np.log(pfa)
-
 
 def pd_from_snr(snr_db: float, threshold: float) -> float:
     """Probability of detection for a single-pulse square-law detector.
@@ -85,24 +70,6 @@ def pd_from_snr(snr_db: float, threshold: float) -> float:
     """
     snr_lin = 10.0 ** (snr_db / 10.0)
     return float(np.exp(-threshold / (1.0 + snr_lin)))
-
-
-def pfa_from_threshold(threshold: float) -> float:
-    """Recover the false-alarm probability from a threshold.
-
-    Inverse of ``threshold_from_pfa``.
-
-    Parameters
-    ----------
-    threshold:
-        Detection threshold λ ≥ 0.
-
-    Returns
-    -------
-    float
-        Pfa = exp(-λ).
-    """
-    return float(np.exp(-threshold))
 
 
 def _dlook_survival(x: float, dwell: int) -> float:
@@ -144,29 +111,6 @@ def pd_from_snr_dlook(snr_db: float, threshold: float, dwell: int) -> float:
     """
     snr_lin = 10.0 ** (snr_db / 10.0)
     x = dwell * threshold / (1.0 + snr_lin)
-    return _dlook_survival(x, dwell)
-
-
-def pfa_from_threshold_dlook(threshold: float, dwell: int) -> float:
-    """False-alarm probability for a d-look non-coherent (square-law) integrator.
-
-    Non-CFAR (decision D-A1): summing ``dwell`` looks against Λ = dwell * λ
-    means Pfa is not held constant across dwell values.
-
-    Parameters
-    ----------
-    threshold:
-        Per-look detection threshold λ.
-    dwell:
-        Number of integrated looks, dwell >= 1.
-
-    Returns
-    -------
-    float
-        Pfa_d = exp(-Λ) * sum_{n=0}^{dwell-1} Λ^n / n!, with Λ = dwell * λ.
-        At dwell=1 this equals ``pfa_from_threshold`` exactly.
-    """
-    x = dwell * threshold
     return _dlook_survival(x, dwell)
 
 
@@ -255,10 +199,7 @@ class DetectionModel:
     pfa:
         Desired false-alarm probability (0 < pfa < 1).
     threshold:
-        If given, overrides the threshold derived from *pfa*.  The caller
-        is responsible for consistency; ``self.pfa`` will still reflect the
-        constructor argument for logging, but the actual false-alarm rate
-        will be ``exp(-threshold)``.
+        Optional explicit threshold. It must match the value derived from Pfa.
     dwell:
         Number of integrated looks per scan, dwell >= 1 (default 1). Each
         call to ``detect``/``detect_batch`` still draws exactly one uniform
@@ -266,13 +207,14 @@ class DetectionModel:
     """
 
     def __init__(self, pfa: float, threshold: float | None = None, dwell: int = 1) -> None:
-        if not (0.0 < pfa < 1.0):
-            raise ValueError(f"pfa must be in (0, 1), got {pfa}")
-        if not isinstance(dwell, int) or isinstance(dwell, bool) or dwell < 1:
-            raise ValueError(f"dwell must be a positive integer, got {dwell!r}")
-        self.pfa = pfa
-        self.threshold = threshold if threshold is not None else threshold_from_pfa(pfa)
-        self.dwell = dwell
+        self.capability: DetectorCapability = make_detector_capability(
+            pfa=pfa,
+            threshold=threshold,
+            dwell=dwell,
+        )
+        self.pfa = self.capability.requested_pfa
+        self.threshold = self.capability.threshold
+        self.dwell = self.capability.dwell
         self._rng: np.random.Generator | None = None
 
     def reset(self, rng: np.random.Generator) -> None:

@@ -74,7 +74,7 @@ def _build_scenario_config(seed: int = 42) -> EpisodeConfig:
         n_slots=100,
         emitters=emitters,
         pfa=1e-3,
-        detection_threshold=3.0,
+        detection_threshold=None,
         seed=seed,
     )
 

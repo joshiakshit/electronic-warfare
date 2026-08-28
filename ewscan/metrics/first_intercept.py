@@ -30,6 +30,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from ewscan.contracts import EpisodeLog
+from ewscan.metrics._emitter import emitter_activity
 
 
 # ---------------------------------------------------------------------------
@@ -77,6 +78,8 @@ class FirstInterceptMetrics:
 
     per_emitter: tuple[EmitterFirstIntercept, ...]
     mean_time_to_first_intercept: float
+    mean_time_to_first_intercept_penalized: float
+    intercept_fraction: float
     n_emitters: int
     n_intercepted: int
 
@@ -120,12 +123,13 @@ def estimate_per_emitter_first_intercept(
     slots = np.arange(log.n_slots)[:, None]
     scanned_truth = log.truth[safe_actions, slots]
     scanned_truth[~valid_actions] = False
-    hits = log.detections & scanned_truth
+    hits = log.detections & scanned_truth & log.valid_slots[:, None]
 
     for idx, emitter_info in enumerate(log.config.emitters):
         band = emitter_info.band
-        scanned_this_band = log.actions == band
-        emitter_hits = (hits & scanned_this_band).any(axis=1)
+        on, em_bands = emitter_activity(log, idx)
+        scanned_emitter = log.actions == em_bands[:, None]
+        emitter_hits = (hits & scanned_emitter & on[:, None]).any(axis=1)
 
         hit_slots = np.flatnonzero(emitter_hits)
         if len(hit_slots) > 0:
@@ -179,9 +183,25 @@ def estimate_first_intercept_metrics(log: EpisodeLog) -> FirstInterceptMetrics:
     else:
         mean_ttfi = float("nan")
 
+    # Horizon-penalized TTFI charges every missed emitter the full episode
+    # length, so a scheduler cannot look good by ignoring hard emitters.
+    if n_emitters > 0:
+        horizon = float(log.n_slots)
+        penalized = [
+            float(e.first_intercept_slot) if e.first_intercept_slot is not None else horizon
+            for e in per_emitter
+        ]
+        mean_ttfi_penalized = float(np.mean(penalized))
+        intercept_fraction = n_intercepted / n_emitters
+    else:
+        mean_ttfi_penalized = float("nan")
+        intercept_fraction = float("nan")
+
     return FirstInterceptMetrics(
         per_emitter=per_emitter,
         mean_time_to_first_intercept=mean_ttfi,
+        mean_time_to_first_intercept_penalized=mean_ttfi_penalized,
+        intercept_fraction=intercept_fraction,
         n_emitters=n_emitters,
         n_intercepted=n_intercepted,
     )

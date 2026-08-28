@@ -137,7 +137,6 @@ class TestDwellConfigRoundTrip:
             "n_bands": 8,
             "n_slots": 100,
             "k": 1,
-            "detection_threshold": 2.5,
             "pfa": 1e-3,
         }
 
@@ -174,7 +173,7 @@ class TestEpisodeConfigDwellValidation:
                 n_slots=10,
                 k=1,
                 emitters=(),
-                detection_threshold=3.0,
+                detection_threshold=None,
                 pfa=1e-3,
                 dwell=bad_dwell,
             )

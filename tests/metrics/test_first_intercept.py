@@ -33,7 +33,7 @@ def _make_log(
     detections: np.ndarray,
     emitters: tuple[EmitterInfo, ...] = (),
     pfa: float = 1e-3,
-    detection_threshold: float = 3.0,
+    detection_threshold: float | None = None,
 ) -> EpisodeLog:
     """Convenience builder for custom test logs."""
     config = EpisodeConfig(
@@ -113,8 +113,8 @@ class TestHandCraftedTimings:
         """Unintercepted emitters have first_intercept_slot=None and do not corrupt mean TTFI."""
         emitters = (
             EmitterInfo(band=0, snr=20.0, threat_level=1.0, emitter_type="cw"),
-            EmitterInfo(band=1, snr=15.0, threat_level=0.8, emitter_type="bursty"),
-            EmitterInfo(band=2, snr=10.0, threat_level=0.5, emitter_type="silent"),
+            EmitterInfo(band=1, snr=15.0, threat_level=0.8, emitter_type="cw"),
+            EmitterInfo(band=2, snr=10.0, threat_level=0.5, emitter_type="cw"),
         )
         # 3 bands, 6 slots
         # Band 0: ON slots 0..5
@@ -154,7 +154,7 @@ class TestHandCraftedTimings:
     def test_false_alarm_does_not_trigger_first_intercept(self):
         """A false alarm on an emitter's band when it is silent must NOT register as first intercept."""
         emitters = (
-            EmitterInfo(band=0, snr=20.0, threat_level=1.0, emitter_type="bursty"),
+            EmitterInfo(band=0, snr=20.0, threat_level=1.0, emitter_type="cw"),
         )
         # Band 0 is OFF for slots 0..3, ON for slots 4..7
         truth = np.zeros((1, 8), dtype=np.bool_)
@@ -240,8 +240,8 @@ class TestEdgeCases:
         assert metrics.per_emitter[0].first_intercept_slot is None
         assert metrics.per_emitter[1].first_intercept_slot is None
 
-    def test_zero_slots_episode(self):
-        """Episode with n_slots=0 handles cleanly."""
+    def test_zero_slots_episode_is_rejected(self):
+        """Episode configuration requires a positive slot count."""
         emitters = (
             EmitterInfo(band=0, snr=20.0, threat_level=1.0, emitter_type="cw"),
         )
@@ -249,12 +249,6 @@ class TestEdgeCases:
         actions = np.array([], dtype=np.intp)
         detections = np.array([], dtype=np.bool_)
 
-        log = _make_log(n_bands=1, n_slots=0, truth=truth,
-                        actions=actions, detections=detections, emitters=emitters)
-
-        metrics = estimate_first_intercept_metrics(log)
-        assert metrics.n_emitters == 1
-        assert metrics.n_intercepted == 0
-        assert math.isnan(metrics.mean_time_to_first_intercept)
-        assert metrics.per_emitter[0].first_intercept_slot is None
-        assert metrics.per_emitter[0].intercepted is False
+        with pytest.raises(ValueError, match="n_slots"):
+            _make_log(n_bands=1, n_slots=0, truth=truth,
+                      actions=actions, detections=detections, emitters=emitters)

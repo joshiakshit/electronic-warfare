@@ -110,7 +110,7 @@ class TestConfidentOverrideHappens:
         )
         return make_test_config(
             n_bands=3, n_slots=n_slots, k=2, seed=seed,
-            detection_threshold=3.0, pfa=1e-4, emitters=emitters,
+            detection_threshold=None, pfa=1e-4, emitters=emitters,
         )
 
     def test_sniped_band_appears_on_due_slots(self):

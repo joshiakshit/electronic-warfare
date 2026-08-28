@@ -6,6 +6,7 @@ Verify criterion (PLAN.md 1A.4):
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 import tempfile
 import pytest
@@ -33,14 +34,13 @@ class TestValidConfig:
             "n_bands": 8,
             "n_slots": 1000,
             "k": 1,
-            "detection_threshold": 2.5,
             "pfa": 1e-3,
         }
         cfg = config_from_dict(data)
         assert cfg.n_bands == 8
         assert cfg.n_slots == 1000
         assert cfg.k == 1
-        assert cfg.detection_threshold == 2.5
+        assert cfg.detection_threshold == pytest.approx(-math.log(1e-3))
         assert cfg.pfa == 1e-3
         assert cfg.seed == 0
         assert cfg.emitters == ()
@@ -51,7 +51,6 @@ class TestValidConfig:
             "n_bands": 8,
             "n_slots": 100,
             "k": 1,
-            "detection_threshold": 2.5,
             "pfa": 1e-3,
             "retune_cost_slots": 2,
         }
@@ -64,7 +63,6 @@ class TestValidConfig:
             "n_bands": 16,
             "n_slots": 2000,
             "k": 1,
-            "detection_threshold": 3.0,
             "pfa": 1e-4,
             "seed": 42,
             "emitters": [
@@ -117,7 +115,7 @@ class TestValidConfig:
                     params={"p01": 0.1, "p10": 0.3},
                 ),
             ),
-            detection_threshold=4.0,
+            detection_threshold=None,
             pfa=1e-5,
             seed=123,
         )
@@ -131,7 +129,7 @@ class TestValidConfig:
             n_slots=100,
             k=1,
             emitters=(),
-            detection_threshold=2.0,
+            detection_threshold=None,
             pfa=0.01,
             seed=7,
         )
@@ -148,9 +146,9 @@ class TestValidConfig:
             n_slots=100,
             k=1,
             emitters=(
-                EmitterInfo(band=0, snr=10.0, threat_level=0.5, emitter_type="test"),
+                EmitterInfo(band=0, snr=10.0, threat_level=0.5, emitter_type="cw"),
             ),
-            detection_threshold=2.0,
+            detection_threshold=None,
             pfa=0.01,
             seed=7,
         )

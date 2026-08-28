@@ -83,7 +83,7 @@ class SniperScheduler(BaseLearningScheduler):
         # Score and fold in the previous action's outcomes before choosing
         # the next slot. Addendum E: record_outcome must run before observe,
         # or observe's _last_hit advance makes the due-slot check look wrong.
-        if obs is not None:
+        if obs is not None and obs.valid:
             for band, det in zip(obs.bands, obs.detections):
                 self._predictor.record_outcome(band, obs.slot, det)
                 self._predictor.observe(band, obs.slot, det)

@@ -7,7 +7,13 @@ from numpy.typing import NDArray
 
 from ewscan.agents.reward import RewardFunction
 from ewscan.agents.stats import BandStatistics
-from ewscan.contracts import EpisodeConfig, Observation, Scheduler
+from ewscan.contracts import (
+    EpisodeConfig,
+    Observation,
+    SchedulerConfig,
+    Scheduler,
+    as_scheduler_config,
+)
 from ewscan.rng import make_generators
 
 
@@ -44,8 +50,15 @@ class BaseLearningScheduler(Scheduler):
             raise RuntimeError("Scheduler must be reset before accessing stats")
         return self._stats
 
-    def reset(self, config: EpisodeConfig) -> None:
-        """Reset scheduler state for a new episode."""
+    def reset(self, config: SchedulerConfig | EpisodeConfig) -> None:
+        """Reset scheduler state for a new episode.
+
+        Any EpisodeConfig is reduced to the blind scheduler view first, so a
+        learning scheduler can never read emitter bands, types, SNRs, threat
+        levels, or transition parameters. Threat weighting is available only
+        through an explicit ThreatPrior.
+        """
+        config = as_scheduler_config(config)
         if config.n_bands <= 0:
             raise ValueError(f"n_bands must be positive, got {config.n_bands}")
 
@@ -54,14 +67,15 @@ class BaseLearningScheduler(Scheduler):
         self._retune_cost_slots = config.retune_cost_slots
         self._stats = BandStatistics(config.n_bands)
 
-        # Build threat map
+        # Build threat map from the explicit prior only. Without a prior every
+        # band shares the baseline weight, so hidden emitter data cannot leak.
         baseline = (
             self._reward_fn.baseline_threat if self._reward_fn is not None else 0.1
         )
         threat_map = np.full(config.n_bands, baseline, dtype=np.float64)
-        for em in config.emitters:
-            if 0 <= em.band < config.n_bands:
-                threat_map[em.band] = max(threat_map[em.band], float(em.threat_level))
+        if config.threat_prior is not None:
+            weights = np.asarray(config.threat_prior.weights, dtype=np.float64)
+            threat_map = np.maximum(threat_map, weights)
         self._threat_map = threat_map
 
         # Initialize RNG for tie-breaking and sampling

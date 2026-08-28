@@ -10,7 +10,7 @@ import yaml
 from ewscan.contracts import EmitterInfo, EpisodeConfig
 
 
-class ConfigError(Exception):
+class ConfigError(ValueError):
     """Raised when a configuration file or dictionary is malformed or invalid."""
 
 
@@ -20,7 +20,7 @@ def config_from_dict(data: dict[str, Any]) -> EpisodeConfig:
         raise ConfigError(f"Configuration data must be a dictionary, got {type(data).__name__}")
 
     # Check required fields
-    required_fields = ["n_bands", "n_slots", "k", "detection_threshold", "pfa"]
+    required_fields = ["n_bands", "n_slots", "k", "pfa"]
     missing = [field for field in required_fields if field not in data]
     if missing:
         raise ConfigError(f"Missing required configuration fields: {', '.join(missing)}")
@@ -44,13 +44,18 @@ def config_from_dict(data: dict[str, Any]) -> EpisodeConfig:
     if not isinstance(pfa, (int, float)) or isinstance(pfa, bool):
         raise ConfigError(f"'pfa' must be a number between 0.0 and 1.0, got {pfa!r}")
     pfa = float(pfa)
-    if not (0.0 <= pfa <= 1.0):
-        raise ConfigError(f"'pfa' must be between 0.0 and 1.0, got {pfa}")
+    if not (0.0 < pfa < 1.0):
+        raise ConfigError(f"'pfa' must be in (0.0, 1.0), got {pfa}")
 
-    detection_threshold = data["detection_threshold"]
-    if not isinstance(detection_threshold, (int, float)) or isinstance(detection_threshold, bool):
-        raise ConfigError(f"'detection_threshold' must be a number, got {detection_threshold!r}")
-    detection_threshold = float(detection_threshold)
+    detection_threshold = data.get("detection_threshold")
+    if detection_threshold is not None:
+        if not isinstance(detection_threshold, (int, float)) or isinstance(detection_threshold, bool):
+            raise ConfigError(f"'detection_threshold' must be a number, got {detection_threshold!r}")
+        detection_threshold = float(detection_threshold)
+        if detection_threshold <= 0.0:
+            raise ConfigError(
+                f"'detection_threshold' must be positive, got {detection_threshold}"
+            )
 
     seed = data.get("seed", 0)
     if not isinstance(seed, int) or isinstance(seed, bool):
@@ -115,17 +120,20 @@ def config_from_dict(data: dict[str, Any]) -> EpisodeConfig:
             )
         )
 
-    return EpisodeConfig(
-        n_bands=n_bands,
-        n_slots=n_slots,
-        k=k,
-        emitters=tuple(emitters_list),
-        detection_threshold=detection_threshold,
-        pfa=pfa,
-        seed=seed,
-        retune_cost_slots=retune_cost_slots,
-        dwell=dwell,
-    )
+    try:
+        return EpisodeConfig(
+            n_bands=n_bands,
+            n_slots=n_slots,
+            k=k,
+            emitters=tuple(emitters_list),
+            detection_threshold=detection_threshold,
+            pfa=pfa,
+            seed=seed,
+            retune_cost_slots=retune_cost_slots,
+            dwell=dwell,
+        )
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
 
 
 def config_to_dict(config: EpisodeConfig) -> dict[str, Any]:

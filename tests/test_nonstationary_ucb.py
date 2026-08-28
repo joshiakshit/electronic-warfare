@@ -11,7 +11,14 @@ import pytest
 
 from ewscan.agents.nonstationary_ucb import DUCB1Scheduler, SWUCB1Scheduler
 from ewscan.agents.ucb import UCB1Scheduler
-from ewscan.contracts import EmitterInfo, Observation, ScanAction, Scheduler
+from ewscan.contracts import (
+    EmitterInfo,
+    Observation,
+    ScanAction,
+    Scheduler,
+    ThreatPrior,
+    scheduler_config_from_episode,
+)
 from ewscan.testing.fixtures import ScriptedEnv, make_test_config
 
 
@@ -205,8 +212,9 @@ class TestThreatWeighting:
             EmitterInfo(band=1, snr=20.0, threat_level=0.1, emitter_type="cw"),
         )
         config = make_test_config(n_bands=2, n_slots=10, emitters=emitters)
+        prior = ThreatPrior(weights=(1.0, 0.1), provenance="test-intel")
         s = DUCB1Scheduler(use_threat_weighting=True, seed=0)
-        s.reset(config)
+        s.reset(scheduler_config_from_episode(config, threat_prior=prior))
 
         s.act(None)
         s.act(Observation(slot=0, bands=(0,), detections=(True,)))
@@ -220,8 +228,9 @@ class TestThreatWeighting:
             EmitterInfo(band=1, snr=20.0, threat_level=0.1, emitter_type="cw"),
         )
         config = make_test_config(n_bands=2, n_slots=10, emitters=emitters)
+        prior = ThreatPrior(weights=(1.0, 0.1), provenance="test-intel")
         s = SWUCB1Scheduler(use_threat_weighting=True, seed=0)
-        s.reset(config)
+        s.reset(scheduler_config_from_episode(config, threat_prior=prior))
 
         s.act(None)
         s.act(Observation(slot=0, bands=(0,), detections=(True,)))

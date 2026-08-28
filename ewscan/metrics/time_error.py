@@ -46,6 +46,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from ewscan.contracts import EpisodeLog
+from ewscan.metrics._emitter import emitter_activity
 
 
 # ---------------------------------------------------------------------------
@@ -193,7 +194,7 @@ def _compute_scanned_hits(log: EpisodeLog) -> NDArray[np.bool_]:
     slots = np.arange(log.n_slots)[:, None]
     scanned_truth = log.truth[safe, slots]
     scanned_truth[~valid] = False
-    return log.detections & scanned_truth
+    return log.detections & scanned_truth & log.valid_slots[:, None]
 
 
 # ---------------------------------------------------------------------------
@@ -224,28 +225,15 @@ def estimate_per_emitter_time_error(
 
     for idx, emitter_info in enumerate(log.config.emitters):
         band = emitter_info.band
-        if band < 0 or band >= log.n_bands:
-            results.append(
-                EmitterTimeError(
-                    emitter_index=idx,
-                    band=band,
-                    mean_time_error=float("nan"),
-                    mean_time_error_penalized=float("nan"),
-                    n_bursts=0,
-                    n_intercepted_bursts=0,
-                    burst_interception_ratio=float("nan"),
-                    bursts=(),
-                )
-            )
-            continue
+        on, em_bands = emitter_activity(log, idx)
 
-        raw_bursts = extract_bursts(log.truth[band, :])
+        raw_bursts = extract_bursts(on)
         burst_records: list[BurstTimeError] = []
         intercepted_errors: list[float] = []
         penalized_errors: list[float] = []
 
-        scanned_this_band = log.actions == band
-        band_hits = (hits & scanned_this_band).any(axis=1)
+        scanned_emitter = log.actions == em_bands[:, None]
+        band_hits = (hits & scanned_emitter & on[:, None]).any(axis=1)
 
         for start, end in raw_bursts:
             duration = end - start + 1

@@ -9,13 +9,14 @@ C-3), never by bisecting m per belief point.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 from numpy.typing import NDArray
 
 from ewscan.agents.base import BaseLearningScheduler
-from ewscan.agents.pomdp import BeliefTracker
-from ewscan.agents.transition import TransitionEstimator
-from ewscan.contracts import EpisodeConfig, Observation, ScanAction
+from ewscan.agents.transition import GapAwareTransitionEstimator
+from ewscan.contracts import DetectorCapability, EpisodeConfig, Observation, ScanAction
 
 _GRID_CACHE: dict[tuple[float, float, float, float, float, int, int, int], tuple[NDArray[np.float64], NDArray[np.float64]]] = {}
 
@@ -103,23 +104,9 @@ def solve_whittle_grid(
 class WhittleScheduler(BaseLearningScheduler):
     """Scan scheduler that selects bands by threat-weighted Whittle index.
 
-    Parameters
-    ----------
-    pd_nominal : float, default 0.9
-        Nominal detection probability, same hyperparameter as Task 3.
-    beta : float, default 0.95
-        Discount factor for the single-arm value iteration.
-    ngrid : int, default 101
-        Number of belief grid points the index is cached on.
-    nm : int, default 50
-        Number of subsidy values swept to find the active/passive crossing.
-    sweeps : int, default 200
-        Value iteration sweeps per subsidy value.
-    recompute_interval : int, default 50
-        Recompute the index grid every this many `act` calls, since p01/p10
-        estimates drift slowly and a fresh grid is not needed every slot.
-    seed : int | np.random.Generator | None, optional
-        Optional random seed or Generator override for tie-breaking.
+    Uses the gap-aware transition estimator for belief propagation and
+    rate learning across arbitrary observation gaps. Adds an uncertainty
+    exploration bonus for bands with insufficient evidence.
     """
 
     def __init__(
@@ -130,6 +117,7 @@ class WhittleScheduler(BaseLearningScheduler):
         nm: int = 50,
         sweeps: int = 200,
         recompute_interval: int = 50,
+        exploration_weight: float = 0.3,
         seed: int | np.random.Generator | None = None,
     ) -> None:
         super().__init__(seed=seed)
@@ -139,9 +127,10 @@ class WhittleScheduler(BaseLearningScheduler):
         self._nm = int(nm)
         self._sweeps = int(sweeps)
         self._recompute_interval = int(recompute_interval)
+        self._exploration_weight = float(exploration_weight)
         self._pfa: float | None = None
-        self._transition: TransitionEstimator | None = None
-        self._belief_tracker: BeliefTracker | None = None
+        self._detector_capability: DetectorCapability | None = None
+        self._transition: GapAwareTransitionEstimator | None = None
         self._belief_grid: NDArray[np.float64] | None = None
         self._index_grid: NDArray[np.float64] | None = None
         self._slots_since_recompute: int = 0
@@ -150,12 +139,24 @@ class WhittleScheduler(BaseLearningScheduler):
     def name(self) -> str:
         return "whittle"
 
+    @property
+    def detector_capability(self) -> DetectorCapability:
+        if self._detector_capability is None:
+            raise RuntimeError("Scheduler must be reset before accessing detector capability")
+        return self._detector_capability
+
     def reset(self, config: EpisodeConfig) -> None:
         super().reset(config)
-        self._pfa = config.pfa
-        self._transition = TransitionEstimator(config.n_bands)
-        self._belief_tracker = BeliefTracker(config.n_bands, self._pd_nominal, config.pfa)
-        self._belief_tracker.reset(self._transition.p01(), self._transition.p10())
+        self._detector_capability = replace(
+            config.detector_capability,
+            nominal_pd=self._pd_nominal,
+        )
+        self._pfa = self._detector_capability.effective_pfa
+        self._transition = GapAwareTransitionEstimator(
+            config.n_bands,
+            pd=self._detector_capability.nominal_pd,
+            pfa=self._detector_capability.effective_pfa,
+        )
         self._slots_since_recompute = 0
         self._recompute_index()
 
@@ -184,7 +185,6 @@ class WhittleScheduler(BaseLearningScheduler):
     def act(self, obs: Observation | None) -> ScanAction:
         if (
             self._transition is None
-            or self._belief_tracker is None
             or self._belief_grid is None
             or self._index_grid is None
             or self._threat_map is None
@@ -193,24 +193,28 @@ class WhittleScheduler(BaseLearningScheduler):
         ):
             raise RuntimeError("Scheduler must be reset before calling act()")
 
-        if obs is not None and not obs.settling:
+        if obs is not None and obs.valid:
             for band, det in zip(obs.bands, obs.detections):
                 self._transition.observe(band, obs.slot, det)
-                self._belief_tracker.correct(band, det)
-
-        self._belief_tracker.predict(self._transition.p01(), self._transition.p10())
 
         self._slots_since_recompute += 1
         if self._slots_since_recompute >= self._recompute_interval:
             self._recompute_index()
 
-        belief = np.clip(self._belief_tracker.belief, 0.0, 1.0)
+        belief = np.clip(self._transition.belief, 0.0, 1.0)
         whittle_index = np.array(
             [
                 np.interp(belief[band], self._belief_grid, self._index_grid[band])
                 for band in range(self._n_bands)
             ]
         )
-        value = self._threat_map * whittle_index
+
+        # Uncertainty-driven exploration bonus
+        uncertainty = np.array(
+            [self._transition.uncertainty(b) for b in range(self._n_bands)]
+        )
+        exploration = self._exploration_weight * uncertainty
+
+        value = self._threat_map * whittle_index + exploration
         bands = self._select_top_k(value, self._k)
         return ScanAction(bands=bands)

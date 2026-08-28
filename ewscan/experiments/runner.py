@@ -20,14 +20,27 @@ import numpy as np
 
 from ewscan.agents.reward import RewardFunction
 from ewscan.config import load_config
-from ewscan.contracts import EpisodeConfig, EpisodeLog, Observation, ScanAction, Scheduler
+from ewscan.contracts import (
+    EpisodeConfig,
+    EpisodeLog,
+    Observation,
+    ScanAction,
+    Scheduler,
+    ThreatPrior,
+    scheduler_config_from_episode,
+)
 from ewscan.env.environment import RFEnvironment
 from ewscan.env.recorder import EpisodeRecorder, save_episode_log
 from ewscan.metrics.detection import DetectionMetrics, estimate_detection_metrics
 from ewscan.metrics.first_intercept import FirstInterceptMetrics, estimate_first_intercept_metrics
 from ewscan.metrics.interception import InterceptionMetrics, estimate_interception_metrics
 from ewscan.metrics.prediction import PredictionMetrics, estimate_prediction_metrics
-from ewscan.metrics.reward import RewardMetrics, estimate_reward_metrics
+from ewscan.metrics.reward import (
+    EvaluationUtility,
+    RewardMetrics,
+    estimate_evaluation_utility,
+    estimate_reward_metrics,
+)
 from ewscan.metrics.time_error import TimeErrorMetrics, estimate_time_error_metrics
 
 
@@ -65,10 +78,12 @@ class EpisodeResult:
     scheduler_name: str
     seed: int
     log: EpisodeLog
+    track: str
     detection: DetectionMetrics
     interception: InterceptionMetrics
     first_intercept: FirstInterceptMetrics
     reward: RewardMetrics
+    evaluation: EvaluationUtility
     prediction: PredictionMetrics
     time_error: TimeErrorMetrics
     duration_seconds: float = 0.0
@@ -86,19 +101,21 @@ class EpisodeResult:
         dict[str, Any]
             Flat dictionary suitable for tabular displays, CSV exports, or DataFrames.
         """
-        intercept_fraction = (
-            (self.first_intercept.n_intercepted / self.first_intercept.n_emitters)
-            if self.first_intercept.n_emitters > 0
-            else float("nan")
-        )
+        intercept_fraction = self.first_intercept.intercept_fraction
 
         return {
             f"{prefix}scheduler": self.scheduler_name,
+            f"{prefix}track": self.track,
             f"{prefix}seed": self.seed,
             f"{prefix}n_bands": self.config.n_bands,
             f"{prefix}n_slots": self.config.n_slots,
             f"{prefix}k": self.config.k,
             f"{prefix}duration_seconds": self.duration_seconds,
+            f"{prefix}detector_requested_pfa": self.detection.capability.requested_pfa,
+            f"{prefix}detector_effective_pfa": self.detection.capability.effective_pfa,
+            f"{prefix}detector_threshold": self.detection.capability.threshold,
+            f"{prefix}detector_dwell": self.detection.capability.dwell,
+            f"{prefix}detector_nominal_pd": self.detection.capability.nominal_pd,
             # Figure of Merit 1: Detection
             f"{prefix}pd": self.detection.pd.pd,
             f"{prefix}pfa": self.detection.pfa.pfa,
@@ -108,8 +125,14 @@ class EpisodeResult:
             f"{prefix}intercept_rate": self.interception.intercept_rate.rate,
             # Figure of Merit 3: Time to first intercept
             f"{prefix}ttfi": self.first_intercept.mean_time_to_first_intercept,
+            f"{prefix}ttfi_penalized": self.first_intercept.mean_time_to_first_intercept_penalized,
             f"{prefix}intercept_fraction": intercept_fraction,
-            # Figure of Merit 4: Reward & cost
+            # Figure of Merit 4: Reward & cost. learner_reward is the
+            # observation-based signal the scheduler saw; evaluation_utility is
+            # the truth-based score. They are different contracts by design.
+            f"{prefix}learner_reward": self.reward.average_reward,
+            f"{prefix}evaluation_utility": self.evaluation.average_utility,
+            f"{prefix}evaluation_total_utility": self.evaluation.total_utility,
             f"{prefix}average_reward": self.reward.average_reward,
             f"{prefix}total_reward": self.reward.total_reward,
             f"{prefix}hit_reward": self.reward.total_hit_reward,
@@ -155,6 +178,7 @@ def run_episode(
     miss_penalty: float | None = None,
     pd_threshold: float = 0.5,
     env: RFEnvironment | None = None,
+    threat_prior: ThreatPrior | None = None,
 ) -> EpisodeResult:
     """Execute a single episode with a scheduler and compute all 7 figures of merit.
 
@@ -207,17 +231,22 @@ def run_episode(
 
     truth = environment.truth
 
-    # Inject truth to oracle schedulers (must happen before reset, since
-    # OracleScheduler.reset() validates that truth is already set)
+    # Only the Oracle receives the generated truth matrix and the full config.
+    # Every other scheduler gets the blind scheduler-visible view, optionally
+    # carrying an explicit ThreatPrior for a prior-aided run.
     if hasattr(scheduler, "set_truth"):
         scheduler.set_truth(truth)
-
-    # Reset scheduler (OracleScheduler.reset validates truth shape here)
-    scheduler.reset(ep_config)
+        scheduler.reset(ep_config)
+        track = "oracle"
+    else:
+        sched_config = scheduler_config_from_episode(ep_config, threat_prior=threat_prior)
+        scheduler.reset(sched_config)
+        track = "prior_aided" if threat_prior is not None else "blind"
 
     # Initialize recorder and record ground truth
     recorder = EpisodeRecorder(ep_config)
     recorder.record_truth(truth)
+    recorder.record_emitter_truth(environment.emitter_truth, environment.emitter_bands)
 
     # Execute episode time-stepping loop
     start_time = time.perf_counter()
@@ -238,10 +267,12 @@ def run_episode(
     interception = estimate_interception_metrics(log)
     first_intercept = estimate_first_intercept_metrics(log)
     reward = estimate_reward_metrics(log, rf=rf)
-    # active=True only when a predictor produced at least one real prediction
-    had_prediction = bool(np.any(predictions >= 0))
+    evaluation = estimate_evaluation_utility(log, rf=rf)
+    # A predictor is present if the scheduler exposes predicted_band, even on
+    # slots where it abstains. Coverage then separates presence from activity.
+    has_predictor = hasattr(scheduler, "predicted_band")
     prediction = estimate_prediction_metrics(
-        log, predictions=predictions if had_prediction else None
+        log, predictions=predictions if has_predictor else None
     )
     time_error = estimate_time_error_metrics(log, miss_penalty=miss_penalty)
 
@@ -250,10 +281,12 @@ def run_episode(
         scheduler_name=scheduler.name,
         seed=effective_seed,
         log=log,
+        track=track,
         detection=detection,
         interception=interception,
         first_intercept=first_intercept,
         reward=reward,
+        evaluation=evaluation,
         prediction=prediction,
         time_error=time_error,
         duration_seconds=duration,
@@ -289,6 +322,7 @@ class EpisodeRunner:
         scheduler: Scheduler,
         seed: int | None = None,
         env: RFEnvironment | None = None,
+        threat_prior: ThreatPrior | None = None,
     ) -> EpisodeResult:
         """Execute a single episode with the configured evaluation parameters.
 
@@ -316,6 +350,7 @@ class EpisodeRunner:
             miss_penalty=self.miss_penalty,
             pd_threshold=self.pd_threshold,
             env=env,
+            threat_prior=threat_prior,
         )
 
 

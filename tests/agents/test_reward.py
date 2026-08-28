@@ -167,7 +167,7 @@ class TestComputeEpisode:
             n_slots=n_slots,
             k=1,
             emitters=(EmitterInfo(band=0, snr=20.0, threat_level=1.0, emitter_type="cw"),),
-            detection_threshold=3.0,
+            detection_threshold=None,
             pfa=1e-3,
             seed=0,
         )
