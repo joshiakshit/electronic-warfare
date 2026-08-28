@@ -158,6 +158,12 @@ class RFEnvironment:
         self._snr_matrix: NDArray[np.float64] = np.zeros(
             (self._n_bands, self._n_slots), dtype=np.float64
         )
+        self._emitter_truth: NDArray[np.bool_] = np.zeros(
+            (len(self._emitters), self._n_slots), dtype=np.bool_
+        )
+        self._emitter_bands: NDArray[np.intp] = np.zeros(
+            (len(self._emitters), self._n_slots), dtype=np.intp
+        )
         self._previous_bands: tuple[int, ...] | None = None
         self._settling_remaining = 0
 
@@ -208,6 +214,20 @@ class RFEnvironment:
             raise RuntimeError("Environment must be reset() before accessing truth")
         return self._truth.copy()
 
+    @property
+    def emitter_truth(self) -> NDArray[np.bool_]:
+        """Per-emitter ON state [n_emitters x n_slots]."""
+        if not self._is_reset:
+            raise RuntimeError("Environment must be reset() before accessing emitter_truth")
+        return self._emitter_truth.copy()
+
+    @property
+    def emitter_bands(self) -> NDArray[np.intp]:
+        """Per-emitter occupied band per slot [n_emitters x n_slots]."""
+        if not self._is_reset:
+            raise RuntimeError("Environment must be reset() before accessing emitter_bands")
+        return self._emitter_bands.copy()
+
     def reset(self, seed: int | None = None) -> None:
         """Reset the environment state and generate truth for a new episode.
 
@@ -236,13 +256,18 @@ class RFEnvironment:
         self._settling_remaining = 0
         self._truth = np.zeros((self._n_bands, self._n_slots), dtype=np.bool_)
         power_matrix = np.zeros((self._n_bands, self._n_slots), dtype=np.float64)
+        n_em = len(self._emitters)
+        self._emitter_truth = np.zeros((n_em, self._n_slots), dtype=np.bool_)
+        self._emitter_bands = np.zeros((n_em, self._n_slots), dtype=np.intp)
 
         # Read each emitter's band per slot so frequency-agile emitters place
         # activity across bands. Fixed emitters return a constant current_band.
-        for em in self._emitters:
+        for i, em in enumerate(self._emitters):
             em_power_lin = 10.0 ** (em.snr / 10.0)
             activity = em.activity(self._n_slots)
             if activity is None:
+                on_arr = np.zeros(self._n_slots, dtype=np.bool_)
+                band_arr = np.zeros(self._n_slots, dtype=np.intp)
                 for t in range(self._n_slots):
                     on = em.step()
                     b = em.current_band
@@ -251,20 +276,22 @@ class RFEnvironment:
                             f"Emitter reported band {b} at slot {t}, out of range "
                             f"[0, {self._n_bands - 1}]"
                         )
-                    if on:
-                        self._truth[b, t] = True
-                        power_matrix[b, t] += em_power_lin
-                continue
+                    on_arr[t] = on
+                    band_arr[t] = b
+            else:
+                on_arr, band_arr = activity
+                on_arr = np.asarray(on_arr, dtype=np.bool_)
+                band_arr = np.asarray(band_arr, dtype=np.intp)
+                out_of_range = (band_arr < 0) | (band_arr >= self._n_bands)
+                if out_of_range.any():
+                    t = int(np.argmax(out_of_range))
+                    raise ValueError(
+                        f"Emitter reported band {int(band_arr[t])} at slot {t}, out of "
+                        f"range [0, {self._n_bands - 1}]"
+                    )
 
-            on_arr, band_arr = activity
-            band_arr = np.asarray(band_arr, dtype=np.intp)
-            out_of_range = (band_arr < 0) | (band_arr >= self._n_bands)
-            if out_of_range.any():
-                t = int(np.argmax(out_of_range))
-                raise ValueError(
-                    f"Emitter reported band {int(band_arr[t])} at slot {t}, out of range "
-                    f"[0, {self._n_bands - 1}]"
-                )
+            self._emitter_truth[i] = on_arr
+            self._emitter_bands[i] = band_arr
             on_idx = np.flatnonzero(on_arr)
             bands_on = band_arr[on_idx]
             self._truth[bands_on, on_idx] = True

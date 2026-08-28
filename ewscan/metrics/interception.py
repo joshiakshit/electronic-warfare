@@ -40,6 +40,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from ewscan.contracts import EpisodeLog
+from ewscan.metrics._emitter import emitter_activity
 
 
 # ---------------------------------------------------------------------------
@@ -227,21 +228,9 @@ def estimate_per_emitter_interception(
 
     for idx, emitter_info in enumerate(log.config.emitters):
         band = emitter_info.band
+        on, em_bands = emitter_activity(log, idx)
 
-        # Skip emitters with out-of-range bands
-        if band < 0 or band >= log.n_bands:
-            results.append(
-                EmitterInterceptionEstimate(
-                    emitter_index=idx,
-                    band=band,
-                    interception_ratio=float("nan"),
-                    n_hits=0,
-                    n_transmissions=0,
-                )
-            )
-            continue
-
-        n_transmissions = int(np.count_nonzero(log.truth[band, :]))
+        n_transmissions = int(np.count_nonzero(on))
 
         if n_transmissions == 0:
             results.append(
@@ -255,8 +244,10 @@ def estimate_per_emitter_interception(
             )
             continue
 
-        scanned_this_band = log.actions == band
-        emitter_hits = (hits & scanned_this_band).any(axis=1)
+        # A hit needs the receiver tuned to this emitter's occupied band while
+        # the emitter is transmitting.
+        scanned_emitter = log.actions == em_bands[:, None]
+        emitter_hits = (hits & scanned_emitter & on[:, None]).any(axis=1)
         n_hits = int(np.count_nonzero(emitter_hits))
 
         results.append(

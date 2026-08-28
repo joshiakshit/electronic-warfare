@@ -44,6 +44,8 @@ class EpisodeRecorder:
         self._settling_slots = np.zeros(config.n_slots, dtype=np.bool_)
         self._valid_slots = np.ones(config.n_slots, dtype=np.bool_)
         self._truth: NDArray[np.bool_] | None = None
+        self._emitter_truth: NDArray[np.bool_] | None = None
+        self._emitter_bands: NDArray[np.intp] | None = None
         self._current_slot = 0
 
     @property
@@ -164,6 +166,22 @@ class EpisodeRecorder:
             )
         self._truth = truth.copy()
 
+    def record_emitter_truth(
+        self,
+        emitter_truth: NDArray[np.bool_],
+        emitter_bands: NDArray[np.intp],
+    ) -> None:
+        """Record per-emitter ON state and occupied band for every slot."""
+        n_em = len(self._config.emitters)
+        expected = (n_em, self._config.n_slots)
+        if emitter_truth.shape != expected or emitter_bands.shape != expected:
+            raise ValueError(
+                f"emitter activity shape must be {expected}, got "
+                f"{emitter_truth.shape} and {emitter_bands.shape}"
+            )
+        self._emitter_truth = emitter_truth.copy()
+        self._emitter_bands = emitter_bands.copy()
+
     def to_log(self) -> EpisodeLog:
         """Compile and return the finalized EpisodeLog.
         
@@ -194,6 +212,12 @@ class EpisodeRecorder:
             retune_events=self._retune_events.copy(),
             settling_slots=self._settling_slots.copy(),
             valid_slots=self._valid_slots.copy(),
+            emitter_truth=(
+                self._emitter_truth.copy() if self._emitter_truth is not None else None
+            ),
+            emitter_bands=(
+                self._emitter_bands.copy() if self._emitter_bands is not None else None
+            ),
         )
 
 

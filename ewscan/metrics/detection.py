@@ -48,6 +48,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from ewscan.contracts import DetectorCapability, EpisodeLog
+from ewscan.metrics._emitter import emitter_activity
 
 
 # ---------------------------------------------------------------------------
@@ -271,27 +272,13 @@ def estimate_per_emitter_pd(log: EpisodeLog) -> tuple[EmitterPdEstimate, ...]:
 
     for idx, emitter_info in enumerate(log.config.emitters):
         band = emitter_info.band
+        on, em_bands = emitter_activity(log, idx)
 
-        # Skip emitters with out-of-range bands
-        if band < 0 or band >= log.n_bands:
-            results.append(EmitterPdEstimate(
-                emitter_index=idx,
-                band=band,
-                snr=emitter_info.snr,
-                pd=float("nan"),
-                n_hits=0,
-                n_scans_on=0,
-            ))
-            continue
-
-        # Channel-slots where the scanner was tuned to this emitter's band
-        scanned_this_band = log.actions == band
-
-        # Of those, which ones had the band actually ON?
-        # (truth is band-level, not per-emitter — see docstring caveat)
-        on_and_scanned = (
-            scanned_this_band & log.truth[band, :][:, None] & _valid_slot_mask(log)
-        )
+        # Channel-slots where the scanner was tuned to this emitter's occupied
+        # band while it was transmitting (per-emitter truth handles hoppers and
+        # co-resident emitters).
+        scanned_emitter = log.actions == em_bands[:, None]
+        on_and_scanned = scanned_emitter & on[:, None] & _valid_slot_mask(log)
         n_scans_on = int(np.count_nonzero(on_and_scanned))
 
         if n_scans_on == 0:

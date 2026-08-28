@@ -414,6 +414,8 @@ class EpisodeLog:
     retune_events: NDArray[np.bool_] | None = None
     settling_slots: NDArray[np.bool_] | None = None
     valid_slots: NDArray[np.bool_] | None = None
+    emitter_truth: NDArray[np.bool_] | None = None
+    emitter_bands: NDArray[np.intp] | None = None
 
     def __post_init__(self) -> None:
         ns, nb, k = self.config.n_slots, self.config.n_bands, self.config.k
@@ -470,6 +472,36 @@ class EpisodeLog:
             )
         else:
             self.valid_slots = self.valid_slots.astype(np.bool_, copy=False)
+
+        n_em = len(self.config.emitters)
+        if self.emitter_truth is not None or self.emitter_bands is not None:
+            if self.emitter_truth is None or self.emitter_bands is None:
+                raise ValueError(
+                    "emitter_truth and emitter_bands must both be given or both omitted"
+                )
+            if self.emitter_truth.shape != (n_em, ns):
+                raise ValueError(
+                    f"emitter_truth shape {self.emitter_truth.shape} does not match "
+                    f"(n_emitters, n_slots) ({n_em}, {ns})"
+                )
+            if self.emitter_bands.shape != (n_em, ns):
+                raise ValueError(
+                    f"emitter_bands shape {self.emitter_bands.shape} does not match "
+                    f"(n_emitters, n_slots) ({n_em}, {ns})"
+                )
+            if not np.issubdtype(self.emitter_bands.dtype, np.integer):
+                raise ValueError(
+                    f"emitter_bands must contain integer band values, got {self.emitter_bands.dtype}"
+                )
+            if n_em > 0:
+                bad = (self.emitter_bands < 0) | (self.emitter_bands >= nb)
+                if bad.any():
+                    em, slot = np.argwhere(bad)[0]
+                    value = int(self.emitter_bands[em, slot])
+                    raise ValueError(
+                        f"emitter_bands[{em}, {slot}]={value} is out of range [0, {nb - 1}]"
+                    )
+            self.emitter_truth = self.emitter_truth.astype(np.bool_, copy=False)
 
     @property
     def n_bands(self) -> int:

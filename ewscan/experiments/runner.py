@@ -238,6 +238,7 @@ def run_episode(
     # Initialize recorder and record ground truth
     recorder = EpisodeRecorder(ep_config)
     recorder.record_truth(truth)
+    recorder.record_emitter_truth(environment.emitter_truth, environment.emitter_bands)
 
     # Execute episode time-stepping loop
     start_time = time.perf_counter()

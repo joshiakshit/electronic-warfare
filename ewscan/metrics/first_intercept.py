@@ -30,6 +30,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from ewscan.contracts import EpisodeLog
+from ewscan.metrics._emitter import emitter_activity
 
 
 # ---------------------------------------------------------------------------
@@ -124,8 +125,9 @@ def estimate_per_emitter_first_intercept(
 
     for idx, emitter_info in enumerate(log.config.emitters):
         band = emitter_info.band
-        scanned_this_band = log.actions == band
-        emitter_hits = (hits & scanned_this_band).any(axis=1)
+        on, em_bands = emitter_activity(log, idx)
+        scanned_emitter = log.actions == em_bands[:, None]
+        emitter_hits = (hits & scanned_emitter & on[:, None]).any(axis=1)
 
         hit_slots = np.flatnonzero(emitter_hits)
         if len(hit_slots) > 0:
