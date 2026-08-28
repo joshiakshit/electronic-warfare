@@ -28,14 +28,10 @@ class NextTxPredictor:
             self._last_hit[band] = slot
 
     def _due_slot(self, band: int, slot: int) -> int | None:
-        period = self._period_estimator.period(band)
-        s_last = self._last_hit[band]
-        if period is None or s_last is None:
+        model = self._period_estimator.model(band)
+        if model is None:
             return None
-        s_next = s_last + period
-        while s_next < slot:
-            s_next += period
-        return s_next
+        return slot if model.is_due(slot) else None
 
     def due_bands(self, slot: int) -> list[tuple[int, float]]:
         due = []

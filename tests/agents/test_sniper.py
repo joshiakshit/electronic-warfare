@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from ewscan.agents.sniper import SniperScheduler
+from ewscan.agents.predictor import NextTxPredictor
 from ewscan.agents.ucb import UCB1Scheduler
 from ewscan.contracts import EmitterInfo
 from ewscan.experiments.runner import run_episode
@@ -44,18 +45,6 @@ class TestNoRegressionGate:
 class TestPredictionAccuracyRisesOnPeriodic:
     """Task 7 test 2."""
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "Sprint 3 gate NOT MET. The sniper never predicts on periodic_radar: "
-            "confidence stays at the 0.5 prior and predicted_band is set on 0 of 2000 "
-            "slots. Emitter bands are scanned plenty (216-319 scans, 39-73 hits), but "
-            "estimate_period returns None at the 0.11-0.16 scan rate a k=1 receiver "
-            "produces; Task 5 was validated at ~0.5. Lowering rho trades misses for "
-            "wrong periods. The no-regression and fallback-identity gates DO pass. "
-            "See project memories/sprint3_whittle_gate_finding.md"
-        ),
-    )
     def test_periodic_radar_prediction_accuracy(self):
         config = get_scenario("periodic_radar")
         sniper_result = run_episode(config, SniperScheduler(inner=UCB1Scheduler()), seed=7)
@@ -68,6 +57,14 @@ class TestPredictionAccuracyRisesOnPeriodic:
         assert sniper_result.prediction.accuracy is not None
         print(f"\n[accuracy] periodic_radar sniper accuracy={sniper_result.prediction.accuracy:.4f}")
         assert sniper_result.prediction.accuracy > 0.7
+
+    def test_predictor_uses_learned_phase_not_last_hit_phase(self):
+        predictor = NextTxPredictor(n_bands=1, capacity=1000, tau_conf=0.5)
+        for slot in range(500):
+            predictor.observe(0, slot, slot % 20 in {5, 6, 7})
+
+        assert predictor.due_bands(505) == [(0, pytest.approx(0.5))]
+        assert predictor.due_bands(508) == []
 
 
 class TestDistinctnessAndLegality:

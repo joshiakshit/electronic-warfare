@@ -7,7 +7,11 @@ import time
 import numpy as np
 import pytest
 
-from ewscan.agents.period import estimate_period_candidates
+from ewscan.agents.period import (
+    PeriodEstimator,
+    estimate_period_candidates,
+    estimate_period_model_candidates,
+)
 
 
 # --- Test 1: exact periodic hits with sparse scans ---
@@ -38,6 +42,16 @@ class TestExactPeriodicHits:
         detections = (slots % period) == 0
 
         assert estimate_period_candidates(slots, detections) is None
+
+    def test_recovers_period_and_active_phase(self):
+        slots = np.arange(2000, dtype=np.intp)
+        detections = (slots % 20) == 7
+
+        model = estimate_period_model_candidates(slots, detections)
+
+        assert model is not None
+        assert model.period == 20
+        assert model.active_phases == (7,)
 
 
 # --- Test 2: jittered periodic hits ---
@@ -121,6 +135,17 @@ class TestAperiodicBands:
         detections = np.zeros(len(slots), dtype=bool)
         assert estimate_period_candidates(slots, detections) is None
 
+    def test_declared_false_period_target(self):
+        classified = 0
+        n_trials = 100
+        for seed in range(n_trials):
+            rng = np.random.default_rng(seed)
+            slots = np.flatnonzero(rng.random(2000) < 0.12)
+            detections = rng.random(len(slots)) < 0.15
+            classified += estimate_period_candidates(slots, detections) is not None
+
+        assert classified / n_trials <= 0.05
+
     def test_always_on_cw_returns_none(self):
         slots = np.arange(0, 200, 5)
         detections = np.ones(len(slots), dtype=bool)
@@ -190,3 +215,27 @@ class TestPeriodEstimatorIntegration:
                 estimator.observe(0, slot, det)
 
         assert estimator.period(0) == period
+
+    def test_declared_exact_period_recovery_target(self):
+        recovered = 0
+        n_trials = 100
+        period = 20
+        for seed in range(n_trials):
+            rng = np.random.default_rng(seed)
+            slots = np.flatnonzero(rng.random(2000) < 0.12)
+            detections = (slots % period) == 7
+            recovered += estimate_period_candidates(slots, detections) == period
+
+        assert recovered / n_trials >= 0.70
+
+    def test_cached_model_expires_after_later_due_phase_misses(self):
+        estimator = PeriodEstimator(n_bands=1, capacity=3000, sparse=True)
+        for slot in range(1000):
+            estimator.observe(0, slot, slot % 20 == 5)
+
+        assert estimator.period(0) == 20
+
+        for slot in range(1005, 1346, 20):
+            estimator.observe(0, slot, False)
+
+        assert estimator.period(0) is None

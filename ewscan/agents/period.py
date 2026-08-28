@@ -13,6 +13,7 @@ the appropriate function.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import math
 
 import numpy as np
@@ -65,6 +66,15 @@ def estimate_period(
 
 
 # ---- Candidate-based sparse period estimator (Objective 6) ----
+
+
+@dataclass(frozen=True)
+class PeriodModel:
+    period: int
+    active_phases: tuple[int, ...]
+
+    def is_due(self, slot: int) -> bool:
+        return slot % self.period in self.active_phases
 
 def _hit_gap_candidates(hit_slots: NDArray[np.intp], max_period: int) -> set[int]:
     """Generate candidate periods from positive-hit gap divisors."""
@@ -139,16 +149,37 @@ def _aperiodic_likelihood(
     return _phase_likelihood(scan_slots, detections, period=1)
 
 
-def estimate_period_candidates(
+def _active_phases(
+    slots: NDArray[np.intp],
+    detections: NDArray[np.bool_],
+    period: int,
+) -> tuple[int, ...]:
+    phases = slots % period
+    observations = np.bincount(phases, minlength=period)
+    hits = np.bincount(phases[detections], minlength=period)
+    rates = np.divide(
+        hits,
+        observations,
+        out=np.zeros(period, dtype=np.float64),
+        where=observations > 0,
+    )
+    minimum_rate = max(0.2, 2.0 * float(detections.mean()))
+    active = np.flatnonzero((hits > 0) & (rates >= minimum_rate))
+    if len(active) == 0:
+        active = np.array([int(np.argmax(hits))], dtype=np.intp)
+    return tuple(int(phase) for phase in active)
+
+
+def estimate_period_model_candidates(
     slots: NDArray[np.intp],
     detections: NDArray[np.bool_],
     min_hits: int = 6,
-    min_margin: float = 3.0,
+    min_margin: float = 3.5,
     min_concentration: float = 0.5,
     holdout_fraction: float = 0.3,
     max_period: int = 200,
-) -> int | None:
-    """Estimate period from sparse scans using bounded candidate set.
+) -> PeriodModel | None:
+    """Estimate a period and active phase set from sparse scans.
 
     1. Generate candidates from hit-gap divisors.
     2. Score each candidate with Beta-Binomial likelihood vs aperiodic.
@@ -213,7 +244,7 @@ def estimate_period_candidates(
     ):
         return None
 
-    # A holdout with no hits cannot confirm or reject the candidate yet.
+    fit_active_phases = _active_phases(fit_slots, fit_dets, best_period)
     if len(holdout_slots) >= 5:
         holdout_hits = int(holdout_dets.sum())
         if holdout_hits and (
@@ -222,8 +253,39 @@ def estimate_period_candidates(
             < 0.0
         ):
             return None
+        expected_scans = int(
+            np.count_nonzero(
+                np.isin(holdout_slots % best_period, fit_active_phases)
+            )
+        )
+        if holdout_hits == 0 and expected_scans >= 3:
+            return None
 
-    return best_period
+    return PeriodModel(
+        period=best_period,
+        active_phases=_active_phases(slots, detections, best_period),
+    )
+
+
+def estimate_period_candidates(
+    slots: NDArray[np.intp],
+    detections: NDArray[np.bool_],
+    min_hits: int = 6,
+    min_margin: float = 3.5,
+    min_concentration: float = 0.5,
+    holdout_fraction: float = 0.3,
+    max_period: int = 200,
+) -> int | None:
+    model = estimate_period_model_candidates(
+        slots,
+        detections,
+        min_hits=min_hits,
+        min_margin=min_margin,
+        min_concentration=min_concentration,
+        holdout_fraction=holdout_fraction,
+        max_period=max_period,
+    )
+    return None if model is None else model.period
 
 
 class PeriodEstimator:
@@ -241,39 +303,61 @@ class PeriodEstimator:
         self._rho = rho
         self._min_hits = min_hits
         self._sparse = sparse
-        self._cached_periods: list[int | None] = [None] * n_bands
+        self._cached_models: list[PeriodModel | None] = [None] * n_bands
         self._dirty = np.ones(n_bands, dtype=np.bool_)
         self._observations = np.zeros(n_bands, dtype=np.int64)
         self._last_evidence = np.zeros(n_bands, dtype=np.int64)
         self._evidence_milestone = 16
+        self._due_misses = np.zeros(n_bands, dtype=np.int64)
+        self._expired = np.zeros(n_bands, dtype=np.bool_)
 
     def observe(self, band: int, slot: int, detection: bool) -> None:
         self._history.append(band, slot, detection)
         self._observations[band] += 1
+        model = self._cached_models[band]
+        if detection:
+            self._due_misses[band] = 0
+            self._expired[band] = False
+        elif model is not None and model.is_due(slot):
+            self._due_misses[band] += 1
+            if self._due_misses[band] >= 3:
+                self._cached_models[band] = None
+                self._expired[band] = True
         if not self._sparse or detection or (
             self._observations[band] - self._last_evidence[band]
             >= self._evidence_milestone
         ):
             self._dirty[band] = True
 
-    def period(self, band: int) -> int | None:
+    def model(self, band: int) -> PeriodModel | None:
+        if self._expired[band]:
+            return None
         if not self._dirty[band]:
-            return self._cached_periods[band]
+            return self._cached_models[band]
         slots, detections = self._history.recent(band)
         if int(detections.sum()) < self._min_hits:
-            self._cached_periods[band] = None
+            self._cached_models[band] = None
             self._dirty[band] = False
             self._last_evidence[band] = self._observations[band]
             return None
         if self._sparse:
-            period = estimate_period_candidates(
+            model = estimate_period_model_candidates(
                 slots, detections, min_hits=self._min_hits,
             )
         else:
             period = estimate_period(
                 slots, detections, rho=self._rho, min_hits=self._min_hits,
             )
-        self._cached_periods[band] = period
+            model = (
+                None
+                if period is None
+                else PeriodModel(period, _active_phases(slots, detections, period))
+            )
+        self._cached_models[band] = model
         self._dirty[band] = False
         self._last_evidence[band] = self._observations[band]
-        return period
+        return model
+
+    def period(self, band: int) -> int | None:
+        model = self.model(band)
+        return None if model is None else model.period

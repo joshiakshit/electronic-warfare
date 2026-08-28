@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from ewscan.agents.sniper import SniperScheduler
+from ewscan.agents.reward import RewardFunction
 from ewscan.agents.ucb import UCB1Scheduler
 from ewscan.contracts import Observation
 from ewscan.experiments.runner import run_episode
@@ -97,3 +98,27 @@ def test_telemetry_pairs_inner_and_sniper_actions_on_same_observations():
     assert np.array_equal(sniper.arbitration.inner_action, inner.log.actions)
     assert np.array_equal(sniper.arbitration.executed_action, sniper.log.actions)
     assert not np.any(sniper.arbitration.did_override)
+
+
+def test_arbitration_abstains_when_inner_uses_a_different_reward_scale():
+    config = make_test_config(n_bands=3, n_slots=100, k=1)
+    inner = UCB1Scheduler(c=0.0, reward_fn=RewardFunction())
+    scheduler = SniperScheduler(inner=inner)
+    scheduler.reset(config)
+    scheduler._predictor = _DuePredictor(band=2, confidence=1.0)
+
+    inner.stats.update(
+        Observation(slot=0, bands=(0,), detections=(False,)), rewards=(0.0,)
+    )
+    inner.stats.update(
+        Observation(slot=1, bands=(1,), detections=(True,)), rewards=(1.0,)
+    )
+    inner.stats.update(
+        Observation(slot=2, bands=(2,), detections=(False,)), rewards=(0.0,)
+    )
+
+    action = scheduler.act(None)
+
+    assert scheduler.inner_action == (1,)
+    assert action.bands == (1,)
+    assert scheduler.did_override is False

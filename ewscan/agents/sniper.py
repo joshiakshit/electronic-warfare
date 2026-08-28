@@ -93,6 +93,11 @@ class SniperScheduler(BaseLearningScheduler):
     def _inner_upper_value(self, band: int) -> float:
         if not isinstance(self._inner, BaseLearningScheduler):
             return float("inf")
+        if (
+            self._inner._reward_fn is not None
+            or self._inner._use_threat_weighting
+        ):
+            return float("inf")
         count = self._inner.stats.get_count(band)
         if count == 0:
             return float("inf")
