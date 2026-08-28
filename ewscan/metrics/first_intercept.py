@@ -120,7 +120,7 @@ def estimate_per_emitter_first_intercept(
     slots = np.arange(log.n_slots)[:, None]
     scanned_truth = log.truth[safe_actions, slots]
     scanned_truth[~valid_actions] = False
-    hits = log.detections & scanned_truth
+    hits = log.detections & scanned_truth & log.valid_slots[:, None]
 
     for idx, emitter_info in enumerate(log.config.emitters):
         band = emitter_info.band

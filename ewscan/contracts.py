@@ -36,12 +36,14 @@ class Observation:
     detections: tuple[bool, ...]
     retune_event: bool = False
     settling: bool = False
+    valid: bool = True
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "bands", tuple(int(b) for b in self.bands))
         object.__setattr__(self, "detections", tuple(bool(d) for d in self.detections))
         object.__setattr__(self, "retune_event", bool(self.retune_event))
         object.__setattr__(self, "settling", bool(self.settling))
+        object.__setattr__(self, "valid", bool(self.valid))
         if len(self.bands) != len(self.detections):
             raise ValueError(
                 "Observation bands and detections must have the same length, "
@@ -411,6 +413,7 @@ class EpisodeLog:
     detections: NDArray[np.bool_]
     retune_events: NDArray[np.bool_] | None = None
     settling_slots: NDArray[np.bool_] | None = None
+    valid_slots: NDArray[np.bool_] | None = None
 
     def __post_init__(self) -> None:
         ns, nb, k = self.config.n_slots, self.config.n_bands, self.config.k
@@ -459,6 +462,14 @@ class EpisodeLog:
             )
         else:
             self.settling_slots = self.settling_slots.astype(np.bool_, copy=False)
+        if self.valid_slots is None:
+            self.valid_slots = np.ones(ns, dtype=np.bool_)
+        elif self.valid_slots.shape != (ns,):
+            raise ValueError(
+                f"valid_slots shape {self.valid_slots.shape} does not match (n_slots,) ({ns},)"
+            )
+        else:
+            self.valid_slots = self.valid_slots.astype(np.bool_, copy=False)
 
     @property
     def n_bands(self) -> int:

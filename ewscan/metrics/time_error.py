@@ -193,7 +193,7 @@ def _compute_scanned_hits(log: EpisodeLog) -> NDArray[np.bool_]:
     slots = np.arange(log.n_slots)[:, None]
     scanned_truth = log.truth[safe, slots]
     scanned_truth[~valid] = False
-    return log.detections & scanned_truth
+    return log.detections & scanned_truth & log.valid_slots[:, None]
 
 
 # ---------------------------------------------------------------------------

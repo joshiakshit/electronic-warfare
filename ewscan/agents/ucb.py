@@ -75,8 +75,9 @@ class UCB1Scheduler(BaseLearningScheduler):
         ):
             raise RuntimeError("Scheduler must be reset before calling act()")
 
-        # Step 1: Update statistics with incoming observation
-        if obs is not None:
+        # Step 1: Update statistics with incoming observation (skip invalid,
+        # e.g. settling, samples)
+        if obs is not None and obs.valid:
             rewards = self._compute_rewards(obs)
             self._stats.update(obs, rewards=rewards)
 

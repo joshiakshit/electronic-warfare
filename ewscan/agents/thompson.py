@@ -129,8 +129,9 @@ class ThompsonSamplingScheduler(BaseLearningScheduler):
         ):
             raise RuntimeError("Scheduler must be reset before calling act()")
 
-        # Step 1: Update statistics and Bayesian Beta posterior with incoming observation
-        if obs is not None:
+        # Step 1: Update statistics and Bayesian Beta posterior with incoming
+        # observation (skip invalid, e.g. settling, samples)
+        if obs is not None and obs.valid:
             rewards = self._compute_rewards(obs)
             self._stats.update(obs, rewards=rewards)
 
@@ -238,8 +239,8 @@ class DiscountedThompsonScheduler(ThompsonSamplingScheduler):
         self._alpha[:] = self._alpha_prior + self._gamma * (self._alpha - self._alpha_prior)
         self._beta[:] = self._beta_prior + self._gamma * (self._beta - self._beta_prior)
 
-        # Update stats and posterior with the observation
-        if obs is not None:
+        # Update stats and posterior with the observation (skip invalid samples)
+        if obs is not None and obs.valid:
             rewards = self._compute_rewards(obs)
             self._stats.update(obs, rewards=rewards)
 

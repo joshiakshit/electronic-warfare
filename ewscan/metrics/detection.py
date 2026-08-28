@@ -176,6 +176,11 @@ def _scanned_truth(log: EpisodeLog) -> NDArray[np.bool_]:
     return result
 
 
+def _valid_slot_mask(log: EpisodeLog) -> NDArray[np.bool_]:
+    """Per-channel validity mask (n_slots, k): invalid slots score nothing."""
+    return log.valid_slots[:, None]
+
+
 def estimate_pd(log: EpisodeLog) -> PdEstimate:
     """Estimate the aggregate probability of detection from an episode log.
 
@@ -189,7 +194,7 @@ def estimate_pd(log: EpisodeLog) -> PdEstimate:
     PdEstimate
         The aggregate Pd estimate with supporting counts.
     """
-    scanned_on = _scanned_truth(log)  # bool[n_slots]: was the scanned band ON?
+    scanned_on = _scanned_truth(log) & _valid_slot_mask(log)
     n_scans_on = int(np.count_nonzero(scanned_on))
     if n_scans_on == 0:
         return PdEstimate(pd=float("nan"), n_hits=0, n_scans_on=0)
@@ -218,7 +223,7 @@ def estimate_pfa(log: EpisodeLog) -> PfaEstimate:
         The aggregate Pfa estimate with supporting counts.
     """
     scanned_on = _scanned_truth(log)
-    scanned_off = ~scanned_on
+    scanned_off = ~scanned_on & _valid_slot_mask(log)
     n_scans_off = int(np.count_nonzero(scanned_off))
     if n_scans_off == 0:
         return PfaEstimate(pfa=float("nan"), n_false_alarms=0, n_scans_off=0)
@@ -284,7 +289,9 @@ def estimate_per_emitter_pd(log: EpisodeLog) -> tuple[EmitterPdEstimate, ...]:
 
         # Of those, which ones had the band actually ON?
         # (truth is band-level, not per-emitter — see docstring caveat)
-        on_and_scanned = scanned_this_band & log.truth[band, :][:, None]
+        on_and_scanned = (
+            scanned_this_band & log.truth[band, :][:, None] & _valid_slot_mask(log)
+        )
         n_scans_on = int(np.count_nonzero(on_and_scanned))
 
         if n_scans_on == 0:

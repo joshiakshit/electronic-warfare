@@ -42,6 +42,7 @@ class EpisodeRecorder:
         self._detections = np.zeros((config.n_slots, config.k), dtype=np.bool_)
         self._retune_events = np.zeros(config.n_slots, dtype=np.bool_)
         self._settling_slots = np.zeros(config.n_slots, dtype=np.bool_)
+        self._valid_slots = np.ones(config.n_slots, dtype=np.bool_)
         self._truth: NDArray[np.bool_] | None = None
         self._current_slot = 0
 
@@ -61,6 +62,7 @@ class EpisodeRecorder:
         detections: "Sequence[bool]",
         retune_event: bool = False,
         settling: bool = False,
+        valid: bool = True,
     ) -> None:
         """Record the k bands and detections at the current slot and advance.
 
@@ -96,6 +98,7 @@ class EpisodeRecorder:
         self._detections[self._current_slot, :] = detections
         self._retune_events[self._current_slot] = retune_event
         self._settling_slots[self._current_slot] = settling
+        self._valid_slots[self._current_slot] = valid
         self._current_slot += 1
 
     def record_observation(self, obs: Observation) -> None:
@@ -137,6 +140,7 @@ class EpisodeRecorder:
         self._detections[slot, :] = detections
         self._retune_events[slot] = obs.retune_event
         self._settling_slots[slot] = obs.settling
+        self._valid_slots[slot] = obs.valid
         # Update current slot pointer to match or exceed recorded slot
         self._current_slot = max(self._current_slot, slot + 1)
 
@@ -189,6 +193,7 @@ class EpisodeRecorder:
             detections=self._detections.copy(),
             retune_events=self._retune_events.copy(),
             settling_slots=self._settling_slots.copy(),
+            valid_slots=self._valid_slots.copy(),
         )
 
 
@@ -218,6 +223,7 @@ def save_episode_log(log: EpisodeLog, filepath: str | Path) -> None:
             "detections": log.detections.tolist(),
             "retune_events": log.retune_events.tolist(),
             "settling_slots": log.settling_slots.tolist(),
+            "valid_slots": log.valid_slots.tolist(),
         }
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
@@ -231,6 +237,7 @@ def save_episode_log(log: EpisodeLog, filepath: str | Path) -> None:
             detections=log.detections,
             retune_events=log.retune_events,
             settling_slots=log.settling_slots,
+            valid_slots=log.valid_slots,
             config_json=config_json,
         )
 
@@ -279,7 +286,8 @@ def load_episode_log(filepath: str | Path) -> EpisodeLog:
         detections = np.array(data["detections"], dtype=np.bool_)
         retune_events = np.array(data.get("retune_events", []), dtype=np.bool_)
         settling_slots = np.array(data.get("settling_slots", []), dtype=np.bool_)
-        
+        valid_slots = np.array(data.get("valid_slots", []), dtype=np.bool_)
+
     else:
         # Load from .npz
         try:
@@ -294,7 +302,8 @@ def load_episode_log(filepath: str | Path) -> EpisodeLog:
                 detections = data["detections"]
                 retune_events = data["retune_events"] if "retune_events" in data.files else None
                 settling_slots = data["settling_slots"] if "settling_slots" in data.files else None
-                
+                valid_slots = data["valid_slots"] if "valid_slots" in data.files else None
+
                 config_json_raw = data["config_json"]
                 if isinstance(config_json_raw, np.ndarray):
                     if config_json_raw.ndim == 0:
@@ -329,6 +338,8 @@ def load_episode_log(filepath: str | Path) -> EpisodeLog:
         retune_events = np.zeros(config.n_slots, dtype=np.bool_)
     if settling_slots is None or settling_slots.size == 0:
         settling_slots = np.zeros(config.n_slots, dtype=np.bool_)
+    if valid_slots is None or valid_slots.size == 0:
+        valid_slots = np.ones(config.n_slots, dtype=np.bool_)
 
     return EpisodeLog(
         config=config,
@@ -337,4 +348,5 @@ def load_episode_log(filepath: str | Path) -> EpisodeLog:
         detections=detections,
         retune_events=retune_events,
         settling_slots=settling_slots,
+        valid_slots=valid_slots,
     )

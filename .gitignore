@@ -55,6 +55,8 @@ AGENTS.md
 *.json
 results/
 logs/
+bugs.md
+user_explanation.md
 
 #Plans
 PLAN.md

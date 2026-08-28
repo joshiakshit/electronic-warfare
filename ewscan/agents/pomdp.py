@@ -121,7 +121,7 @@ class BeliefScheduler(BaseLearningScheduler):
 
         # Correct with the PREVIOUS action's observation before predicting
         # forward, or the belief lags the true state by one slot.
-        if obs is not None and not obs.settling:
+        if obs is not None and obs.valid:
             for band, det in zip(obs.bands, obs.detections):
                 self._transition.observe(band, obs.slot, det)
                 self._belief_tracker.correct(band, det)

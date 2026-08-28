@@ -330,19 +330,25 @@ class RFEnvironment:
                 self._config.retune_cost_slots * distance
             ))
         settling = self._settling_remaining > 0
-        detections = tuple(
-            self._detection_model.detect(
-                0.0 if settling else float(self._snr_matrix[b, t]),
-                False if settling else bool(self._truth[b, t]),
+        # A settling slot is unavailable sensor data: take no detector draw and
+        # mark the observation invalid so no learner or metric scores it.
+        if settling:
+            detections = tuple(False for _ in bands)
+        else:
+            detections = tuple(
+                self._detection_model.detect(
+                    float(self._snr_matrix[b, t]),
+                    bool(self._truth[b, t]),
+                )
+                for b in bands
             )
-            for b in bands
-        )
         obs = Observation(
             slot=t,
             bands=bands,
             detections=detections,
             retune_event=retune_event,
             settling=settling,
+            valid=not settling,
         )
 
         self._previous_bands = bands
