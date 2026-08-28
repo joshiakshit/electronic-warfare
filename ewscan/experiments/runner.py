@@ -35,7 +35,12 @@ from ewscan.metrics.detection import DetectionMetrics, estimate_detection_metric
 from ewscan.metrics.first_intercept import FirstInterceptMetrics, estimate_first_intercept_metrics
 from ewscan.metrics.interception import InterceptionMetrics, estimate_interception_metrics
 from ewscan.metrics.prediction import PredictionMetrics, estimate_prediction_metrics
-from ewscan.metrics.reward import RewardMetrics, estimate_reward_metrics
+from ewscan.metrics.reward import (
+    EvaluationUtility,
+    RewardMetrics,
+    estimate_evaluation_utility,
+    estimate_reward_metrics,
+)
 from ewscan.metrics.time_error import TimeErrorMetrics, estimate_time_error_metrics
 
 
@@ -78,6 +83,7 @@ class EpisodeResult:
     interception: InterceptionMetrics
     first_intercept: FirstInterceptMetrics
     reward: RewardMetrics
+    evaluation: EvaluationUtility
     prediction: PredictionMetrics
     time_error: TimeErrorMetrics
     duration_seconds: float = 0.0
@@ -95,11 +101,7 @@ class EpisodeResult:
         dict[str, Any]
             Flat dictionary suitable for tabular displays, CSV exports, or DataFrames.
         """
-        intercept_fraction = (
-            (self.first_intercept.n_intercepted / self.first_intercept.n_emitters)
-            if self.first_intercept.n_emitters > 0
-            else float("nan")
-        )
+        intercept_fraction = self.first_intercept.intercept_fraction
 
         return {
             f"{prefix}scheduler": self.scheduler_name,
@@ -123,8 +125,14 @@ class EpisodeResult:
             f"{prefix}intercept_rate": self.interception.intercept_rate.rate,
             # Figure of Merit 3: Time to first intercept
             f"{prefix}ttfi": self.first_intercept.mean_time_to_first_intercept,
+            f"{prefix}ttfi_penalized": self.first_intercept.mean_time_to_first_intercept_penalized,
             f"{prefix}intercept_fraction": intercept_fraction,
-            # Figure of Merit 4: Reward & cost
+            # Figure of Merit 4: Reward & cost. learner_reward is the
+            # observation-based signal the scheduler saw; evaluation_utility is
+            # the truth-based score. They are different contracts by design.
+            f"{prefix}learner_reward": self.reward.average_reward,
+            f"{prefix}evaluation_utility": self.evaluation.average_utility,
+            f"{prefix}evaluation_total_utility": self.evaluation.total_utility,
             f"{prefix}average_reward": self.reward.average_reward,
             f"{prefix}total_reward": self.reward.total_reward,
             f"{prefix}hit_reward": self.reward.total_hit_reward,
@@ -259,6 +267,7 @@ def run_episode(
     interception = estimate_interception_metrics(log)
     first_intercept = estimate_first_intercept_metrics(log)
     reward = estimate_reward_metrics(log, rf=rf)
+    evaluation = estimate_evaluation_utility(log, rf=rf)
     # active=True only when a predictor produced at least one real prediction
     had_prediction = bool(np.any(predictions >= 0))
     prediction = estimate_prediction_metrics(
@@ -276,6 +285,7 @@ def run_episode(
         interception=interception,
         first_intercept=first_intercept,
         reward=reward,
+        evaluation=evaluation,
         prediction=prediction,
         time_error=time_error,
         duration_seconds=duration,

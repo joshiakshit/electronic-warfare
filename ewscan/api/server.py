@@ -11,7 +11,7 @@ from ewscan.metrics.detection import estimate_detection_metrics
 from ewscan.metrics.first_intercept import estimate_first_intercept_metrics
 from ewscan.metrics.interception import estimate_interception_metrics
 from ewscan.metrics.prediction import estimate_prediction_metrics
-from ewscan.metrics.reward import estimate_reward_metrics
+from ewscan.metrics.reward import estimate_evaluation_utility, estimate_reward_metrics
 from ewscan.metrics.time_error import estimate_time_error_metrics
 from ewscan.testing.fixtures import synthetic_log
 
@@ -36,6 +36,7 @@ def _result_from_log(log: EpisodeLog, scheduler_name: str, seed: int) -> Episode
     interception = estimate_interception_metrics(log)
     first_intercept = estimate_first_intercept_metrics(log)
     reward = estimate_reward_metrics(log)
+    evaluation = estimate_evaluation_utility(log)
     prediction = estimate_prediction_metrics(log)
     time_error = estimate_time_error_metrics(log)
     return EpisodeResult(
@@ -48,6 +49,7 @@ def _result_from_log(log: EpisodeLog, scheduler_name: str, seed: int) -> Episode
         interception=interception,
         first_intercept=first_intercept,
         reward=reward,
+        evaluation=evaluation,
         prediction=prediction,
         time_error=time_error,
         duration_seconds=0.0,
