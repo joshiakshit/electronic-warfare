@@ -9,7 +9,7 @@ from ewscan.agents import (
     RoundRobinScheduler,
     UniformRandomScheduler,
 )
-from ewscan.contracts import EmitterInfo
+from ewscan.contracts import EmitterInfo, ThreatPrior, scheduler_config_from_episode
 from ewscan.env.environment import RFEnvironment
 from ewscan.testing.fixtures import ScriptedEnv, make_test_config
 
@@ -166,6 +166,32 @@ class TestPriorWeightedScheduler:
         scheduler = PriorWeightedScheduler(priors=[0.0, 0.0])
         with pytest.raises(ValueError, match="positive"):
             scheduler.reset(config)
+
+    def test_uses_explicit_scheduler_threat_prior(self):
+        config = make_test_config(n_bands=3, seed=42)
+        scheduler_config = scheduler_config_from_episode(
+            config,
+            threat_prior=ThreatPrior(
+                weights=(0.0, 0.0, 1.0),
+                provenance="test",
+            ),
+        )
+        scheduler = PriorWeightedScheduler()
+
+        scheduler.reset(scheduler_config)
+
+        assert scheduler.act(None).bands == (2,)
+
+    def test_k_larger_than_positive_prior_count_fills_zero_weight_bands(self):
+        config = make_test_config(n_bands=3, n_slots=20, k=2, seed=42)
+        scheduler = PriorWeightedScheduler(priors=(1.0, 0.0, 0.0))
+        scheduler.reset(config)
+
+        for _ in range(20):
+            action = scheduler.act(None)
+            assert 0 in action.bands
+            assert len(action.bands) == 2
+            assert len(set(action.bands)) == 2
 
 
 class TestOracleScheduler:
