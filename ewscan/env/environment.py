@@ -263,7 +263,15 @@ class RFEnvironment:
         # Read each emitter's band per slot so frequency-agile emitters place
         # activity across bands. Fixed emitters return a constant current_band.
         for i, em in enumerate(self._emitters):
-            em_power_lin = 10.0 ** (em.snr / 10.0)
+            power_lin = em.power_linear(self._n_slots)
+            if power_lin is None:
+                power_lin = np.full(self._n_slots, 10.0 ** (em.snr / 10.0), dtype=np.float64)
+            else:
+                power_lin = np.asarray(power_lin, dtype=np.float64)
+                if power_lin.shape != (self._n_slots,):
+                    raise ValueError(
+                        f"power_linear must return shape ({self._n_slots},), got {power_lin.shape}"
+                    )
             activity = em.activity(self._n_slots)
             if activity is None:
                 on_arr = np.zeros(self._n_slots, dtype=np.bool_)
@@ -295,7 +303,7 @@ class RFEnvironment:
             on_idx = np.flatnonzero(on_arr)
             bands_on = band_arr[on_idx]
             self._truth[bands_on, on_idx] = True
-            np.add.at(power_matrix, (bands_on, on_idx), em_power_lin)
+            np.add.at(power_matrix, (bands_on, on_idx), power_lin[on_idx])
 
         # Compute combined SNR matrix in dB
         with np.errstate(divide="ignore"):

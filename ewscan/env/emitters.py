@@ -411,6 +411,16 @@ class BeamEmitter(Emitter):
         band = np.full(n_slots, self.band, dtype=np.intp)
         return on, band
 
+    def power_linear(self, n_slots: int) -> NDArray[np.float64]:
+        # Effective linear power follows the beam shape: convert the peak SNR to
+        # linear power first, then scale by the Gaussian gain in (0, 1].
+        two_pi = 2.0 * np.pi
+        t = np.arange(n_slots, dtype=np.float64)
+        delta = (self.theta0 - self.omega * t + np.pi) % two_pi - np.pi
+        gain = np.exp(-(delta ** 2) / (2.0 * self.beamwidth ** 2))
+        peak_power_lin = 10.0 ** (self.snr_peak / 10.0)
+        return peak_power_lin * gain
+
     @property
     def info(self) -> EmitterInfo:
         return EmitterInfo(

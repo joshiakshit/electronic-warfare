@@ -268,10 +268,11 @@ def run_episode(
     first_intercept = estimate_first_intercept_metrics(log)
     reward = estimate_reward_metrics(log, rf=rf)
     evaluation = estimate_evaluation_utility(log, rf=rf)
-    # active=True only when a predictor produced at least one real prediction
-    had_prediction = bool(np.any(predictions >= 0))
+    # A predictor is present if the scheduler exposes predicted_band, even on
+    # slots where it abstains. Coverage then separates presence from activity.
+    has_predictor = hasattr(scheduler, "predicted_band")
     prediction = estimate_prediction_metrics(
-        log, predictions=predictions if had_prediction else None
+        log, predictions=predictions if has_predictor else None
     )
     time_error = estimate_time_error_metrics(log, miss_penalty=miss_penalty)
 

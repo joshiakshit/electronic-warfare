@@ -539,6 +539,12 @@ class Emitter(ABC):
         state depends on RNG draws made in sequence must return None."""
         return None
 
+    def power_linear(self, n_slots: int) -> NDArray[np.float64] | None:
+        """Optional per-slot effective linear power. None means use the
+        constant ``10 ** (snr / 10)``. Emitters with a varying effective power
+        (e.g. a scanning beam) override this to pass the shape to the detector."""
+        return None
+
     @property
     @abstractmethod
     def info(self) -> EmitterInfo: ...

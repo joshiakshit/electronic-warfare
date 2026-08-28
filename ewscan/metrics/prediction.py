@@ -16,116 +16,128 @@ from ewscan.contracts import EpisodeLog
 
 @dataclass(frozen=True)
 class PredictionMetrics:
-    """Prediction accuracy metrics summary for one episode.
+    """Prediction metrics summary for one episode.
 
     Attributes
     ----------
     accuracy : float | None
-        Fraction of predictions that were correct (range 0.0 to 1.0),
-        or None if no predictor is active or no predictions were made.
+        Fraction of predictions that were correct (0.0-1.0), or None if no
+        prediction was made.
     percentage_correct : float | None
-        Percentage of predictions that were correct (range 0.0 to 100.0),
-        or None if no predictor is active or no predictions were made.
+        ``accuracy`` as a percentage, or None.
+    predictor_present : bool
+        True if a predictor was installed (an array was supplied), regardless
+        of whether it ever predicted.
     active : bool
-        True if a predictor was active during the episode, False otherwise.
+        Alias of ``predictor_present`` kept for compatibility.
     n_predictions : int
-        Total number of predictions evaluated.
+        Number of slots with a real prediction (band >= 0), on valid slots.
     n_correct : int
         Number of correct predictions.
+    coverage : float
+        ``n_predictions / n_slots``: how often the predictor committed.
+    mean_confidence : float | None
+        Mean predictor confidence over prediction slots, or None if no
+        confidence stream was supplied.
+    n_overrides : int
+        Number of slots the predictor overrode the inner action, from the
+        supplied override stream (0 if none supplied).
     """
 
     accuracy: float | None
     percentage_correct: float | None
+    predictor_present: bool
     active: bool
     n_predictions: int
     n_correct: int
+    coverage: float
+    mean_confidence: float | None
+    n_overrides: int
+
+
+def _require_prediction_shape(name: str, arr: NDArray, n_slots: int) -> NDArray:
+    a = np.asarray(arr)
+    if a.shape != (n_slots,):
+        raise ValueError(
+            f"{name} must have shape (n_slots,) = ({n_slots},), got {a.shape}"
+        )
+    return a
 
 
 def estimate_prediction_metrics(
     log: EpisodeLog,
-    predictions: NDArray[np.intp] | NDArray[np.bool_] | None = None,
+    predictions: NDArray[np.intp] | None = None,
+    confidences: NDArray[np.float64] | None = None,
+    overrides: NDArray[np.bool_] | None = None,
 ) -> PredictionMetrics:
-    """Compute prediction accuracy metrics for an episode log.
+    """Compute prediction metrics for an episode log.
 
-    In Phase 1 MVP, no predictor is active by default (predictions=None),
-    so this returns a defined null (active=False, accuracy=None, percentage_correct=None).
-
-    In Phase 2, when predictions are provided:
-    - If `predictions` is a 1D boolean array indicating correctness of evaluated predictions
-      or per-slot predictions: counts True values as correct.
-    - If `predictions` is a 1D integer array of predicted band indices per slot (shape: (n_slots,),
-      with -1 indicating no prediction at slot t): a prediction at slot t for band b is correct
-      if truth[b, t] == True.
-
-    Parameters
-    ----------
-    log : EpisodeLog
-        The episode log to evaluate.
-    predictions : NDArray[np.intp] | NDArray[np.bool_] | None
-        Optional array of predictions. If None, returns stub null metrics.
-
-    Returns
-    -------
-    PredictionMetrics
-        Dataclass containing accuracy, percentage_correct, active status,
-        n_predictions, and n_correct.
+    ``predictions`` must be an integer array of exact shape ``(n_slots,)`` where
+    each entry is a predicted band index or ``-1`` for no prediction. Boolean
+    arrays, other numeric dtypes, and any other shape are rejected. Invalid
+    (settling) slots are skipped. ``confidences`` and ``overrides`` are optional
+    per-slot streams recorded separately from accuracy.
     """
     if predictions is None:
         return PredictionMetrics(
             accuracy=None,
             percentage_correct=None,
+            predictor_present=False,
             active=False,
             n_predictions=0,
             n_correct=0,
+            coverage=0.0,
+            mean_confidence=None,
+            n_overrides=0,
         )
 
     preds = np.asarray(predictions)
-    if preds.size == 0:
-        return PredictionMetrics(
-            accuracy=None,
-            percentage_correct=None,
-            active=True,
-            n_predictions=0,
-            n_correct=0,
+    if not np.issubdtype(preds.dtype, np.integer):
+        raise ValueError(
+            f"predictions must be an integer band-or-(-1) array, got dtype {preds.dtype}"
         )
+    preds = _require_prediction_shape("predictions", preds, log.n_slots)
 
-    if np.issubdtype(preds.dtype, np.bool_):
-        n_predictions = int(preds.size)
-        n_correct = int(np.sum(preds))
+    valid = log.valid_slots
+    mask = (preds >= 0) & (preds < log.n_bands) & valid
+    n_predictions = int(np.sum(mask))
+    coverage = n_predictions / log.n_slots if log.n_slots > 0 else 0.0
+
+    if n_predictions > 0:
+        slot_indices = np.where(mask)[0]
+        predicted_bands = preds[mask]
+        n_correct = int(np.sum(log.truth[predicted_bands, slot_indices]))
     else:
-        # Integer array of predicted band indices per slot
-        if preds.shape[0] != log.n_slots:
-            raise ValueError(
-                f"Predictions length ({preds.shape[0]}) does not match episode slots ({log.n_slots})"
-            )
-        mask = (preds >= 0) & (preds < log.n_bands)
-        n_predictions = int(np.sum(mask))
+        n_correct = 0
+
+    mean_confidence: float | None = None
+    if confidences is not None:
+        conf = _require_prediction_shape("confidences", confidences, log.n_slots)
         if n_predictions > 0:
-            slot_indices = np.where(mask)[0]
-            predicted_bands = preds[mask]
-            correct_mask = log.truth[predicted_bands, slot_indices]
-            n_correct = int(np.sum(correct_mask))
-        else:
-            n_correct = 0
+            mean_confidence = float(np.mean(conf[mask]))
+
+    n_overrides = 0
+    if overrides is not None:
+        ov = _require_prediction_shape("overrides", overrides, log.n_slots)
+        n_overrides = int(np.sum(np.asarray(ov, dtype=bool) & mask))
 
     if n_predictions == 0:
-        return PredictionMetrics(
-            accuracy=None,
-            percentage_correct=None,
-            active=True,
-            n_predictions=0,
-            n_correct=0,
-        )
-
-    accuracy = float(n_correct) / float(n_predictions)
-    percentage_correct = accuracy * 100.0
+        accuracy: float | None = None
+        percentage_correct: float | None = None
+    else:
+        accuracy = float(n_correct) / float(n_predictions)
+        percentage_correct = accuracy * 100.0
 
     return PredictionMetrics(
         accuracy=accuracy,
         percentage_correct=percentage_correct,
+        predictor_present=True,
         active=True,
         n_predictions=n_predictions,
         n_correct=n_correct,
+        coverage=coverage,
+        mean_confidence=mean_confidence,
+        n_overrides=n_overrides,
     )
 
 
