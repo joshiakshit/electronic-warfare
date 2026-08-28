@@ -25,6 +25,7 @@ class RewardFunction:
     c_miss: float = 0.1
     w_novelty: float = 0.2
     w_decay: float = 0.3
+    c_retune: float = 0.1
     cooldown: int | None = None
     baseline_threat: float = 0.1
 
@@ -96,6 +97,8 @@ class RewardFunction:
                 r += -self.c_miss * (1.0 - det)
                 r += self.w_novelty * min(s / n_bands, 1.0)
                 r += -self.w_decay * max(0.0, 1.0 - s / cd) if cd > 0 else 0.0
+            if log.config.retune_cost_slots > 0 and log.retune_events[t]:
+                r -= self.c_retune
             rewards[t] = r
 
             staleness += 1

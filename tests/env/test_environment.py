@@ -24,6 +24,7 @@ from ewscan.contracts import (
 from ewscan.env import (
     DetectionModel,
     Environment,
+    FrequencyHopEmitter,
     GilbertElliottEmitter,
     PeriodicEmitter,
     RFEnvironment,
@@ -217,6 +218,25 @@ class TestTruthMatrix:
             expected = s1 or s2
             assert truth[2, t] == expected
 
+    def test_frequency_hopper_places_activity_per_slot(self):
+        """A hopper puts one ON band per slot, following its LFSR sequence."""
+        hopper = FrequencyHopEmitter(
+            band=0,
+            hop_bands=[0, 1, 2, 3],
+            sequence="lfsr",
+            taps=[3, 2],
+            state=1,
+            n_bits=4,
+        )
+        env = RFEnvironment(n_bands=4, n_slots=8, emitters=[hopper], seed=0)
+        env.reset()
+        truth = env.truth
+
+        expected_bands = [1, 2, 0, 1, 3, 2, 1, 2]
+        for t, b in enumerate(expected_bands):
+            assert truth[:, t].sum() == 1
+            assert truth[b, t]
+
     def test_generate_truth_matrix_helper(self):
         config = EpisodeConfig(
             n_bands=4,
@@ -350,6 +370,45 @@ class TestEnvironmentLifecycle:
                 n_slots=10,
                 emitters=["invalid_emitter_type"],  # type: ignore
             )
+
+    def test_retune_marks_distance_based_settling_slots(self):
+        env = RFEnvironment(
+            n_bands=5,
+            n_slots=5,
+            emitters=[StaticCWEmitter(band=3, snr=60.0)],
+            retune_cost_slots=1,
+            seed=0,
+        )
+        env.reset()
+
+        first = env.step(ScanAction(bands=(0,)))
+        second = env.step(ScanAction(bands=(3,)))
+        third = env.step(ScanAction(bands=(3,)))
+        fourth = env.step(ScanAction(bands=(3,)))
+
+        assert not first.retune_event
+        assert not first.settling
+        assert second.retune_event
+        assert second.settling
+        assert third.settling
+        assert fourth.settling
+
+    def test_same_band_set_in_different_order_does_not_retune(self):
+        env = RFEnvironment(
+            n_bands=4,
+            n_slots=2,
+            k=2,
+            retune_cost_slots=1,
+            seed=0,
+        )
+        env.reset()
+
+        first = env.step(ScanAction(bands=(0, 3)))
+        second = env.step(ScanAction(bands=(3, 0)))
+
+        assert not first.retune_event
+        assert not second.retune_event
+        assert not second.settling
 
 
 

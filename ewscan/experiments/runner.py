@@ -116,6 +116,7 @@ class EpisodeResult:
             f"{prefix}miss_cost": self.reward.total_miss_cost,
             f"{prefix}novelty_bonus": self.reward.total_novelty_bonus,
             f"{prefix}revisit_decay": self.reward.total_revisit_decay,
+            f"{prefix}retune_penalty": self.reward.total_retune_penalty,
             # Figure of Merit 5: Prediction
             f"{prefix}prediction_accuracy": self.prediction.accuracy,
             f"{prefix}prediction_pct_correct": self.prediction.percentage_correct,
@@ -190,6 +191,8 @@ def run_episode(
             detection_threshold=config.detection_threshold,
             pfa=config.pfa,
             seed=effective_seed,
+            retune_cost_slots=config.retune_cost_slots,
+            dwell=config.dwell,
         )
     else:
         ep_config = config
@@ -219,8 +222,10 @@ def run_episode(
     # Execute episode time-stepping loop
     start_time = time.perf_counter()
     obs: Observation | None = None
-    for _ in range(ep_config.n_slots):
+    predictions = np.full(ep_config.n_slots, -1, dtype=np.intp)
+    for t in range(ep_config.n_slots):
         action = scheduler.act(obs)
+        predictions[t] = int(getattr(scheduler, "predicted_band", -1))
         obs = environment.step(action)
         recorder.record_observation(obs)
     duration = time.perf_counter() - start_time
@@ -233,7 +238,11 @@ def run_episode(
     interception = estimate_interception_metrics(log)
     first_intercept = estimate_first_intercept_metrics(log)
     reward = estimate_reward_metrics(log, rf=rf)
-    prediction = estimate_prediction_metrics(log)
+    # active=True only when a predictor produced at least one real prediction
+    had_prediction = bool(np.any(predictions >= 0))
+    prediction = estimate_prediction_metrics(
+        log, predictions=predictions if had_prediction else None
+    )
     time_error = estimate_time_error_metrics(log, miss_penalty=miss_penalty)
 
     return EpisodeResult(
@@ -350,6 +359,18 @@ def _build_scheduler_by_name(name: str, config: EpisodeConfig | None = None) -> 
         from ewscan.agents.thompson import DiscountedThompsonScheduler
 
         return DiscountedThompsonScheduler()
+    elif name_clean == "belief":
+        from ewscan.agents.pomdp import BeliefScheduler
+
+        return BeliefScheduler()
+    elif name_clean == "whittle":
+        from ewscan.agents.whittle import WhittleScheduler
+
+        return WhittleScheduler()
+    elif name_clean == "sniper":
+        from ewscan.agents.sniper import SniperScheduler
+
+        return SniperScheduler()
     elif name_clean == "stub":
         from ewscan.testing.fixtures import StubScheduler
 
@@ -358,7 +379,7 @@ def _build_scheduler_by_name(name: str, config: EpisodeConfig | None = None) -> 
         raise ValueError(
             f"Unknown scheduler name '{name}'. Available: round_robin, uniform_random, "
             f"prior_weighted, oracle, ucb1, sliding_window_ucb, discounted_ucb, "
-            f"thompson_sampling, discounted_thompson, stub"
+            f"thompson_sampling, discounted_thompson, belief, whittle, sniper, stub"
         )
 
 
@@ -379,7 +400,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "-s",
         type=str,
         default="round_robin",
-        help="Scheduler name: round_robin, uniform_random, prior_weighted, oracle, ucb1, sliding_window_ucb, discounted_ucb, thompson_sampling, stub (default: round_robin).",
+        help="Scheduler name: round_robin, uniform_random, prior_weighted, oracle, ucb1, sliding_window_ucb, discounted_ucb, thompson_sampling, belief, whittle, sniper, stub (default: round_robin).",
     )
     parser.add_argument(
         "--seed",

@@ -53,10 +53,12 @@ class RewardMetrics:
     total_miss_cost: float
     total_novelty_bonus: float
     total_revisit_decay: float
+    total_retune_penalty: float
     average_hit_reward: float
     average_miss_cost: float
     average_novelty_bonus: float
     average_revisit_decay: float
+    average_retune_penalty: float
     per_slot_rewards: NDArray[np.float64]
     n_slots: int
 
@@ -92,10 +94,12 @@ def estimate_reward_metrics(
             total_miss_cost=0.0,
             total_novelty_bonus=0.0,
             total_revisit_decay=0.0,
+            total_retune_penalty=0.0,
             average_hit_reward=float("nan"),
             average_miss_cost=float("nan"),
             average_novelty_bonus=float("nan"),
             average_revisit_decay=float("nan"),
+            average_retune_penalty=float("nan"),
             per_slot_rewards=np.empty(0, dtype=np.float64),
             n_slots=0,
         )
@@ -115,6 +119,7 @@ def estimate_reward_metrics(
     miss_costs = np.empty(n_slots, dtype=np.float64)
     novelty_bonuses = np.empty(n_slots, dtype=np.float64)
     revisit_decays = np.empty(n_slots, dtype=np.float64)
+    retune_penalties = np.zeros(n_slots, dtype=np.float64)
 
     for t in range(n_slots):
         bands_t = log.actions[t]
@@ -132,11 +137,14 @@ def estimate_reward_metrics(
             r_novelty += rf.w_novelty * min(s / n_bands, 1.0)
             r_decay += -rf.w_decay * max(0.0, 1.0 - s / cd) if cd > 0 else 0.0
 
+        if log.config.retune_cost_slots > 0 and log.retune_events[t]:
+            retune_penalties[t] = -rf.c_retune
+
         hit_rewards[t] = r_hit
         miss_costs[t] = r_miss
         novelty_bonuses[t] = r_novelty
         revisit_decays[t] = r_decay
-        per_slot_rewards[t] = r_hit + r_miss + r_novelty + r_decay
+        per_slot_rewards[t] = r_hit + r_miss + r_novelty + r_decay + retune_penalties[t]
 
         staleness += 1
         for j in range(k):
@@ -148,6 +156,7 @@ def estimate_reward_metrics(
     tot_miss = float(np.sum(miss_costs))
     tot_novelty = float(np.sum(novelty_bonuses))
     tot_decay = float(np.sum(revisit_decays))
+    tot_retune = float(np.sum(retune_penalties))
     tot_reward = float(np.sum(per_slot_rewards))
 
     return RewardMetrics(
@@ -157,10 +166,12 @@ def estimate_reward_metrics(
         total_miss_cost=tot_miss,
         total_novelty_bonus=tot_novelty,
         total_revisit_decay=tot_decay,
+        total_retune_penalty=tot_retune,
         average_hit_reward=tot_hit / n_slots,
         average_miss_cost=tot_miss / n_slots,
         average_novelty_bonus=tot_novelty / n_slots,
         average_revisit_decay=tot_decay / n_slots,
+        average_retune_penalty=tot_retune / n_slots,
         per_slot_rewards=per_slot_rewards,
         n_slots=n_slots,
     )

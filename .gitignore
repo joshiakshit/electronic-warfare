@@ -48,6 +48,7 @@ htmlcov/
 !.claude/CLAUDE.md
 CLAUDE.md
 HANDOFF.md
+AGENTS.md
 
 # Outputs
 *.csv

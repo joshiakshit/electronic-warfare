@@ -9,6 +9,8 @@ from ewscan.env.detection import (
     threshold_from_pfa,
 )
 from ewscan.env.emitters import (
+    BeamEmitter,
+    FrequencyHopEmitter,
     GilbertElliottEmitter,
     PeriodicEmitter,
     StaticCWEmitter,
@@ -26,8 +28,10 @@ from ewscan.env.recorder import (
 )
 
 __all__ = [
+    "BeamEmitter",
     "DetectionModel",
     "Environment",
+    "FrequencyHopEmitter",
     "GilbertElliottEmitter",
     "PeriodicEmitter",
     "RFEnvironment",

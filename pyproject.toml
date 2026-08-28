@@ -31,3 +31,8 @@ packages = ["ewscan"]
 
 [tool.setuptools.package-data]
 ewscan = ["py.typed"]
+
+[tool.pytest.ini_options]
+markers = [
+    "slow: long-running performance gates, deselect with -m 'not slow'",
+]

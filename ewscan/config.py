@@ -56,6 +56,20 @@ def config_from_dict(data: dict[str, Any]) -> EpisodeConfig:
     if not isinstance(seed, int) or isinstance(seed, bool):
         raise ConfigError(f"'seed' must be an integer, got {seed!r}")
 
+    retune_cost_slots = data.get("retune_cost_slots", 0)
+    if (
+        not isinstance(retune_cost_slots, int)
+        or isinstance(retune_cost_slots, bool)
+        or retune_cost_slots < 0
+    ):
+        raise ConfigError(
+            f"'retune_cost_slots' must be a non-negative integer, got {retune_cost_slots!r}"
+        )
+
+    dwell = data.get("dwell", 1)
+    if not isinstance(dwell, int) or isinstance(dwell, bool) or dwell < 1:
+        raise ConfigError(f"'dwell' must be a positive integer, got {dwell!r}")
+
     # Process emitters
     raw_emitters = data.get("emitters", [])
     if not isinstance(raw_emitters, (list, tuple)):
@@ -109,6 +123,8 @@ def config_from_dict(data: dict[str, Any]) -> EpisodeConfig:
         detection_threshold=detection_threshold,
         pfa=pfa,
         seed=seed,
+        retune_cost_slots=retune_cost_slots,
+        dwell=dwell,
     )
 
 
@@ -124,6 +140,8 @@ def config_to_dict(config: EpisodeConfig) -> dict[str, Any]:
         "detection_threshold": config.detection_threshold,
         "pfa": config.pfa,
         "seed": config.seed,
+        "retune_cost_slots": config.retune_cost_slots,
+        "dwell": config.dwell,
         "emitters": [
             {
                 "band": em.band,

@@ -169,6 +169,8 @@ class TestEpisodeRecorder:
         np.testing.assert_array_equal(log.truth, sample_truth)
         np.testing.assert_array_equal(log.actions[:, 0], np.array(actions, dtype=np.intp))
         np.testing.assert_array_equal(log.detections[:, 0], np.array(detections, dtype=np.bool_))
+        assert not np.any(log.retune_events)
+        assert not np.any(log.settling_slots)
 
         # Check that we copy arrays so mutate operations on original don't affect log
         sample_truth[0, 0] = not sample_truth[0, 0]
@@ -183,7 +185,12 @@ class TestSerialization:
         recorder = EpisodeRecorder(sample_config)
         recorder.record_truth(sample_truth)
         for t in range(sample_config.n_slots):
-            recorder.record((t % sample_config.n_bands,), (bool(sample_truth[t % sample_config.n_bands, t]),))
+            recorder.record(
+                (t % sample_config.n_bands,),
+                (bool(sample_truth[t % sample_config.n_bands, t]),),
+                retune_event=t == 1,
+                settling=t in (1, 2),
+            )
         return recorder.to_log()
 
     def test_json_roundtrip(self, full_log):
@@ -201,6 +208,8 @@ class TestSerialization:
             np.testing.assert_array_equal(loaded.truth, full_log.truth)
             np.testing.assert_array_equal(loaded.actions, full_log.actions)
             np.testing.assert_array_equal(loaded.detections, full_log.detections)
+            np.testing.assert_array_equal(loaded.retune_events, full_log.retune_events)
+            np.testing.assert_array_equal(loaded.settling_slots, full_log.settling_slots)
             assert loaded.truth.dtype == np.bool_
             assert loaded.actions.dtype == np.intp
             assert loaded.detections.dtype == np.bool_
@@ -220,6 +229,8 @@ class TestSerialization:
             np.testing.assert_array_equal(loaded.truth, full_log.truth)
             np.testing.assert_array_equal(loaded.actions, full_log.actions)
             np.testing.assert_array_equal(loaded.detections, full_log.detections)
+            np.testing.assert_array_equal(loaded.retune_events, full_log.retune_events)
+            np.testing.assert_array_equal(loaded.settling_slots, full_log.settling_slots)
             assert loaded.truth.dtype == np.bool_
             assert loaded.actions.dtype == np.intp
             assert loaded.detections.dtype == np.bool_

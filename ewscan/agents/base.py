@@ -33,6 +33,7 @@ class BaseLearningScheduler(Scheduler):
         self._stats: BandStatistics | None = None
         self._n_bands: int | None = None
         self._k: int | None = None
+        self._retune_cost_slots: int = 0
         self._threat_map: NDArray[np.float64] | None = None
         self._rng: np.random.Generator | None = None
 
@@ -50,6 +51,7 @@ class BaseLearningScheduler(Scheduler):
 
         self._n_bands = config.n_bands
         self._k = config.k
+        self._retune_cost_slots = config.retune_cost_slots
         self._stats = BandStatistics(config.n_bands)
 
         # Build threat map
@@ -97,6 +99,9 @@ class BaseLearningScheduler(Scheduler):
                 rewards.append(float(detection) * float(self._threat_map[band]))
             else:
                 rewards.append(float(detection))
+        if obs.retune_event and self._retune_cost_slots > 0:
+            penalty = (self._reward_fn or RewardFunction()).c_retune / len(rewards)
+            rewards = [reward - penalty for reward in rewards]
         return rewards
 
     def _select_top_k(
