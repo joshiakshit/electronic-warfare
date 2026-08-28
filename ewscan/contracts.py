@@ -80,6 +80,7 @@ class EpisodeConfig:
     pfa: float
     seed: int = 0
     retune_cost_slots: int = 0
+    dwell: int = 1
 
     def __post_init__(self) -> None:
         if not (1 <= self.k <= self.n_bands):
@@ -89,6 +90,10 @@ class EpisodeConfig:
         if not isinstance(self.retune_cost_slots, int) or isinstance(self.retune_cost_slots, bool) or self.retune_cost_slots < 0:
             raise ValueError(
                 f"retune_cost_slots must be a non-negative integer, got {self.retune_cost_slots!r}"
+            )
+        if not isinstance(self.dwell, int) or isinstance(self.dwell, bool) or self.dwell < 1:
+            raise ValueError(
+                f"dwell must be a positive integer, got {self.dwell!r}"
             )
 
 

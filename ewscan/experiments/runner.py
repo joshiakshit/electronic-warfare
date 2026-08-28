@@ -192,6 +192,7 @@ def run_episode(
             pfa=config.pfa,
             seed=effective_seed,
             retune_cost_slots=config.retune_cost_slots,
+            dwell=config.dwell,
         )
     else:
         ep_config = config

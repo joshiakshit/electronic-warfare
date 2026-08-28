@@ -50,6 +50,7 @@ class RFEnvironment:
         detection_threshold: float | None = None,
         seed: int = 0,
         retune_cost_slots: int = 0,
+        dwell: int = 1,
     ) -> None:
         if config is not None:
             self._n_bands = config.n_bands
@@ -66,6 +67,7 @@ class RFEnvironment:
                 else DetectionModel(
                     pfa=config.pfa,
                     threshold=config.detection_threshold,
+                    dwell=config.dwell,
                 )
             )
             self._config = config
@@ -85,6 +87,10 @@ class RFEnvironment:
             ):
                 raise ValueError(
                     f"retune_cost_slots must be a non-negative integer, got {retune_cost_slots!r}"
+                )
+            if not isinstance(dwell, int) or isinstance(dwell, bool) or dwell < 1:
+                raise ValueError(
+                    f"dwell must be a positive integer, got {dwell!r}"
                 )
 
             self._n_bands = int(n_bands)
@@ -114,7 +120,7 @@ class RFEnvironment:
                 det_thresh = detection_model.threshold
             else:
                 self._detection_model = DetectionModel(
-                    pfa=pfa, threshold=detection_threshold
+                    pfa=pfa, threshold=detection_threshold, dwell=dwell
                 )
                 pfa_val = pfa
                 det_thresh = self._detection_model.threshold
@@ -128,6 +134,7 @@ class RFEnvironment:
                 pfa=pfa_val,
                 seed=self._seed,
                 retune_cost_slots=retune_cost_slots,
+                dwell=dwell,
             )
 
         # Validate emitter band assignments
