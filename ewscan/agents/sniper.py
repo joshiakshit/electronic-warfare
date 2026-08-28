@@ -29,6 +29,8 @@ class SniperScheduler(BaseLearningScheduler):
         whether the sniper is confident or not (Task 7 test 5).
     tau_conf : float, default 0.6
         Confidence threshold passed to the internal ``NextTxPredictor``.
+    min_incremental_value : float, default 0.0
+        Required lower-bound advantage over the replaced inner band.
     predictor_capacity : int | None, optional
         Ring-buffer capacity for the internal ``PeriodEstimator``. Defaults to
         ``config.n_slots`` at reset time.
@@ -44,6 +46,7 @@ class SniperScheduler(BaseLearningScheduler):
         self,
         inner: Scheduler | None = None,
         tau_conf: float = 0.6,
+        min_incremental_value: float = 0.0,
         predictor_capacity: int | None = None,
         predictor_window: int = 20,
         seed: int | np.random.Generator | None = None,
@@ -51,10 +54,16 @@ class SniperScheduler(BaseLearningScheduler):
         super().__init__(seed=seed)
         self._inner = inner if inner is not None else UCB1Scheduler()
         self._tau_conf = float(tau_conf)
+        self._min_incremental_value = float(min_incremental_value)
         self._predictor_capacity = predictor_capacity
         self._predictor_window = predictor_window
         self._predictor: NextTxPredictor | None = None
         self.predicted_band = -1
+        self.prediction_band = -1
+        self.prediction_confidence = 0.0
+        self.inner_action: tuple[int, ...] = ()
+        self.executed_action: tuple[int, ...] = ()
+        self.did_override = False
 
     @property
     def name(self) -> str:
@@ -75,6 +84,28 @@ class SniperScheduler(BaseLearningScheduler):
             window=self._predictor_window,
         )
         self.predicted_band = -1
+        self.prediction_band = -1
+        self.prediction_confidence = 0.0
+        self.inner_action = ()
+        self.executed_action = ()
+        self.did_override = False
+
+    def _inner_upper_value(self, band: int) -> float:
+        if not isinstance(self._inner, BaseLearningScheduler):
+            return float("inf")
+        count = self._inner.stats.get_count(band)
+        if count == 0:
+            return float("inf")
+        hits = self._inner.stats.get_hits(band)
+        mean = (hits + 1.0) / (count + 2.0)
+        uncertainty = np.sqrt(mean * (1.0 - mean) / (count + 3.0))
+        return float(mean + uncertainty)
+
+    def _incremental_value(self, predicted_band: int, inner_bands: list[int]) -> float:
+        assert self._predictor is not None
+        predicted_lower = self._predictor.lower_confidence(predicted_band)
+        replaced_upper = min(self._inner_upper_value(band) for band in inner_bands)
+        return predicted_lower - replaced_upper
 
     def act(self, obs: Observation | None) -> ScanAction:
         if self._predictor is None or self._k is None or self._threat_map is None:
@@ -91,21 +122,34 @@ class SniperScheduler(BaseLearningScheduler):
         # Inner bandit always learns from the real, executed observation and
         # always supplies the baseline choice, whether or not it gets overridden.
         inner_bands = list(self._inner.act(obs).bands)
+        self.inner_action = tuple(inner_bands)
 
         current_slot = 0 if obs is None else obs.slot + 1
         due = self._predictor.due_bands(current_slot)
         sniped_band = None
+        confidence = 0.0
         if due:
-            sniped_band = max(due, key=lambda item: self._threat_map[item[0]])[0]
+            sniped_band, confidence = max(
+                due, key=lambda item: (item[1], self._threat_map[item[0]])
+            )
 
-        if sniped_band is not None and sniped_band not in inner_bands:
-            # inner_bands are distinct and sniped_band is confirmed absent, so
-            # replacing exactly one entry keeps the list distinct by construction.
+        self.prediction_band = -1 if sniped_band is None else sniped_band
+        self.predicted_band = self.prediction_band
+        self.prediction_confidence = confidence
+        self.did_override = False
+
+        if (
+            sniped_band is not None
+            and sniped_band not in inner_bands
+            and self._incremental_value(sniped_band, inner_bands)
+            >= self._min_incremental_value
+        ):
             bands = inner_bands
-            bands[-1] = sniped_band
-            self.predicted_band = sniped_band
+            replaced = min(range(len(bands)), key=lambda index: self._inner_upper_value(bands[index]))
+            bands[replaced] = sniped_band
+            self.did_override = True
         else:
             bands = inner_bands
-            self.predicted_band = -1
 
-        return ScanAction(bands=tuple(bands))
+        self.executed_action = tuple(bands)
+        return ScanAction(bands=self.executed_action)

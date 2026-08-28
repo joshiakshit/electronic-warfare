@@ -45,6 +45,17 @@ from ewscan.metrics.time_error import TimeErrorMetrics, estimate_time_error_metr
 
 
 @dataclass(frozen=True)
+class ArbitrationTelemetry:
+    """Per-slot Sniper prediction and override decisions."""
+
+    prediction_band: np.ndarray
+    prediction_confidence: np.ndarray
+    inner_action: np.ndarray
+    executed_action: np.ndarray
+    did_override: np.ndarray
+
+
+@dataclass(frozen=True)
 class EpisodeResult:
     """Complete result of executing a single episode.
 
@@ -87,6 +98,7 @@ class EpisodeResult:
     prediction: PredictionMetrics
     time_error: TimeErrorMetrics
     duration_seconds: float = 0.0
+    arbitration: ArbitrationTelemetry | None = None
 
     def to_dict(self, prefix: str = "") -> dict[str, Any]:
         """Flatten scalar metrics and metadata into a key-value dictionary.
@@ -252,9 +264,29 @@ def run_episode(
     start_time = time.perf_counter()
     obs: Observation | None = None
     predictions = np.full(ep_config.n_slots, -1, dtype=np.intp)
+    prediction_confidences = np.full(ep_config.n_slots, np.nan, dtype=np.float64)
+    inner_actions = np.full((ep_config.n_slots, ep_config.k), -1, dtype=np.intp)
+    executed_actions = np.full((ep_config.n_slots, ep_config.k), -1, dtype=np.intp)
+    overrides = np.zeros(ep_config.n_slots, dtype=np.bool_)
+    has_arbitration = False
     for t in range(ep_config.n_slots):
         action = scheduler.act(obs)
         predictions[t] = int(getattr(scheduler, "predicted_band", -1))
+        if all(
+            hasattr(scheduler, name)
+            for name in (
+                "prediction_band",
+                "prediction_confidence",
+                "inner_action",
+                "did_override",
+            )
+        ):
+            has_arbitration = True
+            predictions[t] = int(scheduler.prediction_band)
+            prediction_confidences[t] = float(scheduler.prediction_confidence)
+            inner_actions[t] = scheduler.inner_action
+            executed_actions[t] = action.bands
+            overrides[t] = bool(scheduler.did_override)
         obs = environment.step(action)
         recorder.record_observation(obs)
     duration = time.perf_counter() - start_time
@@ -272,7 +304,10 @@ def run_episode(
     # slots where it abstains. Coverage then separates presence from activity.
     has_predictor = hasattr(scheduler, "predicted_band")
     prediction = estimate_prediction_metrics(
-        log, predictions=predictions if has_predictor else None
+        log,
+        predictions=predictions if has_predictor else None,
+        confidences=prediction_confidences if has_predictor and has_arbitration else None,
+        overrides=overrides if has_predictor and has_arbitration else None,
     )
     time_error = estimate_time_error_metrics(log, miss_penalty=miss_penalty)
 
@@ -290,6 +325,17 @@ def run_episode(
         prediction=prediction,
         time_error=time_error,
         duration_seconds=duration,
+        arbitration=(
+            ArbitrationTelemetry(
+                prediction_band=predictions,
+                prediction_confidence=prediction_confidences,
+                inner_action=inner_actions,
+                executed_action=executed_actions,
+                did_override=overrides,
+            )
+            if has_arbitration
+            else None
+        ),
     )
 
 
