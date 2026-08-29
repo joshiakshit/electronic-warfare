@@ -12,7 +12,7 @@ import numpy as np
 
 from ewscan.agents.base import BaseLearningScheduler
 from ewscan.agents.predictor import NextTxPredictor
-from ewscan.agents.ucb import UCB1Scheduler
+from ewscan.agents.thompson import ThompsonSamplingScheduler
 from ewscan.contracts import EpisodeConfig, Observation, ScanAction, Scheduler
 
 
@@ -23,12 +23,20 @@ class SniperScheduler(BaseLearningScheduler):
     ----------
     inner : Scheduler | None, optional
         Bandit scheduler that supplies the baseline K-band choice and learns
-        from the executed observation. Defaults to a fresh ``UCB1Scheduler``.
+        from the executed observation. Defaults to a fresh
+        ``ThompsonSamplingScheduler``: at k=1 over 16 bands UCB1's exploration
+        bonus keeps returning to bands with no hits, while Thompson abandons
+        them and leaves the freed slots for the predictor to claim.
         Constructed and seeded independently of the sniper; the sniper never
         passes it a seed or RNG, so its action sequence is unaffected by
         whether the sniper is confident or not (Task 7 test 5).
-    tau_conf : float, default 0.6
-        Confidence threshold passed to the internal ``NextTxPredictor``.
+    tau_conf : float, default 0.5
+        Safety floor on the predictor's outcome-window confidence. It exists
+        to disable the sniper entirely (set it above 1.0); the decision that
+        actually authorises an override is the incremental-value comparison
+        below, which is backed by measured phase occupancy. Holding this above
+        the Beta(1,1) prior instead deadlocks: no band is ever due, so no
+        outcome is ever scored, so confidence can never leave the prior.
     min_incremental_value : float, default 0.0
         Required lower-bound advantage over the replaced inner band.
     predictor_capacity : int | None, optional
@@ -45,14 +53,14 @@ class SniperScheduler(BaseLearningScheduler):
     def __init__(
         self,
         inner: Scheduler | None = None,
-        tau_conf: float = 0.6,
+        tau_conf: float = 0.5,
         min_incremental_value: float = 0.0,
         predictor_capacity: int | None = None,
         predictor_window: int = 20,
         seed: int | np.random.Generator | None = None,
     ) -> None:
         super().__init__(seed=seed)
-        self._inner = inner if inner is not None else UCB1Scheduler()
+        self._inner = inner if inner is not None else ThompsonSamplingScheduler()
         self._tau_conf = float(tau_conf)
         self._min_incremental_value = float(min_incremental_value)
         self._predictor_capacity = predictor_capacity
@@ -68,6 +76,20 @@ class SniperScheduler(BaseLearningScheduler):
     @property
     def name(self) -> str:
         return "sniper"
+
+    @property
+    def learning_metric(self) -> str:
+        if isinstance(self._inner, BaseLearningScheduler):
+            return self._inner.learning_metric
+        return "prediction_confidence"
+
+    @property
+    def learning_values(self) -> np.ndarray:
+        if isinstance(self._inner, BaseLearningScheduler):
+            return self._inner.learning_values
+        if self._n_bands is None:
+            raise RuntimeError("Scheduler must be reset before accessing learning values")
+        return np.zeros(self._n_bands, dtype=np.float64)
 
     def reset(self, config: EpisodeConfig) -> None:
         super().reset(config)
