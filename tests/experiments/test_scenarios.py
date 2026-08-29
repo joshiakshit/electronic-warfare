@@ -36,6 +36,7 @@ from ewscan.experiments.scenarios import (
     get_scenario,
     get_scenario_metadata,
     list_scenarios,
+    make_contested_spectrum_scenario,
     make_mixed_threat_scenario,
     make_periodic_radar_scenario,
     make_sparse_bursty_scenario,
@@ -110,6 +111,26 @@ class TestScenarioBuilders:
             assert "jitter" in em.params
             assert "phase" in em.params
 
+    def test_make_contested_spectrum_scenario(self):
+        config = make_contested_spectrum_scenario(seed=42)
+
+        assert config.n_bands == 16
+        assert config.n_slots == 2000
+        assert config.k == 1
+        assert {em.emitter_type for em in config.emitters} == {
+            "beam",
+            "frequency_hop",
+            "periodic",
+            "gilbert_elliott",
+        }
+
+        hopper = next(em for em in config.emitters if em.emitter_type == "frequency_hop")
+        assert len(hopper.params["hop_bands"]) >= 4
+
+        beam = next(em for em in config.emitters if em.emitter_type == "beam")
+        assert beam.params["omega"] > 0
+        assert beam.params["beamwidth"] > 0
+
     def test_parameter_overrides(self):
         """Verify keyword argument overrides in scenario builders."""
         config = make_sparse_bursty_scenario(n_bands=16, n_slots=500, seed=123)
@@ -123,7 +144,12 @@ class TestScenarioRegistry:
     def test_list_scenarios(self):
         """Verify all three canonical scenario names are returned."""
         names = list_scenarios()
-        assert set(names) == {"sparse_bursty", "mixed_threat", "periodic_radar"}
+        assert set(names) == {
+            "sparse_bursty",
+            "mixed_threat",
+            "periodic_radar",
+            "contested_spectrum",
+        }
 
     def test_canonical_name_resolution(self):
         """Verify resolution of aliases and case-insensitive strings."""
@@ -141,6 +167,7 @@ class TestScenarioRegistry:
         assert canonical_scenario_name("periodic_radar") == "periodic_radar"
         assert canonical_scenario_name("radar") == "periodic_radar"
         assert canonical_scenario_name("periodic") == "periodic_radar"
+        assert canonical_scenario_name("contested") == "contested_spectrum"
 
     def test_canonical_name_invalid_raises(self):
         """Verify unknown scenario names raise ValueError."""
@@ -157,7 +184,12 @@ class TestScenarioRegistry:
     def test_get_all_scenarios(self):
         """Verify get_all_scenarios returns all three configured scenarios."""
         all_scens = get_all_scenarios(n_slots=100)
-        assert set(all_scens.keys()) == {"sparse_bursty", "mixed_threat", "periodic_radar"}
+        assert set(all_scens.keys()) == {
+            "sparse_bursty",
+            "mixed_threat",
+            "periodic_radar",
+            "contested_spectrum",
+        }
         for cfg in all_scens.values():
             assert cfg.n_slots == 100
 
@@ -182,6 +214,11 @@ class TestYAMLConfigurationParity:
             ("sparse_bursty", "sparse_bursty.yaml", make_sparse_bursty_scenario),
             ("mixed_threat", "mixed_threat.yaml", make_mixed_threat_scenario),
             ("periodic_radar", "periodic_radar.yaml", make_periodic_radar_scenario),
+            (
+                "contested_spectrum",
+                "contested_spectrum.yaml",
+                make_contested_spectrum_scenario,
+            ),
         ],
     )
     def test_yaml_matches_python_factory(self, scenario_name, yaml_filename, factory_fn):
@@ -309,7 +346,7 @@ class TestSweepAndRunnerIntegration:
             schedulers=["round_robin"],
             seeds=[1],
         )
-        assert result.n_rows == 3  # 3 canned scenarios * 1 sched * 1 seed
+        assert result.n_rows == 4
 
     def test_runner_cli_with_scenario_name(self):
         """Verify runner CLI accepts scenario name string."""

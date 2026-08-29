@@ -113,6 +113,10 @@ export interface SimulationResult {
   prediction: PredictionSummary | null
   per_emitter: EmitterSummary[]
   log: SimulationLog
+  learning?: {
+    metric: string
+    values: number[][]
+  }
   arbitration?: {
     prediction_band: number[]
     prediction_confidence: number[]
@@ -133,6 +137,13 @@ export interface BandSummary {
   scans: number
   detections: number
   occupancy: number
+}
+
+export interface LearningBandRow {
+  band: number
+  value: number
+  scans: number
+  detections: number
 }
 
 export interface OutcomeCounts {
@@ -200,6 +211,32 @@ export function bandSummaries(result: SimulationResult): BandSummary[] {
       occupancy: result.log.n_slots > 0 ? activeSlots / result.log.n_slots : 0,
     }
   })
+}
+
+export function learningBandRows(
+  result: SimulationResult,
+  throughSlot: number,
+): LearningBandRow[] {
+  if (!result.learning) return []
+  const slot = Math.max(0, Math.min(throughSlot, result.learning.values.length - 1))
+  const values = result.learning.values[slot]
+  if (!values) return []
+
+  const rows = values.map((value, band) => {
+    let scans = 0
+    let detections = 0
+    result.log.actions.forEach((bands, actionSlot) => {
+      if (actionSlot > slot || result.log.valid_slots[actionSlot] === false) return
+      bands.forEach((scannedBand, channel) => {
+        if (scannedBand !== band) return
+        scans += 1
+        if (result.log.detections[actionSlot]?.[channel]) detections += 1
+      })
+    })
+    return { band, value, scans, detections }
+  })
+
+  return rows.sort((left, right) => right.value - left.value || left.band - right.band)
 }
 
 const comparisonDefinitions: Array<{

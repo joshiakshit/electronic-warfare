@@ -169,6 +169,24 @@ class TestEpisodeRunner:
             assert r1.interception.interception_ratio.ratio == r2.interception.interception_ratio.ratio
             assert r1.reward.total_reward == r2.reward.total_reward
 
+    def test_learning_scheduler_records_per_slot_learning_values(self):
+        config = _build_scenario_config(seed=42)
+
+        result = run_episode(config, UCB1Scheduler(), seed=42)
+
+        assert result.learning is not None
+        assert result.learning.metric == "empirical_detection_rate"
+        assert result.learning.values.shape == (config.n_slots, config.n_bands)
+        assert np.all(np.isfinite(result.learning.values))
+        assert np.all((0.0 <= result.learning.values) & (result.learning.values <= 1.0))
+
+    def test_fixed_scheduler_has_no_learning_telemetry(self):
+        config = _build_scenario_config(seed=42)
+
+        result = run_episode(config, RoundRobinScheduler(), seed=42)
+
+        assert result.learning is None
+
     def test_different_seeds_produce_different_runs(self):
         """Verify that different seeds alter RF environment generation and outcomes."""
         config = _build_scenario_config(seed=42)

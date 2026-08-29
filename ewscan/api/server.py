@@ -269,6 +269,11 @@ def _serialize_result(res: EpisodeResult, *, debug: bool) -> dict[str, Any]:
             "executed_action": res.arbitration.executed_action.tolist(),
             "did_override": res.arbitration.did_override.tolist(),
         }
+    if res.learning is not None:
+        payload["learning"] = {
+            "metric": res.learning.metric,
+            "values": res.learning.values.tolist(),
+        }
     return payload
 
 

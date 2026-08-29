@@ -3,6 +3,11 @@
 Maintains a per-band belief b_t = P(band is ON at slot t | history) via a
 Bayesian filter over the online p01/p10 transition estimates from
 `TransitionEstimator`. Never reads emitter truth or emitter parameters.
+
+Selection runs on `PhaseOccupancy` rather than on that filter. At k=1 a band is
+revisited every 11-16 slots, over which the Markov belief decays to its prior
+and ranks every band alike; the phase-conditioned posterior does not decay at
+all. The filter is kept because `belief` is the scheduler's published estimate.
 """
 
 from __future__ import annotations
@@ -13,6 +18,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from ewscan.agents.base import BaseLearningScheduler
+from ewscan.agents.phase import PhaseOccupancy
 from ewscan.agents.transition import TransitionEstimator
 from ewscan.contracts import DetectorCapability, EpisodeConfig, Observation, ScanAction
 
@@ -55,7 +61,11 @@ class BeliefTracker:
 
 
 class BeliefScheduler(BaseLearningScheduler):
-    """Scan scheduler that selects bands by threat-weighted ON belief.
+    """Scan scheduler that selects bands by threat-weighted occupancy.
+
+    Ranks bands by phase-conditioned P(ON) plus one posterior standard
+    deviation. Exploration ends by itself once a band is certain enough that no
+    other band's optimistic value can reach it.
 
     Parameters
     ----------
@@ -63,6 +73,10 @@ class BeliefScheduler(BaseLearningScheduler):
         Nominal detection probability used for the Bayes correction. The
         scheduler cannot know a band's true SNR, so this is a fixed
         hyperparameter rather than a per-band estimate.
+    optimism : float, default 1.0
+        Standard deviations of posterior optimism added when ranking bands.
+        Exploration stops on its own once one band's occupancy is certain
+        enough that no other band's optimistic value can reach it.
     seed : int | np.random.Generator | None, optional
         Optional random seed or Generator override for tie-breaking.
     """
@@ -70,13 +84,17 @@ class BeliefScheduler(BaseLearningScheduler):
     def __init__(
         self,
         pd_nominal: float = 0.9,
+        optimism: float = 1.0,
         seed: int | np.random.Generator | None = None,
     ) -> None:
         super().__init__(seed=seed)
         self._pd_nominal = float(pd_nominal)
+        self._optimism = float(optimism)
         self._detector_capability: DetectorCapability | None = None
         self._transition: TransitionEstimator | None = None
         self._belief_tracker: BeliefTracker | None = None
+        self._occupancy: PhaseOccupancy | None = None
+        self._slot: int = 0
 
     @property
     def name(self) -> str:
@@ -88,6 +106,14 @@ class BeliefScheduler(BaseLearningScheduler):
         if self._belief_tracker is None:
             raise RuntimeError("Scheduler must be reset before accessing belief")
         return self._belief_tracker.belief.copy()
+
+    @property
+    def learning_metric(self) -> str:
+        return "on_probability"
+
+    @property
+    def learning_values(self) -> NDArray[np.float64]:
+        return self.belief
 
     @property
     def detector_capability(self) -> DetectorCapability:
@@ -102,6 +128,13 @@ class BeliefScheduler(BaseLearningScheduler):
             nominal_pd=self._pd_nominal,
         )
         self._transition = TransitionEstimator(config.n_bands)
+        self._occupancy = PhaseOccupancy(
+            config.n_bands,
+            config.n_slots,
+            pd=self._detector_capability.nominal_pd,
+            pfa=self._detector_capability.effective_pfa,
+        )
+        self._slot = 0
         self._belief_tracker = BeliefTracker(
             config.n_bands,
             self._detector_capability.nominal_pd,
@@ -113,6 +146,7 @@ class BeliefScheduler(BaseLearningScheduler):
         if (
             self._transition is None
             or self._belief_tracker is None
+            or self._occupancy is None
             or self._threat_map is None
             or self._n_bands is None
             or self._k is None
@@ -125,9 +159,13 @@ class BeliefScheduler(BaseLearningScheduler):
             for band, det in zip(obs.bands, obs.detections):
                 self._transition.observe(band, obs.slot, det)
                 self._belief_tracker.correct(band, det)
+                self._occupancy.observe(band, obs.slot, det)
 
         self._belief_tracker.predict(self._transition.p01(), self._transition.p10())
 
-        value = self._threat_map * self._belief_tracker.belief
+        self._slot = 0 if obs is None else obs.slot + 1
+        value = self._threat_map * self._occupancy.upper_bound(
+            self._slot, z=self._optimism
+        )
         bands = self._select_top_k(value, self._k)
         return ScanAction(bands=bands)

@@ -1,12 +1,13 @@
 """Scenario library for ewscan -- Experiment harness Task 3 (Phase 1E.8).
 
-Provides three canned demo scenarios as specified in PLAN.md:
+Provides canned demo scenarios for the main emitter behaviors:
 1. `sparse_bursty`: Sparse spectrum with 3 bursty Gilbert-Elliott Markov emitters
    and 13 empty bands. Demonstrates rapid arm identification.
 2. `mixed_threat`: Mixed spectrum with a loud low-threat emitter, moderate emitters,
    and a rare high-threat emitter. Demonstrates threat discrimination and anti-camping.
 3. `periodic_radar`: Structured pulsed radars with distinct periods, dwells, phases,
    and jitter. Demonstrates periodic signal capture and sets up Phase 2 Periodicity Sniper.
+4. `contested_spectrum`: Scanning-beam, frequency-hopping, periodic, and bursty emitters.
 
 Each scenario separates adaptive learning schedulers (UCB1, Thompson Sampling)
 from open-loop round-robin by a visible margin.
@@ -15,6 +16,7 @@ from open-loop round-robin by a visible margin.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Any, Callable
 
 from ewscan.contracts import EmitterInfo, EpisodeConfig
@@ -209,11 +211,74 @@ def make_periodic_radar_scenario(
     )
 
 
+def make_contested_spectrum_scenario(
+    n_bands: int = 16,
+    n_slots: int = 2000,
+    k: int = 1,
+    detection_threshold: float | None = None,
+    pfa: float = 1e-4,
+    seed: int = 42,
+) -> EpisodeConfig:
+    """Create a mixed field with spatial, agile, periodic, and bursty emitters."""
+    emitters = (
+        EmitterInfo(
+            band=2,
+            snr=20.0,
+            threat_level=0.9,
+            emitter_type="beam",
+            params={
+                "omega": math.tau / 32,
+                "beamwidth": 0.45,
+                "snr_peak": 20.0,
+                "theta0": 0.7,
+                "floor": 12.0,
+            },
+        ),
+        EmitterInfo(
+            band=4,
+            snr=18.0,
+            threat_level=1.0,
+            emitter_type="frequency_hop",
+            params={
+                "hop_bands": [4, 5, 6, 7],
+                "sequence": "lfsr",
+                "taps": [7, 5, 4, 3],
+                "state": 173,
+                "n_bits": 8,
+            },
+        ),
+        EmitterInfo(
+            band=10,
+            snr=17.0,
+            threat_level=0.8,
+            emitter_type="periodic",
+            params={"period": 37, "dwell": 4, "jitter": 1, "phase": 9},
+        ),
+        EmitterInfo(
+            band=14,
+            snr=15.0,
+            threat_level=0.7,
+            emitter_type="gilbert_elliott",
+            params={"p01": 0.04, "p10": 0.18},
+        ),
+    )
+    return EpisodeConfig(
+        n_bands=n_bands,
+        n_slots=n_slots,
+        k=k,
+        emitters=emitters,
+        detection_threshold=detection_threshold,
+        pfa=pfa,
+        seed=seed,
+    )
+
+
 # Registry of canned scenario builder functions
 SCENARIO_BUILDERS: dict[str, Callable[..., EpisodeConfig]] = {
     "sparse_bursty": make_sparse_bursty_scenario,
     "mixed_threat": make_mixed_threat_scenario,
     "periodic_radar": make_periodic_radar_scenario,
+    "contested_spectrum": make_contested_spectrum_scenario,
 }
 
 # Alias resolution mapping
@@ -228,6 +293,8 @@ SCENARIO_ALIASES: dict[str, str] = {
     "radar": "periodic_radar",
     "periodic": "periodic_radar",
     "periodic_radars": "periodic_radar",
+    "contested": "contested_spectrum",
+    "agile": "contested_spectrum",
 }
 
 # Metadata descriptions for UI and reporting
@@ -256,6 +323,14 @@ SCENARIO_METADATA: dict[str, ScenarioMetadata] = {
         active_bands=(2, 8, 13),
         emitter_types=("periodic", "periodic", "periodic"),
     ),
+    "contested_spectrum": ScenarioMetadata(
+        name="contested_spectrum",
+        title="Contested Spectrum",
+        description="16 bands with scanning-beam, frequency-hopping, periodic, and bursty emitters.",
+        tactical_rationale="Tests closed-loop scheduling without emitter timing or frequency-plan intelligence.",
+        active_bands=(2, 4, 10, 14),
+        emitter_types=("beam", "frequency_hop", "periodic", "gilbert_elliott"),
+    ),
 }
 
 
@@ -270,7 +345,7 @@ def canonical_scenario_name(name: str) -> str:
     Returns
     -------
     str
-        Canonical scenario name ('sparse_bursty', 'mixed_threat', 'periodic_radar').
+        Canonical scenario name.
 
     Raises
     ------
@@ -299,7 +374,7 @@ def get_scenario(name: str, **kwargs: Any) -> EpisodeConfig:
     Parameters
     ----------
     name : str
-        Scenario name identifier ('sparse_bursty', 'mixed_threat', 'periodic_radar', or alias).
+        Scenario name identifier or alias.
     **kwargs : Any
         Optional overrides for scenario parameters (e.g. n_slots, seed, n_bands).
 
@@ -319,7 +394,7 @@ def list_scenarios() -> list[str]:
     Returns
     -------
     list[str]
-        List of scenario names: ['sparse_bursty', 'mixed_threat', 'periodic_radar'].
+        Canonical scenario names.
     """
     return list(SCENARIO_BUILDERS.keys())
 

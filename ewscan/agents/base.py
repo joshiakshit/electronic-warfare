@@ -50,6 +50,15 @@ class BaseLearningScheduler(Scheduler):
             raise RuntimeError("Scheduler must be reset before accessing stats")
         return self._stats
 
+    @property
+    def learning_metric(self) -> str:
+        return "empirical_detection_rate"
+
+    @property
+    def learning_values(self) -> NDArray[np.float64]:
+        """Return the current per-band estimate used to explain learning."""
+        return self.stats.mean_detections
+
     def reset(self, config: SchedulerConfig | EpisodeConfig) -> None:
         """Reset scheduler state for a new episode.
 

@@ -3,6 +3,7 @@ import {
   bandSummaries,
   comparisonRows,
   formatMetric,
+  learningBandRows,
   outcomeCounts,
   type SimulationResult,
 } from './dashboardUtils'
@@ -98,5 +99,24 @@ describe('dashboardUtils', () => {
     const baseline = result({ scheduler_name: 'round_robin', metrics: { ...active.metrics, pd: 0.5 } })
     const rows = comparisonRows(active, baseline, result({ scheduler_name: 'oracle' }))
     expect(rows.find(row => row.key === 'pd')?.delta).toBe(0.25)
+  })
+
+  it('ranks learned band values at the selected slot', () => {
+    const learned = result({
+      learning: {
+        metric: 'posterior_mean',
+        values: [[0.2, 0.5, 0.1], [0.7, 0.4, 0.2]],
+      },
+    })
+
+    expect(learningBandRows(learned, 1)).toEqual([
+      { band: 0, value: 0.7, scans: 1, detections: 1 },
+      { band: 1, value: 0.4, scans: 1, detections: 0 },
+      { band: 2, value: 0.2, scans: 0, detections: 0 },
+    ])
+  })
+
+  it('returns no learning rows for fixed schedulers', () => {
+    expect(learningBandRows(result(), 1)).toEqual([])
   })
 })
