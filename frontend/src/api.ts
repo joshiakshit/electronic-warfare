@@ -1,33 +1,9 @@
-export interface SimulationLog {
-  n_slots: number;
-  n_bands: number;
-  truth: boolean[][];
-  actions: number[][];
-  detections: boolean[][];
-  retune_events: boolean[];
-  settling_slots: boolean[];
-}
-
-export interface SimulationMetrics {
-  interception_ratio: number | null;
-  average_reward: number | null;
-  retune_penalty: number | null;
-  mean_ttfi: number | null;
-  pd: number | null;
-  pfa: number | null;
-}
-
-export interface SimulationResult {
-  scheduler_name: string;
-  metrics: SimulationMetrics;
-  log: SimulationLog;
-}
-
-export interface SimulationResponse {
-  active: SimulationResult;
-  baseline: SimulationResult;
-  oracle: SimulationResult;
-}
+export type {
+  SimulationLog,
+  SimulationMetrics,
+  SimulationResult,
+  SimulationResponse,
+} from './dashboardUtils';
 
 export interface ScenarioResponse {
   scenarios: string[];

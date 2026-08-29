@@ -43,6 +43,21 @@ def test_debug_simulation_exposes_demo_truth_only_when_requested():
     assert "snr" in result["log"]["emitters"][0]
 
 
+def test_serialized_result_exposes_analysis_payload():
+    result = _serialize_result(
+        _result_from_log(_synthetic_log(1), "round_robin", 1), debug=True
+    )
+
+    assert result["config"]["n_bands"] == 4
+    assert result["config"]["n_slots"] == 20
+    assert result["metrics"]["intercept_rate"] is not None
+    assert result["metrics"]["total_reward"] is not None
+    assert result["detection_counts"]["hits"] >= 0
+    assert len(result["per_emitter"]) == 3
+    assert len(result["log"]["valid_slots"]) == 20
+    assert len(result["log"]["per_slot_rewards"]) == 20
+
+
 def test_public_scenarios_do_not_include_scheduler_ignoring_replay():
     assert "synthetic_log" not in get_scenarios()["scenarios"]
 
