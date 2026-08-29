@@ -90,15 +90,17 @@ class PhaseOccupancy:
                 hit_phase[phase] += 1.0
 
         self._since_refit[band] += 1
-        if self._since_refit[band] >= self._refit_interval:
+        # A band short of min_hits must not burn its refit slot, or the first
+        # fit lands a whole interval after the evidence for it arrived.
+        if (
+            self._since_refit[band] >= self._refit_interval
+            and int(self._hits[band]) >= self._min_hits
+        ):
             self._refit(band)
 
     def _refit(self, band: int) -> None:
         """Re-estimate the band's period and rebuild its phase histogram."""
         self._since_refit[band] = 0
-        if int(self._hits[band]) < self._min_hits:
-            return
-
         slots, detections = self._history.recent(band)
         model = estimate_period_model_candidates(
             slots,
@@ -130,7 +132,12 @@ class PhaseOccupancy:
         )
 
     def _phase_evidence(self, band: int, slot: int) -> tuple[float, float]:
-        """Return (hits, observations) pooled around this slot's phase."""
+        """Return (hits, observations) for this slot's phase.
+
+        The exact bucket is used whenever it holds any observation. Emitter
+        jitter is part of the phase distribution, so pooling neighbours would
+        blur a real signal; it is only a fallback for a phase never scanned.
+        """
         period = self._period[band]
         if period is None:
             return float(self._hits[band]), float(self._counts[band])
@@ -139,23 +146,28 @@ class PhaseOccupancy:
         hit_phase = self._hit_phase[band]
         assert obs_phase is not None and hit_phase is not None
         phase = slot % period
+        if obs_phase[phase] > 0.0:
+            return float(hit_phase[phase]), float(obs_phase[phase])
+
         width = min(self._smoothing, (period - 1) // 2)
         if width <= 0:
-            return float(hit_phase[phase]), float(obs_phase[phase])
+            return 0.0, 0.0
 
         window = (np.arange(-width, width + 1) + phase) % period
         return float(hit_phase[window].sum()), float(obs_phase[window].sum())
 
     def posterior(self, band: int, slot: int) -> tuple[float, float]:
-        """Return (mean, standard deviation) of P(ON) for this band and slot."""
+        """Return (mean, standard deviation) of P(ON) for this band and slot.
+
+        The prior pseudo-counts stabilise the mean but deliberately do not
+        count toward the spread. A (band, phase) cell nobody has observed must
+        stay maximally uncertain, or the scheduler stops exploring it.
+        """
         marginal = self._marginal(band)
         hits, observations = self._phase_evidence(band, slot)
         kappa = self._prior_strength
-        alpha = hits + kappa * marginal
-        beta = (observations - hits) + kappa * (1.0 - marginal)
-        total = alpha + beta
-        mean = alpha / total
-        return mean, float(np.sqrt(mean * (1.0 - mean) / (total + 1.0)))
+        mean = (hits + kappa * marginal) / (observations + kappa)
+        return mean, float(np.sqrt(mean * (1.0 - mean) / (observations + 1.0)))
 
     def occupancy(self, slot: int) -> NDArray[np.float64]:
         """Posterior mean P(ON at ``slot``) for every band."""
