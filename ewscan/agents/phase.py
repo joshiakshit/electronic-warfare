@@ -56,7 +56,7 @@ class PhaseOccupancy:
     prior_strength : float, default 4.0
         Pseudo-count shrinking each phase bucket toward the band's marginal
         rate. This is what makes a wrong period harmless.
-    max_period : int, default 280
+    max_period : int, default 200
         Longest period the fitter will consider.
     pd : float, default 0.9
         Nominal detection probability, used to weigh the last observation in
@@ -80,7 +80,7 @@ class PhaseOccupancy:
         min_hits: int = 6,
         smoothing: int = 1,
         prior_strength: float = 4.0,
-        max_period: int = 280,
+        max_period: int = 200,
         pd: float = 0.9,
         pfa: float = 0.01,
         survey_weight: float = 0.3,
@@ -93,6 +93,7 @@ class PhaseOccupancy:
         self._smoothing = int(smoothing)
         self._prior_strength = float(prior_strength)
         self._max_period = int(max_period)
+        self._coupled_max_period = max(280, self._max_period)
         self._pd = float(pd)
         self._pfa = float(pfa)
         self._survey_weight = float(survey_weight)
@@ -358,7 +359,7 @@ class PhaseOccupancy:
         """
         first = int(slots[0])
         span = int(slots[-1]) - first + 1
-        highest = min(self._max_period, span // 3)
+        highest = min(self._coupled_max_period, span // 3)
         if span < 12 or highest < 2:
             return ()
 
@@ -393,11 +394,16 @@ class PhaseOccupancy:
         # Offered even when the gap generator did return a period: on a long
         # cycle it reliably returns a short divisor of the true one, which is
         # worse than returning nothing. The likelihood arbitrates.
-        candidates = self._autocorr_candidates(slots, detections)
+        all_candidates = self._autocorr_candidates(slots, detections)
         self._long_candidates[band] = tuple(
             candidate
-            for candidate in candidates
+            for candidate in all_candidates
             if candidate >= _COUPLED_PERIOD_FLOOR
+        )
+        candidates = tuple(
+            candidate
+            for candidate in all_candidates
+            if candidate <= self._max_period
         )
         if candidates:
             null = _aperiodic_likelihood(slots, detections)
