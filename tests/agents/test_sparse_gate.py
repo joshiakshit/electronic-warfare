@@ -24,6 +24,42 @@ from ewscan.metrics.aggregation import student_t_critical
 
 N_SEEDS = 30
 SEEDS = range(N_SEEDS)
+CONTESTED_BELIEF_BASELINE = np.asarray(
+    [
+        0.17240168539325842,
+        0.1868439468159552,
+        0.1660135375846099,
+        0.19701810436634717,
+        0.13691322901849218,
+        0.16256499133448873,
+        0.24694802929891874,
+        0.17080854042702134,
+        0.19387387387387386,
+        0.2454054054054054,
+        0.1862020415346709,
+        0.2417621776504298,
+        0.2570650323459312,
+        0.22170319798778296,
+        0.16198934280639432,
+        0.2518248175182482,
+        0.24357192494788046,
+        0.255461592670895,
+        0.24991187874515333,
+        0.23359486447931527,
+        0.2564102564102564,
+        0.21952054794520548,
+        0.2136477313326188,
+        0.16964924838940587,
+        0.2492721979621543,
+        0.2373876986869385,
+        0.16983842010771993,
+        0.23423740753786546,
+        0.24122191011235955,
+        0.2238966630785791,
+    ],
+    dtype=np.float64,
+)
+CONTESTED_GAIN_TARGET = 0.10
 
 
 def _interception_by_seed(scenario_name, factory):
@@ -79,6 +115,18 @@ class TestSparseInterceptionGates:
 
     def test_sniper_beats_baselines_on_periodic_radar(self):
         _assert_beats_baselines("periodic_radar", SniperScheduler, "sniper")
+
+    def test_belief_closes_contested_hopper_gap(self):
+        belief = _interception_by_seed("contested_spectrum", BeliefScheduler)
+        mean, low, high = _paired_ci(belief, CONTESTED_BELIEF_BASELINE)
+        print(
+            f"\n[gate] contested_spectrum / coupled belief, {N_SEEDS} paired seeds"
+            f"\n  baseline mean={CONTESTED_BELIEF_BASELINE.mean():.4f}"
+            f"\n  candidate mean={belief.mean():.4f}"
+            f"\n  paired gain={mean:+.4f} 95% CI [{low:+.4f}, {high:+.4f}]"
+        )
+        assert low > 0.0
+        assert mean >= CONTESTED_GAIN_TARGET
 
 
 @pytest.mark.slow
