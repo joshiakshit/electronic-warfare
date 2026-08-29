@@ -32,6 +32,8 @@ from ewscan.agents.period import (
 # Evidence a long-period candidate must show over the aperiodic model before
 # it displaces the gap-divisor fit. Matches the short-period fitter's bar.
 _MIN_LONG_PERIOD_MARGIN = 3.5
+_COUPLED_PERIOD_FLOOR = 201
+_MIN_COUPLED_MARGIN = 10.0
 
 
 class PhaseOccupancy:
@@ -54,7 +56,7 @@ class PhaseOccupancy:
     prior_strength : float, default 4.0
         Pseudo-count shrinking each phase bucket toward the band's marginal
         rate. This is what makes a wrong period harmless.
-    max_period : int, default 200
+    max_period : int, default 280
         Longest period the fitter will consider.
     pd : float, default 0.9
         Nominal detection probability, used to weigh the last observation in
@@ -78,7 +80,7 @@ class PhaseOccupancy:
         min_hits: int = 6,
         smoothing: int = 1,
         prior_strength: float = 4.0,
-        max_period: int = 200,
+        max_period: int = 280,
         pd: float = 0.9,
         pfa: float = 0.01,
         survey_weight: float = 0.3,
@@ -102,6 +104,12 @@ class PhaseOccupancy:
         self._period: list[int | None] = [None] * n_bands
         self._obs_phase: list[NDArray[np.float64] | None] = [None] * n_bands
         self._hit_phase: list[NDArray[np.float64] | None] = [None] * n_bands
+        self._long_candidates: list[tuple[int, ...]] = [()] * n_bands
+        self._coupled_period: int | None = None
+        self._coupled_members: tuple[int, ...] = ()
+        self._coupled_member_index: dict[int, int] = {}
+        self._coupled_log_likelihood: NDArray[np.float64] | None = None
+        self._coupled_evidence: NDArray[np.int64] | None = None
 
         # Adjacent-slot transition counts, for the recency term. The prior is
         # deliberately sticky (p01 = p10 = 0.1): a band assumed to hold its
@@ -147,8 +155,187 @@ class PhaseOccupancy:
         # interval then grows with the evidence already in hand: refitting is
         # the dominant episode cost and a settled estimate rarely moves.
         due = max(self._refit_interval, int(self._counts[band]) // 4)
+        rebuilt_coupled = False
         if self._since_refit[band] >= due and int(self._hits[band]) >= self._min_hits:
             self._refit(band)
+            rebuilt_coupled = self._refresh_coupled_group()
+        if not rebuilt_coupled:
+            self._update_coupled(band, slot, detection)
+
+    def _phase_hit_support(self, band: int, period: int) -> set[int]:
+        slots, detections = self._history.recent(band)
+        return set((slots[detections] % period).tolist())
+
+    def _compatible_group_members(self, seed: int, period: int) -> tuple[int, ...]:
+        supports = [self._phase_hit_support(band, period) for band in range(self._n_bands)]
+        members = [seed]
+        candidates = sorted(
+            (band for band in range(self._n_bands) if band != seed),
+            key=lambda band: int(self._hits[band]),
+            reverse=True,
+        )
+        for band in candidates:
+            count = int(self._counts[band])
+            hits = int(self._hits[band])
+            if count < 8 or hits == 0:
+                continue
+            rate = hits / count
+            if not 0.05 <= rate <= 0.6:
+                continue
+            fitted = self._period[band]
+            if fitted is not None and period % fitted != 0 and fitted % period != 0:
+                continue
+            if any(supports[band] & supports[member] for member in members):
+                continue
+            members.append(band)
+
+        total_rate = sum(
+            int(self._hits[band]) / int(self._counts[band]) for band in members
+        )
+        if len(members) < 3 or total_rate < 0.45 or total_rate > 1.35:
+            return ()
+        return tuple(sorted(members))
+
+    def _refresh_coupled_group(self) -> bool:
+        proposals = {
+            (band, period)
+            for band, periods in enumerate(self._long_candidates)
+            for period in periods
+        }
+        proposals.update(
+            (band, period)
+            for band, period in enumerate(self._period)
+            if period is not None and period >= _COUPLED_PERIOD_FLOOR
+        )
+        if not proposals:
+            return False
+
+        choices = []
+        for seed, period in proposals:
+            members = self._compatible_group_members(seed, period)
+            if members:
+                choices.append((self._coupled_margin(members, period), period, members))
+        if not choices:
+            return False
+        margin, period, members = max(choices)
+        if margin < _MIN_COUPLED_MARGIN:
+            return False
+        if period == self._coupled_period and members == self._coupled_members:
+            return False
+
+        self._coupled_period = period
+        self._coupled_members = members
+        self._coupled_member_index = {
+            member: index for index, member in enumerate(members)
+        }
+        self._coupled_log_likelihood = np.zeros(
+            (period, len(members)), dtype=np.float64
+        )
+        self._coupled_evidence = np.zeros(period, dtype=np.int64)
+        observations: list[tuple[int, int, bool]] = []
+        for member in members:
+            slots, detections = self._history.recent(member)
+            observations.extend(
+                (int(slot), member, bool(detection))
+                for slot, detection in zip(slots, detections)
+            )
+        for slot, member, detection in observations:
+            self._update_coupled(member, slot, detection)
+        return True
+
+    def _coupled_margin(self, members: tuple[int, ...], period: int) -> float:
+        member_count = len(members)
+        observations = np.zeros(period, dtype=np.float64)
+        hits = np.zeros(period, dtype=np.float64)
+        selected_observations = []
+        selected_hits = []
+        null_score = 0.0
+        for member in members:
+            slots, detections = self._history.recent(member)
+            phases = slots % period
+            member_observations = np.bincount(phases, minlength=period).astype(
+                np.float64
+            )
+            member_hits = np.bincount(
+                phases[detections], minlength=period
+            ).astype(np.float64)
+            selected_observations.append(member_observations)
+            selected_hits.append(member_hits)
+            observations += member_observations
+            hits += member_hits
+
+            rate = (float(detections.sum()) + 0.5) / (len(detections) + 1.0)
+            null_score += float(detections.sum()) * math.log(rate)
+            null_score += (len(detections) - float(detections.sum())) * math.log(
+                1.0 - rate
+            )
+
+        base = hits * math.log(max(self._pfa, 1e-12))
+        base += (observations - hits) * math.log(max(1.0 - self._pfa, 1e-12))
+        log_likelihood = np.repeat(base[:, None], member_count, axis=1)
+        hit_delta = math.log(max(self._pd, 1e-12)) - math.log(
+            max(self._pfa, 1e-12)
+        )
+        miss_delta = math.log(max(1.0 - self._pd, 1e-12)) - math.log(
+            max(1.0 - self._pfa, 1e-12)
+        )
+        for index in range(member_count):
+            member_hits = selected_hits[index]
+            member_misses = selected_observations[index] - member_hits
+            log_likelihood[:, index] += (
+                member_hits * hit_delta + member_misses * miss_delta
+            )
+
+        populated = observations > 0.0
+        rows = log_likelihood[populated]
+        maxima = rows.max(axis=1)
+        group_score = float(
+            np.sum(
+                maxima
+                + np.log(np.exp(rows - maxima[:, None]).sum(axis=1))
+                - math.log(member_count)
+            )
+        )
+        return group_score - null_score
+
+    def _update_coupled(self, band: int, slot: int, detection: bool) -> None:
+        if (
+            self._coupled_period is None
+            or band not in self._coupled_member_index
+            or self._coupled_log_likelihood is None
+            or self._coupled_evidence is None
+        ):
+            return
+        phase = slot % self._coupled_period
+        index = self._coupled_member_index[band]
+        if detection:
+            other = math.log(max(self._pfa, 1e-12))
+            selected = math.log(max(self._pd, 1e-12))
+        else:
+            other = math.log(max(1.0 - self._pfa, 1e-12))
+            selected = math.log(max(1.0 - self._pd, 1e-12))
+        self._coupled_log_likelihood[phase] += other
+        self._coupled_log_likelihood[phase, index] += selected - other
+        self._coupled_evidence[phase] += 1
+
+    def _coupled_posterior(self, band: int, slot: int) -> tuple[float, float] | None:
+        if (
+            self._coupled_period is None
+            or band not in self._coupled_member_index
+            or self._coupled_log_likelihood is None
+            or self._coupled_evidence is None
+        ):
+            return None
+        phase = slot % self._coupled_period
+        logits = self._coupled_log_likelihood[phase]
+        weights = np.exp(logits - float(logits.max()))
+        holder_probability = float(
+            weights[self._coupled_member_index[band]] / weights.sum()
+        )
+        mean = holder_probability * self._pd + (1.0 - holder_probability) * self._pfa
+        evidence = int(self._coupled_evidence[phase])
+        spread = math.sqrt(mean * (1.0 - mean) / (evidence + 1.0))
+        return mean, spread
 
     def _autocorr_candidates(
         self,
@@ -203,6 +390,11 @@ class PhaseOccupancy:
         # cycle it reliably returns a short divisor of the true one, which is
         # worse than returning nothing. The likelihood arbitrates.
         candidates = self._autocorr_candidates(slots, detections)
+        self._long_candidates[band] = tuple(
+            candidate
+            for candidate in candidates
+            if candidate >= _COUPLED_PERIOD_FLOOR
+        )
         if candidates:
             null = _aperiodic_likelihood(slots, detections)
             best = max(
@@ -287,6 +479,10 @@ class PhaseOccupancy:
         count toward the spread. A (band, phase) cell nobody has observed must
         stay maximally uncertain, or the scheduler stops exploring it.
         """
+        coupled = self._coupled_posterior(band, slot)
+        if coupled is not None:
+            return coupled
+
         marginal = self._marginal(band)
         hits, observations = self._phase_evidence(band, slot)
         kappa = self._prior_strength
@@ -361,6 +557,11 @@ class PhaseOccupancy:
         """Optimistic per-band occupancy, used to drive exploration."""
         values = np.empty(self._n_bands, dtype=np.float64)
         for band in range(self._n_bands):
+            coupled = self._coupled_posterior(band, slot)
+            if coupled is not None:
+                mean, spread = coupled
+                values[band] = mean + z * spread
+                continue
             hits, observations = self._phase_evidence(band, slot)
             if observations <= 0.0:
                 values[band] = 1.0
@@ -382,6 +583,12 @@ class PhaseOccupancy:
         """Current period estimate for a band, or None if none is fitted."""
         return self._period[band]
 
+    def coupled_period(self) -> int | None:
+        return self._coupled_period
+
+    def coupled_members(self) -> tuple[int, ...]:
+        return self._coupled_members
+
     def counts(self) -> NDArray[np.int64]:
         """Per-band scan counts."""
         return self._counts.copy()
@@ -395,6 +602,12 @@ class PhaseOccupancy:
         self._period = [None] * self._n_bands
         self._obs_phase = [None] * self._n_bands
         self._hit_phase = [None] * self._n_bands
+        self._long_candidates = [()] * self._n_bands
+        self._coupled_period = None
+        self._coupled_members = ()
+        self._coupled_member_index = {}
+        self._coupled_log_likelihood = None
+        self._coupled_evidence = None
         self._n00[:] = 9.0
         self._n01[:] = 1.0
         self._n11[:] = 9.0
