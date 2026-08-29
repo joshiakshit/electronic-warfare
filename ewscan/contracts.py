@@ -49,6 +49,8 @@ class Observation:
                 "Observation bands and detections must have the same length, "
                 f"got {len(self.bands)} and {len(self.detections)}"
             )
+        if self.settling and self.valid:
+            raise ValueError("settling observations must be invalid")
 
 
 @dataclass(frozen=True)

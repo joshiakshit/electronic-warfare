@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from ewscan.contracts import EmitterInfo, EpisodeConfig, EpisodeLog
+from ewscan.contracts import EmitterInfo, EpisodeConfig, EpisodeLog, Observation
 
 
 def _config(n_bands=2, n_slots=3, k=1, n_emitters=1) -> EpisodeConfig:
@@ -79,6 +79,17 @@ def test_settling_slot_cannot_be_marked_valid():
             detections=detections,
             settling_slots=np.array([False, True, False], dtype=bool),
             valid_slots=np.ones(cfg.n_slots, dtype=bool),
+        )
+
+
+def test_settling_observation_cannot_be_marked_valid():
+    with pytest.raises(ValueError, match="settling observations must be invalid"):
+        Observation(
+            slot=0,
+            bands=(0,),
+            detections=(False,),
+            settling=True,
+            valid=True,
         )
 
 
