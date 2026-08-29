@@ -110,6 +110,7 @@ class PhaseOccupancy:
         self._coupled_member_index: dict[int, int] = {}
         self._coupled_log_likelihood: NDArray[np.float64] | None = None
         self._coupled_evidence: NDArray[np.int64] | None = None
+        self._coupled_survey_counts: NDArray[np.int64] | None = None
 
         # Adjacent-slot transition counts, for the recency term. The prior is
         # deliberately sticky (p01 = p10 = 0.1): a band assumed to hold its
@@ -223,6 +224,7 @@ class PhaseOccupancy:
         if period == self._coupled_period and members == self._coupled_members:
             return False
 
+        first_group = self._coupled_period is None
         self._coupled_period = period
         self._coupled_members = members
         self._coupled_member_index = {
@@ -232,6 +234,8 @@ class PhaseOccupancy:
             (period, len(members)), dtype=np.float64
         )
         self._coupled_evidence = np.zeros(period, dtype=np.int64)
+        if first_group:
+            self._coupled_survey_counts = self._counts.copy()
         observations: list[tuple[int, int, bool]] = []
         for member in members:
             slots, detections = self._history.recent(member)
@@ -572,6 +576,13 @@ class PhaseOccupancy:
                 + self._wilson_half_width(hits, observations, z)
                 + self._survey_bonus(band)
             )
+            if (
+                self._coupled_survey_counts is not None
+                and band not in self._coupled_member_index
+                and self._hits[band] == 0
+                and self._counts[band] <= self._coupled_survey_counts[band]
+            ):
+                values[band] = 2.0
         return values
 
     def lower_bound(self, band: int, slot: int, z: float = 1.0) -> float:
@@ -608,6 +619,7 @@ class PhaseOccupancy:
         self._coupled_member_index = {}
         self._coupled_log_likelihood = None
         self._coupled_evidence = None
+        self._coupled_survey_counts = None
         self._n00[:] = 9.0
         self._n01[:] = 1.0
         self._n11[:] = 9.0
