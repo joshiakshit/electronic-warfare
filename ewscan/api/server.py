@@ -109,30 +109,130 @@ def _result_from_log(log: EpisodeLog, scheduler_name: str, seed: int) -> Episode
     )
 
 
-def _finite_float(value: float) -> float | None:
+def _finite_float(value: float | None) -> float | None:
+    if value is None:
+        return None
     number = float(value)
     return number if np.isfinite(number) else None
 
 
 def _serialize_result(res: EpisodeResult, *, debug: bool) -> dict[str, Any]:
     log = res.log
+    detection = res.detection
+    interception = res.interception
+    first_intercept = res.first_intercept
+    reward = res.reward
+    evaluation = res.evaluation
+    prediction = res.prediction
+    time_error = res.time_error
+
+    per_emitter = []
+    for index, emitter in enumerate(log.config.emitters):
+        emitter_pd = detection.per_emitter_pd[index]
+        emitter_interception = interception.per_emitter[index]
+        emitter_first_intercept = first_intercept.per_emitter[index]
+        emitter_time_error = time_error.per_emitter[index]
+        per_emitter.append(
+            {
+                "index": index,
+                "band": emitter.band,
+                "type": emitter.emitter_type,
+                "threat": _finite_float(emitter.threat_level),
+                "snr": _finite_float(emitter.snr),
+                "pd": _finite_float(emitter_pd.pd),
+                "pd_hits": emitter_pd.n_hits,
+                "pd_scans_on": emitter_pd.n_scans_on,
+                "interception_ratio": _finite_float(
+                    emitter_interception.interception_ratio
+                ),
+                "interception_hits": emitter_interception.n_hits,
+                "transmissions": emitter_interception.n_transmissions,
+                "first_intercept_slot": emitter_first_intercept.first_intercept_slot,
+                "intercepted": emitter_first_intercept.intercepted,
+                "mean_time_error": _finite_float(emitter_time_error.mean_time_error),
+                "mean_time_error_penalized": _finite_float(
+                    emitter_time_error.mean_time_error_penalized
+                ),
+                "burst_interception_ratio": _finite_float(
+                    emitter_time_error.burst_interception_ratio
+                ),
+                "n_bursts": emitter_time_error.n_bursts,
+                "n_intercepted_bursts": emitter_time_error.n_intercepted_bursts,
+            }
+        )
+
     payload: dict[str, Any] = {
         "scheduler_name": res.scheduler_name,
+        "track": res.track,
+        "seed": res.seed,
+        "duration_seconds": _finite_float(res.duration_seconds),
+        "config": {
+            "n_bands": log.config.n_bands,
+            "n_slots": log.config.n_slots,
+            "k": log.config.k,
+            "pfa": _finite_float(log.config.pfa),
+            "detection_threshold": _finite_float(log.config.detection_threshold),
+            "dwell": log.config.dwell,
+            "retune_cost_slots": log.config.retune_cost_slots,
+            "n_emitters": len(log.config.emitters),
+        },
         "detector": {
-            "requested_pfa": _finite_float(res.detection.capability.requested_pfa),
-            "effective_pfa": _finite_float(res.detection.capability.effective_pfa),
-            "threshold": _finite_float(res.detection.capability.threshold),
-            "dwell": res.detection.capability.dwell,
-            "nominal_pd": _finite_float(res.detection.capability.nominal_pd),
+            "requested_pfa": _finite_float(detection.capability.requested_pfa),
+            "effective_pfa": _finite_float(detection.capability.effective_pfa),
+            "threshold": _finite_float(detection.capability.threshold),
+            "dwell": detection.capability.dwell,
+            "nominal_pd": _finite_float(detection.capability.nominal_pd),
         },
         "metrics": {
-            "interception_ratio": _finite_float(res.interception.interception_ratio.ratio),
-            "average_reward": _finite_float(res.reward.average_reward),
-            "retune_penalty": _finite_float(res.reward.total_retune_penalty),
-            "mean_ttfi": _finite_float(res.first_intercept.mean_time_to_first_intercept),
-            "pd": _finite_float(res.detection.pd.pd),
-            "pfa": _finite_float(res.detection.pfa.pfa),
+            "interception_ratio": _finite_float(interception.interception_ratio.ratio),
+            "intercept_rate": _finite_float(interception.intercept_rate.rate),
+            "interception_hits": interception.interception_ratio.n_hits,
+            "transmissions": interception.interception_ratio.n_transmissions,
+            "average_reward": _finite_float(reward.average_reward),
+            "total_reward": _finite_float(reward.total_reward),
+            "hit_reward": _finite_float(reward.total_hit_reward),
+            "miss_cost": _finite_float(reward.total_miss_cost),
+            "novelty_bonus": _finite_float(reward.total_novelty_bonus),
+            "revisit_decay": _finite_float(reward.total_revisit_decay),
+            "retune_penalty": _finite_float(reward.total_retune_penalty),
+            "mean_ttfi": _finite_float(first_intercept.mean_time_to_first_intercept),
+            "ttfi_penalized": _finite_float(
+                first_intercept.mean_time_to_first_intercept_penalized
+            ),
+            "intercept_fraction": _finite_float(first_intercept.intercept_fraction),
+            "pd": _finite_float(detection.pd.pd),
+            "pfa": _finite_float(detection.pfa.pfa),
+            "sensitivity": _finite_float(detection.sensitivity.min_detectable_snr),
+            "evaluation_utility": _finite_float(evaluation.average_utility),
+            "total_utility": _finite_float(evaluation.total_utility),
+            "time_error": _finite_float(time_error.mean_time_error),
+            "time_error_penalized": _finite_float(time_error.mean_time_error_penalized),
+            "burst_interception_ratio": _finite_float(time_error.burst_interception_ratio),
+            "n_bursts": time_error.n_bursts,
+            "n_intercepted_bursts": time_error.n_intercepted_bursts,
         },
+        "detection_counts": {
+            "hits": detection.pd.n_hits,
+            "scans_on": detection.pd.n_scans_on,
+            "false_alarms": detection.pfa.n_false_alarms,
+            "scans_off": detection.pfa.n_scans_off,
+        },
+        "evaluation_counts": {
+            "true_positives": evaluation.n_true_positive,
+            "false_negatives": evaluation.n_false_negative,
+            "false_alarms": evaluation.n_false_alarm,
+        },
+        "prediction": {
+            "accuracy": _finite_float(prediction.accuracy),
+            "percentage_correct": _finite_float(prediction.percentage_correct),
+            "predictor_present": prediction.predictor_present,
+            "n_predictions": prediction.n_predictions,
+            "n_correct": prediction.n_correct,
+            "coverage": _finite_float(prediction.coverage),
+            "mean_confidence": _finite_float(prediction.mean_confidence),
+            "n_overrides": prediction.n_overrides,
+        },
+        "per_emitter": per_emitter,
         "log": {
             "n_slots": log.n_slots,
             "n_bands": log.n_bands,
@@ -140,6 +240,8 @@ def _serialize_result(res: EpisodeResult, *, debug: bool) -> dict[str, Any]:
             "detections": log.detections.tolist(),
             "retune_events": log.retune_events.tolist(),
             "settling_slots": log.settling_slots.tolist(),
+            "valid_slots": log.valid_slots.tolist(),
+            "per_slot_rewards": reward.per_slot_rewards.tolist(),
         },
     }
     if debug:
@@ -153,6 +255,20 @@ def _serialize_result(res: EpisodeResult, *, debug: bool) -> dict[str, Any]:
             }
             for emitter in log.config.emitters
         ]
+        payload["log"]["emitter_truth"] = (
+            log.emitter_truth.tolist() if log.emitter_truth is not None else None
+        )
+        payload["log"]["emitter_bands"] = (
+            log.emitter_bands.tolist() if log.emitter_bands is not None else None
+        )
+    if res.arbitration is not None:
+        payload["arbitration"] = {
+            "prediction_band": res.arbitration.prediction_band.tolist(),
+            "prediction_confidence": res.arbitration.prediction_confidence.tolist(),
+            "inner_action": res.arbitration.inner_action.tolist(),
+            "executed_action": res.arbitration.executed_action.tolist(),
+            "did_override": res.arbitration.did_override.tolist(),
+        }
     return payload
 
 

@@ -1,113 +1,140 @@
-import { useState } from 'react';
-import { X, Search, Monitor, Settings as SettingsIcon, Sliders, Sun, Moon } from 'lucide-react';
+import { useState } from 'react'
+import { Monitor, Moon, Radio, Sun, X } from 'lucide-react'
+
+export type SettingsTab = 'Scanner' | 'Display'
 
 interface SettingsModalProps {
-  isOpen: boolean;
-  onClose: () => void;
-  winSize: number;
-  setWinSize: (s: number) => void;
-  theme: 'dark' | 'light';
-  setTheme: (t: 'dark' | 'light') => void;
+  isOpen: boolean
+  initialTab: SettingsTab
+  onClose: () => void
+  scenarios: string[]
+  schedulers: string[]
+  scenario: string
+  setScenario: (value: string) => void
+  scheduler: string
+  setScheduler: (value: string) => void
+  seed: number
+  setSeed: (value: number) => void
+  k: number
+  setK: (value: number) => void
+  maxBands: number
+  winSize: number
+  setWinSize: (value: number) => void
+  theme: 'dark' | 'light'
+  setTheme: (value: 'dark' | 'light') => void
 }
 
-export const SettingsModal = ({ isOpen, onClose, winSize, setWinSize, theme, setTheme }: SettingsModalProps) => {
-  const [activeTab, setActiveTab] = useState('Display');
+export const SettingsModal = ({
+  isOpen,
+  initialTab,
+  onClose,
+  scenarios,
+  schedulers,
+  scenario,
+  setScenario,
+  scheduler,
+  setScheduler,
+  seed,
+  setSeed,
+  k,
+  setK,
+  maxBands,
+  winSize,
+  setWinSize,
+  theme,
+  setTheme,
+}: SettingsModalProps) => {
+  const [activeTab, setActiveTab] = useState<SettingsTab>(initialTab)
 
-  if (!isOpen) return null;
+  if (!isOpen) return null
+
+  const tabClass = (tab: SettingsTab) => `flex items-center gap-3 rounded-md border px-3 py-2 text-sm transition-colors ${activeTab === tab ? 'border-ew-border bg-ew-surface text-ew-text' : 'border-transparent text-ew-text-muted hover:bg-ew-surface/50'}`
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
-      <div className="w-full max-w-4xl h-[70vh] bg-ew-surface border border-ew-border-subtle rounded-xl shadow-2xl flex overflow-hidden flex-row">
-
-        {/* Left Sidebar */}
-        <div className="w-64 bg-ew-bg border-r border-ew-border-subtle p-4 flex flex-col shrink-0">
-          <div className="relative mb-6">
-            <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-ew-text-dim" />
-            <input type="text" placeholder="Search" className="w-full bg-ew-surface border border-ew-border-subtle rounded-md pl-9 pr-3 py-1.5 text-sm text-ew-text outline-none focus:border-ew-accent transition-colors" />
-          </div>
-
-          <div className="text-xs font-semibold text-ew-text-dim mb-2 px-3 uppercase tracking-wider">Settings</div>
-
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
+      <div className="flex h-[70vh] w-full max-w-4xl overflow-hidden rounded-xl border border-ew-border-subtle bg-ew-surface shadow-2xl">
+        <aside className="flex w-16 shrink-0 flex-col border-r border-ew-border-subtle bg-ew-bg p-2 sm:w-56 sm:p-4">
+          <div className="mb-3 hidden px-3 text-xs font-semibold uppercase tracking-wider text-ew-text-dim sm:block">Settings</div>
           <div className="flex flex-col gap-1">
-            <button onClick={() => setActiveTab('General')} className={`flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-colors ${activeTab === 'General' ? 'bg-ew-surface text-ew-text shadow-sm border border-ew-border' : 'text-ew-text-muted hover:bg-ew-surface/50 border border-transparent'}`}>
-              <Sliders size={16} /> General
+            <button onClick={() => setActiveTab('Scanner')} className={tabClass('Scanner')} title="Scanner settings">
+              <Radio size={16} className="shrink-0" />
+              <span className="hidden sm:inline">Scanner</span>
             </button>
-            <button onClick={() => setActiveTab('Display')} className={`flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-colors ${activeTab === 'Display' ? 'bg-ew-surface text-ew-text shadow-sm border border-ew-border' : 'text-ew-text-muted hover:bg-ew-surface/50 border border-transparent'}`}>
-              <Monitor size={16} /> Display
-            </button>
-            <button onClick={() => setActiveTab('Simulation')} className={`flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-colors ${activeTab === 'Simulation' ? 'bg-ew-surface text-ew-text shadow-sm border border-ew-border' : 'text-ew-text-muted hover:bg-ew-surface/50 border border-transparent'}`}>
-              <SettingsIcon size={16} /> Simulation
+            <button onClick={() => setActiveTab('Display')} className={tabClass('Display')} title="Display settings">
+              <Monitor size={16} className="shrink-0" />
+              <span className="hidden sm:inline">Display</span>
             </button>
           </div>
-        </div>
+        </aside>
 
-        {/* Main Content Area */}
-        <div className="flex-1 flex flex-col relative bg-ew-surface text-ew-text-secondary">
-          <button onClick={onClose} className="absolute top-4 right-4 text-ew-text-dim hover:text-ew-text transition-colors p-2 z-10">
+        <div className="relative flex min-w-0 flex-1 flex-col bg-ew-surface text-ew-text-secondary">
+          <button onClick={onClose} aria-label="Close settings" className="absolute right-4 top-4 z-10 p-2 text-ew-text-dim transition-colors hover:text-ew-text">
             <X size={20} />
           </button>
 
-          <div className="flex-1 overflow-y-auto p-10 relative">
-            <h2 className="text-xl font-semibold mb-8 text-ew-text">{activeTab}</h2>
+          <div className="flex-1 overflow-y-auto p-6 sm:p-10">
+            <h2 className="mb-8 text-xl font-semibold text-ew-text">{activeTab} settings</h2>
+
+            {activeTab === 'Scanner' && (
+              <div className="grid max-w-2xl gap-6 sm:grid-cols-2">
+                <label className="flex flex-col gap-2 text-sm font-semibold text-ew-text">
+                  RF scenario
+                  <select aria-label="RF scenario" value={scenario} onChange={event => setScenario(event.target.value)} className="rounded-md border border-ew-border bg-ew-bg px-3 py-2 text-sm font-normal text-ew-text outline-none focus:border-ew-accent">
+                    {scenarios.map(item => <option key={item} value={item}>{item.replace(/_/g, ' ')}</option>)}
+                  </select>
+                </label>
+
+                <label className="flex flex-col gap-2 text-sm font-semibold text-ew-text">
+                  Scheduling algorithm
+                  <select aria-label="Scheduling algorithm" value={scheduler} onChange={event => setScheduler(event.target.value)} className="rounded-md border border-ew-border bg-ew-bg px-3 py-2 text-sm font-normal text-ew-text outline-none focus:border-ew-accent">
+                    {schedulers.map(item => <option key={item} value={item}>{item.replace(/_/g, ' ')}</option>)}
+                  </select>
+                </label>
+
+                <label className="flex flex-col gap-2 text-sm font-semibold text-ew-text">
+                  Seed
+                  <input aria-label="Seed" type="number" min={0} value={seed} onChange={event => setSeed(Math.max(0, Number(event.target.value)))} className="rounded-md border border-ew-border bg-ew-bg px-3 py-2 font-mono text-sm font-normal text-ew-text outline-none focus:border-ew-accent" />
+                </label>
+
+                <label className="flex flex-col gap-2 text-sm font-semibold text-ew-text">
+                  Channel bands
+                  <select aria-label="Channel bands" value={k} onChange={event => setK(Number(event.target.value))} className="rounded-md border border-ew-border bg-ew-bg px-3 py-2 text-sm font-normal text-ew-text outline-none focus:border-ew-accent">
+                    {Array.from({ length: maxBands }, (_, index) => index + 1).map(value => <option key={value} value={value}>{value}</option>)}
+                  </select>
+                </label>
+              </div>
+            )}
 
             {activeTab === 'Display' && (
               <div className="flex flex-col gap-10">
                 <div className="flex flex-col gap-3">
                   <h3 className="text-sm font-semibold text-ew-text">Appearance</h3>
-                  <p className="text-xs text-ew-text-muted max-w-md">Choose your preferred color scheme.</p>
-                  <div className="flex gap-4 mt-2">
-                    <button
-                      onClick={() => setTheme('dark')}
-                      className={`flex items-center gap-2 px-6 py-3 rounded-lg border transition-colors ${theme === 'dark' ? 'border-ew-accent text-ew-accent bg-ew-accent/10' : 'border-ew-border text-ew-text-muted hover:border-ew-text-muted'}`}
-                    >
+                  <p className="max-w-md text-xs text-ew-text-muted">Choose your preferred color scheme.</p>
+                  <div className="mt-2 flex gap-4">
+                    <button onClick={() => setTheme('dark')} className={`flex items-center gap-2 rounded-lg border px-6 py-3 transition-colors ${theme === 'dark' ? 'border-ew-accent bg-ew-accent/10 text-ew-accent' : 'border-ew-border text-ew-text-muted hover:border-ew-text-muted'}`}>
                       <Moon size={16} /> Dark
                     </button>
-                    <button
-                      onClick={() => setTheme('light')}
-                      className={`flex items-center gap-2 px-6 py-3 rounded-lg border transition-colors ${theme === 'light' ? 'border-ew-accent text-ew-accent bg-ew-accent/10' : 'border-ew-border text-ew-text-muted hover:border-ew-text-muted'}`}
-                    >
+                    <button onClick={() => setTheme('light')} className={`flex items-center gap-2 rounded-lg border px-6 py-3 transition-colors ${theme === 'light' ? 'border-ew-accent bg-ew-accent/10 text-ew-accent' : 'border-ew-border text-ew-text-muted hover:border-ew-text-muted'}`}>
                       <Sun size={16} /> Light
                     </button>
                   </div>
                 </div>
-                <div className="h-px bg-ew-border-subtle w-full"></div>
+
+                <div className="h-px w-full bg-ew-border-subtle" />
+
                 <div className="flex flex-col gap-3">
-                  <h3 className="text-sm font-semibold text-ew-text">Chart Viewport Size</h3>
-                  <p className="text-xs text-ew-text-muted max-w-md">Number of time slots to show simultaneously in the waterfall chart. A higher number provides more history but squishes the cells.</p>
-                  <div className="flex items-center gap-4 mt-2">
-                    <input type="range" min="20" max="100" value={winSize} onChange={(e) => setWinSize(Number(e.target.value))} className="w-64 accent-ew-accent" />
-                    <span className="text-sm font-mono bg-ew-bg border border-ew-border px-3 py-1 rounded text-ew-text">{winSize} Slots</span>
+                  <h3 className="text-sm font-semibold text-ew-text">Chart viewport size</h3>
+                  <p className="max-w-md text-xs text-ew-text-muted">Number of time slots shown in the spectrum timeline.</p>
+                  <div className="mt-2 flex flex-wrap items-center gap-4">
+                    <input aria-label="Chart viewport size" type="range" min="20" max="100" value={winSize} onChange={event => setWinSize(Number(event.target.value))} className="w-64 max-w-full accent-ew-accent" />
+                    <span className="rounded border border-ew-border bg-ew-bg px-3 py-1 font-mono text-sm text-ew-text">{winSize} slots</span>
                   </div>
-                </div>
-              </div>
-            )}
-
-            {activeTab === 'Simulation' && (
-              <div className="flex flex-col gap-8">
-                <div className="flex flex-col gap-2 max-w-md">
-                  <h3 className="text-sm font-semibold text-ew-text">Backend URL</h3>
-                  <input type="text" defaultValue="http://localhost:8000" className="w-full bg-ew-bg border border-ew-border rounded-md px-3 py-2 text-sm text-ew-text outline-none focus:border-ew-accent" />
-                </div>
-                <div className="flex flex-col gap-2 max-w-[150px]">
-                  <h3 className="text-sm font-semibold text-ew-text">ML Exploration Rate</h3>
-                  <input type="text" defaultValue="0.1" className="w-full bg-ew-bg border border-ew-border rounded-md px-3 py-2 text-sm text-ew-text outline-none focus:border-ew-accent" />
-                </div>
-              </div>
-            )}
-
-            {activeTab === 'General' && (
-              <div className="flex flex-col gap-8">
-                <p className="text-sm text-ew-text-muted">General settings for the E-WAVE Dashboard.</p>
-                <div className="flex flex-col gap-2 max-w-md">
-                  <h3 className="text-sm font-semibold text-ew-text">User Profile</h3>
-                  <input type="text" defaultValue="Admin User" className="w-full bg-ew-bg border border-ew-border rounded-md px-3 py-2 text-sm text-ew-text outline-none focus:border-ew-accent" />
                 </div>
               </div>
             )}
           </div>
         </div>
-
       </div>
     </div>
-  );
-};
+  )
+}
