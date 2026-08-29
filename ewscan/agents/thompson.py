@@ -110,6 +110,14 @@ class ThompsonSamplingScheduler(BaseLearningScheduler):
             raise RuntimeError("Scheduler must be reset before accessing posterior_means")
         return self._alpha / (self._alpha + self._beta)
 
+    @property
+    def learning_metric(self) -> str:
+        return "posterior_mean"
+
+    @property
+    def learning_values(self) -> NDArray[np.float64]:
+        return self.posterior_means
+
     def reset(self, config: EpisodeConfig) -> None:
         """Reset scheduler state for a new episode."""
         super().reset(config)

@@ -41,6 +41,16 @@ class DUCB1Scheduler(BaseLearningScheduler):
     def name(self) -> str:
         return "ducb1"
 
+    @property
+    def learning_metric(self) -> str:
+        return "discounted_detection_rate"
+
+    @property
+    def learning_values(self) -> np.ndarray:
+        if self._d_counts is None or self._d_vals is None:
+            raise RuntimeError("Scheduler must be reset before accessing learning values")
+        return self._d_vals / np.maximum(self._d_counts, 1e-12)
+
     def reset(self, config: EpisodeConfig) -> None:
         super().reset(config)
         self._d_counts = np.zeros(config.n_bands, dtype=np.float64)
@@ -115,6 +125,16 @@ class SWUCB1Scheduler(BaseLearningScheduler):
     @property
     def name(self) -> str:
         return "swucb1"
+
+    @property
+    def learning_metric(self) -> str:
+        return "window_detection_rate"
+
+    @property
+    def learning_values(self) -> np.ndarray:
+        if self._w_counts is None or self._w_vals is None:
+            raise RuntimeError("Scheduler must be reset before accessing learning values")
+        return self._w_vals / np.maximum(self._w_counts, 1)
 
     def reset(self, config: EpisodeConfig) -> None:
         super().reset(config)

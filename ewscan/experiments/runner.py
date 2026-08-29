@@ -58,6 +58,14 @@ class ArbitrationTelemetry:
 
 
 @dataclass(frozen=True)
+class LearningTelemetry:
+    """Per-slot online estimates exposed by a learning scheduler."""
+
+    metric: str
+    values: np.ndarray
+
+
+@dataclass(frozen=True)
 class EpisodeResult:
     """Complete result of executing a single episode.
 
@@ -101,6 +109,7 @@ class EpisodeResult:
     time_error: TimeErrorMetrics
     duration_seconds: float = 0.0
     arbitration: ArbitrationTelemetry | None = None
+    learning: LearningTelemetry | None = None
 
     def to_dict(self, prefix: str = "") -> dict[str, Any]:
         """Flatten scalar metrics and metadata into a key-value dictionary.
@@ -278,10 +287,22 @@ def run_episode(
     inner_actions = np.full((ep_config.n_slots, ep_config.k), -1, dtype=np.intp)
     executed_actions = np.full((ep_config.n_slots, ep_config.k), -1, dtype=np.intp)
     overrides = np.zeros(ep_config.n_slots, dtype=np.bool_)
+    learning_values = np.full(
+        (ep_config.n_slots, ep_config.n_bands), np.nan, dtype=np.float64
+    )
+    learning_metric = getattr(scheduler, "learning_metric", None)
+    has_learning = isinstance(learning_metric, str)
     has_arbitration = False
     for t in range(ep_config.n_slots):
         check_deadline()
         action = scheduler.act(obs)
+        if has_learning:
+            snapshot = np.asarray(scheduler.learning_values, dtype=np.float64)
+            if snapshot.shape != (ep_config.n_bands,):
+                raise ValueError(
+                    "scheduler learning values must contain one value per band"
+                )
+            learning_values[t] = snapshot
         predictions[t] = int(getattr(scheduler, "predicted_band", -1))
         if all(
             hasattr(scheduler, name)
@@ -345,6 +366,11 @@ def run_episode(
                 did_override=overrides,
             )
             if has_arbitration
+            else None
+        ),
+        learning=(
+            LearningTelemetry(metric=learning_metric, values=learning_values)
+            if has_learning
             else None
         ),
     )

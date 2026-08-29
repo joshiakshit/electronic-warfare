@@ -8,6 +8,7 @@ import pytest
 from fastapi import HTTPException
 from pydantic import ValidationError
 
+from ewscan.agents.ucb import UCB1Scheduler
 from ewscan.api.server import (
     SimulationRequest,
     _finite_float,
@@ -19,6 +20,8 @@ from ewscan.api.server import (
     simulate,
 )
 from ewscan.experiments.registry import scheduler_names
+from ewscan.experiments.runner import run_episode
+from ewscan.experiments.scenarios import make_sparse_bursty_scenario
 
 
 def test_scheduler_endpoint_uses_shared_registry():
@@ -56,6 +59,20 @@ def test_serialized_result_exposes_analysis_payload():
     assert len(result["per_emitter"]) == 3
     assert len(result["log"]["valid_slots"]) == 20
     assert len(result["log"]["per_slot_rewards"]) == 20
+
+
+def test_serialized_learning_result_exposes_per_slot_estimates():
+    episode = run_episode(
+        make_sparse_bursty_scenario(n_slots=40, seed=2),
+        UCB1Scheduler(),
+        seed=2,
+    )
+
+    result = _serialize_result(episode, debug=False)
+
+    assert result["learning"]["metric"] == "empirical_detection_rate"
+    assert len(result["learning"]["values"]) == 40
+    assert len(result["learning"]["values"][0]) == episode.config.n_bands
 
 
 def test_public_scenarios_do_not_include_scheduler_ignoring_replay():

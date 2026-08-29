@@ -29,6 +29,7 @@ import {
   bandSummaries,
   comparisonRows,
   formatMetric,
+  learningBandRows,
   outcomeCounts,
   type BandSummary,
   type ComparisonRow,
@@ -264,6 +265,19 @@ function BandAllocation({ summaries }: { summaries: BandSummary[] }) {
   return <div className="space-y-2.5 p-4">{summaries.map(summary => <div key={summary.band} className="grid grid-cols-[28px_1fr_34px] items-center gap-2"><span className="font-mono text-[10px] text-ew-text-muted">B{summary.band}</span><div className="h-2 overflow-hidden rounded-full bg-ew-bg"><div className="h-full rounded-full bg-ew-accent/75" style={{ width: `${(summary.scans / maxScans) * 100}%` }} /></div><span className="text-right font-mono text-[10px] text-ew-text-muted">{summary.scans}</span></div>)}</div>;
 }
 
+function LearningState({ result, currentSlot }: { result: SimulationResult; currentSlot: number }) {
+  const rows = learningBandRows(result, currentSlot);
+  if (!result.learning || rows.length === 0) return null;
+  const metric = result.learning.metric.replace(/_/g, ' ');
+  return (
+    <Panel title="Online learning state" eyebrow={`${metric} / after hit and miss updates`} icon={<Activity size={15} />} action={<span className="font-mono text-[9px] text-ew-text-dimmer">SLOT {String(currentSlot).padStart(4, '0')}</span>}>
+      <div className="grid gap-x-6 gap-y-2 p-4 md:grid-cols-2">
+        {rows.map(row => <div key={row.band} className="grid grid-cols-[30px_1fr_48px_70px] items-center gap-2"><span className="font-mono text-[10px] text-ew-text-muted">B{row.band}</span><div className="h-2 overflow-hidden rounded-full bg-ew-bg"><div className="h-full rounded-full bg-ew-accent/80 transition-[width] duration-200" style={{ width: `${Math.max(0, Math.min(100, row.value * 100))}%` }} /></div><span className="text-right font-mono text-[10px] text-ew-text">{formatMetric(row.value, 'percent')}</span><span className="text-right font-mono text-[9px] text-ew-text-dimmer">{row.detections}/{row.scans} hits</span></div>)}
+      </div>
+    </Panel>
+  );
+}
+
 function LiveScreen({ active, baseline, oracle, focusRun, setFocusRun, currentSlot, setCurrentSlot, isPlaying, setIsPlaying, winSize, onOpenScannerSettings }: { active: SimulationResult; baseline: SimulationResult; oracle: SimulationResult; focusRun: RunKey; setFocusRun: (run: RunKey) => void; currentSlot: number; setCurrentSlot: (slot: number) => void; isPlaying: boolean; setIsPlaying: (playing: boolean) => void; winSize: number; onOpenScannerSettings: () => void }) {
   const runs = { active, baseline, oracle };
   const focused = runs[focusRun];
@@ -274,6 +288,8 @@ function LiveScreen({ active, baseline, oracle, focusRun, setFocusRun, currentSl
         <div className="p-4 md:p-5"><Waterfall result={focused} currentSlot={currentSlot} winSize={winSize} onSelectSlot={setCurrentSlot} /></div>
         <TimelineControls result={focused} currentSlot={currentSlot} setCurrentSlot={setCurrentSlot} isPlaying={isPlaying} setIsPlaying={setIsPlaying} />
       </Panel>
+
+      <LearningState result={focused} currentSlot={currentSlot} />
 
       <div className="grid grid-cols-1 gap-6 border-b border-ew-border-subtle pb-5 lg:grid-cols-[minmax(320px,0.8fr)_minmax(0,1.2fr)]">
         <section>
@@ -352,8 +368,8 @@ function ThreatsScreen({ scenario, active, baseline, oracle, focusRun, setFocusR
 }
 
 export const TerminalDashboard = ({ scenarios, schedulers, winSize, setWinSize, theme, setTheme }: TerminalDashboardProps) => {
-  const [scenario, setScenario] = useState('periodic_radar');
-  const [scheduler, setScheduler] = useState('ucb1');
+  const [scenario, setScenario] = useState('contested_spectrum');
+  const [scheduler, setScheduler] = useState('sniper');
   const [seed, setSeed] = useState(42);
   const [k, setK] = useState(1);
   const [simulationData, setSimulationData] = useState<SimulationResponse | null>(null);
