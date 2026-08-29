@@ -43,10 +43,8 @@ MANIFEST
 htmlcov/
 .tox/
 
-# Claude Code
+# Local agent state
 .claude/
-!.claude/CLAUDE.md
-CLAUDE.md
 HANDOFF.md
 AGENTS.md
 
@@ -62,9 +60,7 @@ logs/
 bugs.md
 user_explanation.md
 
-#Plans
-PLAN.md
-GEMINI.md
+# Plans
 agent convos/
 project memories/
 
