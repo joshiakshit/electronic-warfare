@@ -128,7 +128,12 @@ class BeliefScheduler(BaseLearningScheduler):
             nominal_pd=self._pd_nominal,
         )
         self._transition = TransitionEstimator(config.n_bands)
-        self._occupancy = PhaseOccupancy(config.n_bands, config.n_slots)
+        self._occupancy = PhaseOccupancy(
+            config.n_bands,
+            config.n_slots,
+            pd=self._detector_capability.nominal_pd,
+            pfa=self._detector_capability.effective_pfa,
+        )
         self._slot = 0
         self._belief_tracker = BeliefTracker(
             config.n_bands,
