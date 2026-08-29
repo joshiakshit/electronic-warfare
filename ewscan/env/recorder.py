@@ -64,7 +64,7 @@ class EpisodeRecorder:
         detections: "Sequence[bool]",
         retune_event: bool = False,
         settling: bool = False,
-        valid: bool = True,
+        valid: bool | None = None,
     ) -> None:
         """Record the k bands and detections at the current slot and advance.
 
@@ -96,11 +96,15 @@ class EpisodeRecorder:
                     f"Action band {band} out of valid range [0, {self._config.n_bands - 1}]"
                 )
 
+        sample_valid = not settling if valid is None else bool(valid)
+        if settling and sample_valid:
+            raise ValueError("settling observations must be invalid")
+
         self._actions[self._current_slot, :] = bands
         self._detections[self._current_slot, :] = detections
         self._retune_events[self._current_slot] = retune_event
         self._settling_slots[self._current_slot] = settling
-        self._valid_slots[self._current_slot] = valid
+        self._valid_slots[self._current_slot] = sample_valid
         self._current_slot += 1
 
     def record_observation(self, obs: Observation) -> None:

@@ -88,6 +88,48 @@ class TestPosteriorUpdate:
         assert est._belief[0] == pytest.approx(expected, abs=1e-12)
 
 
+class TestExpectedTransitionCounts:
+    def test_two_step_bridge_matches_analytic_path_weights(self):
+        est = GapAwareTransitionEstimator(
+            n_bands=1,
+            p01_init=0.2,
+            p10_init=0.3,
+            pd=1.0,
+            pfa=0.0,
+        )
+
+        posterior, counts = est._bridge_statistics(
+            band=0,
+            start_belief=0.0,
+            gap=2,
+            detection=True,
+        )
+
+        assert posterior == pytest.approx(1.0)
+        assert counts[0, 0] == pytest.approx(8.0 / 15.0)
+        assert counts[0, 1] == pytest.approx(1.0)
+        assert counts[1, 0] == pytest.approx(0.0)
+        assert counts[1, 1] == pytest.approx(7.0 / 15.0)
+        assert counts.sum() == pytest.approx(2.0)
+
+    def test_one_step_bridge_has_one_expected_transition(self):
+        est = GapAwareTransitionEstimator(
+            n_bands=1,
+            p01_init=0.2,
+            p10_init=0.3,
+            pd=0.9,
+            pfa=0.1,
+        )
+
+        _, counts = est._bridge_statistics(
+            band=0,
+            start_belief=0.4,
+            gap=1,
+            detection=False,
+        )
+
+        assert counts.sum() == pytest.approx(1.0)
+
 # --- Test 3: recovery of known Markov rates from irregular samples ---
 
 class TestRateRecovery:

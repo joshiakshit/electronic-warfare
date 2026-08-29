@@ -49,6 +49,8 @@ class Observation:
                 "Observation bands and detections must have the same length, "
                 f"got {len(self.bands)} and {len(self.detections)}"
             )
+        if self.settling and self.valid:
+            raise ValueError("settling observations must be invalid")
 
 
 @dataclass(frozen=True)
@@ -465,13 +467,15 @@ class EpisodeLog:
         else:
             self.settling_slots = self.settling_slots.astype(np.bool_, copy=False)
         if self.valid_slots is None:
-            self.valid_slots = np.ones(ns, dtype=np.bool_)
+            self.valid_slots = ~self.settling_slots
         elif self.valid_slots.shape != (ns,):
             raise ValueError(
                 f"valid_slots shape {self.valid_slots.shape} does not match (n_slots,) ({ns},)"
             )
         else:
             self.valid_slots = self.valid_slots.astype(np.bool_, copy=False)
+        if np.any(self.settling_slots & self.valid_slots):
+            raise ValueError("settling slots must be invalid")
 
         n_em = len(self.config.emitters)
         if self.emitter_truth is not None or self.emitter_bands is not None:

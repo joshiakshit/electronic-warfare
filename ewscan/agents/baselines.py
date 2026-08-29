@@ -14,7 +14,14 @@ from typing import Sequence
 import numpy as np
 from numpy.typing import NDArray
 
-from ewscan.contracts import EpisodeConfig, Observation, ScanAction, Scheduler
+from ewscan.contracts import (
+    EpisodeConfig,
+    Observation,
+    ScanAction,
+    Scheduler,
+    SchedulerConfig,
+    as_scheduler_config,
+)
 from ewscan.rng import make_generators
 
 
@@ -135,15 +142,22 @@ class PriorWeightedScheduler(Scheduler):
         self._k: int | None = None
         self._probs: NDArray[np.float64] | None = None
 
-    def reset(self, config: EpisodeConfig) -> None:
+    def reset(self, config: SchedulerConfig | EpisodeConfig) -> None:
         """Reset scheduler state, set normalized priors, and derive generator."""
+        config = as_scheduler_config(config)
         if config.n_bands <= 0:
             raise ValueError(f"n_bands must be positive, got {config.n_bands}")
         self._n_bands = config.n_bands
         self._k = config.k
 
         if self._raw_priors is None:
-            self._probs = np.ones(config.n_bands, dtype=np.float64) / config.n_bands
+            if config.threat_prior is None:
+                arr = np.ones(config.n_bands, dtype=np.float64)
+            else:
+                arr = np.asarray(config.threat_prior.weights, dtype=np.float64)
+                if float(arr.sum()) == 0.0:
+                    arr = np.ones(config.n_bands, dtype=np.float64)
+            self._probs = arr / float(arr.sum())
         else:
             if len(self._raw_priors) != config.n_bands:
                 raise ValueError(
@@ -178,12 +192,20 @@ class PriorWeightedScheduler(Scheduler):
         if self._k == 1:
             bands = (int(self._rng.choice(self._n_bands, p=self._probs)),)
         else:
-            bands = tuple(
-                int(b)
-                for b in self._rng.choice(
+            positive = np.flatnonzero(self._probs > 0.0)
+            if len(positive) >= self._k:
+                selected = self._rng.choice(
                     self._n_bands, size=self._k, replace=False, p=self._probs
                 )
-            )
+            else:
+                zero_weight = np.flatnonzero(self._probs == 0.0)
+                filler = self._rng.choice(
+                    zero_weight,
+                    size=self._k - len(positive),
+                    replace=False,
+                )
+                selected = np.concatenate((positive, filler))
+            bands = tuple(int(band) for band in selected)
         return ScanAction(bands=bands)
 
     @property
@@ -309,4 +331,3 @@ class OracleScheduler(Scheduler):
     @property
     def name(self) -> str:
         return "oracle"
-

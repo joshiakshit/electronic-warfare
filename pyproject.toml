@@ -14,7 +14,6 @@ authors = [
 dependencies = [
     "numpy>=1.21.0",
     "pyyaml>=6.0",
-    "streamlit>=1.28.0",
     "fastapi>=0.100.0",
     "uvicorn>=0.23.0",
     "pydantic>=2.0.0",

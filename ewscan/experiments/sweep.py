@@ -25,37 +25,37 @@ from typing import Any, Callable, Sequence
 
 import numpy as np
 
-from ewscan.agents.baselines import (
-    OracleScheduler,
-    PriorWeightedScheduler,
-    RoundRobinScheduler,
-    UniformRandomScheduler,
-)
+from ewscan.agents.baselines import OracleScheduler, PriorWeightedScheduler, RoundRobinScheduler, UniformRandomScheduler
 from ewscan.agents.nonstationary_ucb import DUCB1Scheduler, SWUCB1Scheduler
 from ewscan.agents.reward import RewardFunction
 from ewscan.agents.thompson import ThompsonSamplingScheduler
 from ewscan.agents.ucb import UCB1Scheduler
 from ewscan.config import load_config
 from ewscan.contracts import EpisodeConfig, Scheduler, ThreatPrior
+from ewscan.experiments.registry import build_scheduler, scheduler_names
 from ewscan.experiments.runner import EpisodeResult, run_episode
 from ewscan.metrics.aggregation import (
     AggregateMetrics,
     aggregate_metric_records,
 )
-from ewscan.testing.fixtures import StubScheduler
 
 
 # Default scheduler names included in standard sweeps
 DEFAULT_SCHEDULER_NAMES: list[str] = [
-    "oracle",
-    "thompson_sampling",
-    "discounted_thompson",
-    "ucb1",
-    "sliding_window_ucb",
-    "discounted_ucb",
-    "prior_weighted",
-    "round_robin",
-    "uniform_random",
+    name
+    for name in scheduler_names()
+    if name
+    in {
+        "oracle",
+        "thompson_sampling",
+        "discounted_thompson",
+        "ucb1",
+        "sliding_window_ucb",
+        "discounted_ucb",
+        "prior_weighted",
+        "round_robin",
+        "uniform_random",
+    }
 ]
 
 # Standard column ordering for CSV export
@@ -110,41 +110,7 @@ def _build_scheduler_by_name(name: str, config: EpisodeConfig | None = None) -> 
     Scheduler
         New instance of the requested scheduler.
     """
-    name_clean = name.strip().lower().replace("-", "_")
-
-    if name_clean == "round_robin":
-        return RoundRobinScheduler()
-    elif name_clean in ("uniform_random", "random"):
-        return UniformRandomScheduler()
-    elif name_clean in ("prior_weighted", "prior"):
-        priors = None
-        if config is not None and len(config.emitters) > 0:
-            # Derive normalized threat-weighted prior from emitters if available
-            p = np.full(config.n_bands, 0.1, dtype=np.float64)
-            for em in config.emitters:
-                if 0 <= em.band < config.n_bands:
-                    p[em.band] = max(p[em.band], float(em.threat_level))
-            priors = (p / p.sum()).tolist()
-        return PriorWeightedScheduler(priors=priors)
-    elif name_clean == "oracle":
-        return OracleScheduler()
-    elif name_clean == "ucb1":
-        return UCB1Scheduler()
-    elif name_clean in ("sliding_window_ucb", "sw_ucb", "swucb1"):
-        return SWUCB1Scheduler()
-    elif name_clean in ("discounted_ucb", "d_ucb", "ducb1"):
-        return DUCB1Scheduler()
-    elif name_clean in ("thompson", "thompson_sampling", "ts"):
-        return ThompsonSamplingScheduler()
-    elif name_clean in ("discounted_thompson", "discounted_thompson_sampling", "d_ts", "dts"):
-        from ewscan.agents.thompson import DiscountedThompsonScheduler
-        return DiscountedThompsonScheduler()
-    elif name_clean == "stub":
-        return StubScheduler()
-    else:
-        raise ValueError(
-            f"Unknown scheduler name '{name}'. Available: {', '.join(DEFAULT_SCHEDULER_NAMES)}, stub"
-        )
+    return build_scheduler(name)
 
 
 # Schedulers that consume an explicit external threat prior belong to the
@@ -223,8 +189,6 @@ def _clone_scheduler(sched: Scheduler) -> Scheduler:
                 use_threat_weighting=sched._use_threat_weighting,
                 seed=sched._seed,
             )
-        elif isinstance(sched, StubScheduler):
-            return StubScheduler(bands=sched.bands)
         else:
             return sched
 

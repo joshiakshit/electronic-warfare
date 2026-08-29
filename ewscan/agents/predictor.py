@@ -18,7 +18,7 @@ class NextTxPredictor:
     def __init__(self, n_bands: int, capacity: int, tau_conf: float = 0.6, window: int = 20) -> None:
         self._n_bands = n_bands
         self._tau_conf = tau_conf
-        self._period_estimator = PeriodEstimator(n_bands, capacity)
+        self._period_estimator = PeriodEstimator(n_bands, capacity, sparse=True)
         self._last_hit: list[int | None] = [None] * n_bands
         self._outcomes: list[deque[bool]] = [deque(maxlen=window) for _ in range(n_bands)]
 
@@ -28,14 +28,10 @@ class NextTxPredictor:
             self._last_hit[band] = slot
 
     def _due_slot(self, band: int, slot: int) -> int | None:
-        period = self._period_estimator.period(band)
-        s_last = self._last_hit[band]
-        if period is None or s_last is None:
+        model = self._period_estimator.model(band)
+        if model is None:
             return None
-        s_next = s_last + period
-        while s_next < slot:
-            s_next += period
-        return s_next
+        return slot if model.is_due(slot) else None
 
     def due_bands(self, slot: int) -> list[tuple[int, float]]:
         due = []
@@ -52,6 +48,15 @@ class NextTxPredictor:
         correct = sum(outcomes)
         total = len(outcomes)
         return (correct + 1) / (total + 2)
+
+    def lower_confidence(self, band: int) -> float:
+        outcomes = self._outcomes[band]
+        total = len(outcomes)
+        confidence = self.confidence(band)
+        return max(
+            0.0,
+            confidence - (confidence * (1.0 - confidence) / (total + 3)) ** 0.5,
+        )
 
     def record_outcome(self, band: int, slot: int, was_on: bool) -> None:
         # Only score outcomes for slots the predictor itself believed were due;

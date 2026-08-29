@@ -18,6 +18,7 @@ from typing import Any, Sequence
 
 import numpy as np
 
+from ewscan.agents.baselines import OracleScheduler
 from ewscan.agents.reward import RewardFunction
 from ewscan.config import load_config
 from ewscan.contracts import (
@@ -31,6 +32,7 @@ from ewscan.contracts import (
 )
 from ewscan.env.environment import RFEnvironment
 from ewscan.env.recorder import EpisodeRecorder, save_episode_log
+from ewscan.experiments.registry import build_scheduler
 from ewscan.metrics.detection import DetectionMetrics, estimate_detection_metrics
 from ewscan.metrics.first_intercept import FirstInterceptMetrics, estimate_first_intercept_metrics
 from ewscan.metrics.interception import InterceptionMetrics, estimate_interception_metrics
@@ -42,6 +44,17 @@ from ewscan.metrics.reward import (
     estimate_reward_metrics,
 )
 from ewscan.metrics.time_error import TimeErrorMetrics, estimate_time_error_metrics
+
+
+@dataclass(frozen=True)
+class ArbitrationTelemetry:
+    """Per-slot Sniper prediction and override decisions."""
+
+    prediction_band: np.ndarray
+    prediction_confidence: np.ndarray
+    inner_action: np.ndarray
+    executed_action: np.ndarray
+    did_override: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -87,6 +100,7 @@ class EpisodeResult:
     prediction: PredictionMetrics
     time_error: TimeErrorMetrics
     duration_seconds: float = 0.0
+    arbitration: ArbitrationTelemetry | None = None
 
     def to_dict(self, prefix: str = "") -> dict[str, Any]:
         """Flatten scalar metrics and metadata into a key-value dictionary.
@@ -179,6 +193,7 @@ def run_episode(
     pd_threshold: float = 0.5,
     env: RFEnvironment | None = None,
     threat_prior: ThreatPrior | None = None,
+    deadline: float | None = None,
 ) -> EpisodeResult:
     """Execute a single episode with a scheduler and compute all 7 figures of merit.
 
@@ -206,6 +221,12 @@ def run_episode(
     """
     effective_seed = int(seed) if seed is not None else int(config.seed)
 
+    def check_deadline() -> None:
+        if deadline is not None and time.perf_counter() >= deadline:
+            raise TimeoutError("episode deadline exceeded")
+
+    check_deadline()
+
     if effective_seed != config.seed:
         ep_config = EpisodeConfig(
             n_bands=config.n_bands,
@@ -228,13 +249,14 @@ def run_episode(
     else:
         environment = env
         environment.reset(seed=effective_seed)
+    check_deadline()
 
     truth = environment.truth
 
     # Only the Oracle receives the generated truth matrix and the full config.
     # Every other scheduler gets the blind scheduler-visible view, optionally
     # carrying an explicit ThreatPrior for a prior-aided run.
-    if hasattr(scheduler, "set_truth"):
+    if isinstance(scheduler, OracleScheduler):
         scheduler.set_truth(truth)
         scheduler.reset(ep_config)
         track = "oracle"
@@ -252,9 +274,30 @@ def run_episode(
     start_time = time.perf_counter()
     obs: Observation | None = None
     predictions = np.full(ep_config.n_slots, -1, dtype=np.intp)
+    prediction_confidences = np.full(ep_config.n_slots, np.nan, dtype=np.float64)
+    inner_actions = np.full((ep_config.n_slots, ep_config.k), -1, dtype=np.intp)
+    executed_actions = np.full((ep_config.n_slots, ep_config.k), -1, dtype=np.intp)
+    overrides = np.zeros(ep_config.n_slots, dtype=np.bool_)
+    has_arbitration = False
     for t in range(ep_config.n_slots):
+        check_deadline()
         action = scheduler.act(obs)
         predictions[t] = int(getattr(scheduler, "predicted_band", -1))
+        if all(
+            hasattr(scheduler, name)
+            for name in (
+                "prediction_band",
+                "prediction_confidence",
+                "inner_action",
+                "did_override",
+            )
+        ):
+            has_arbitration = True
+            predictions[t] = int(scheduler.prediction_band)
+            prediction_confidences[t] = float(scheduler.prediction_confidence)
+            inner_actions[t] = scheduler.inner_action
+            executed_actions[t] = action.bands
+            overrides[t] = bool(scheduler.did_override)
         obs = environment.step(action)
         recorder.record_observation(obs)
     duration = time.perf_counter() - start_time
@@ -272,7 +315,10 @@ def run_episode(
     # slots where it abstains. Coverage then separates presence from activity.
     has_predictor = hasattr(scheduler, "predicted_band")
     prediction = estimate_prediction_metrics(
-        log, predictions=predictions if has_predictor else None
+        log,
+        predictions=predictions if has_predictor else None,
+        confidences=prediction_confidences if has_predictor and has_arbitration else None,
+        overrides=overrides if has_predictor and has_arbitration else None,
     )
     time_error = estimate_time_error_metrics(log, miss_penalty=miss_penalty)
 
@@ -290,6 +336,17 @@ def run_episode(
         prediction=prediction,
         time_error=time_error,
         duration_seconds=duration,
+        arbitration=(
+            ArbitrationTelemetry(
+                prediction_band=predictions,
+                prediction_confidence=prediction_confidences,
+                inner_action=inner_actions,
+                executed_action=executed_actions,
+                did_override=overrides,
+            )
+            if has_arbitration
+            else None
+        ),
     )
 
 
@@ -323,6 +380,7 @@ class EpisodeRunner:
         seed: int | None = None,
         env: RFEnvironment | None = None,
         threat_prior: ThreatPrior | None = None,
+        deadline: float | None = None,
     ) -> EpisodeResult:
         """Execute a single episode with the configured evaluation parameters.
 
@@ -351,71 +409,13 @@ class EpisodeRunner:
             pd_threshold=self.pd_threshold,
             env=env,
             threat_prior=threat_prior,
+            deadline=deadline,
         )
 
 
 def _build_scheduler_by_name(name: str, config: EpisodeConfig | None = None) -> Scheduler:
-    """Instantiate a scheduler by name."""
-    name_clean = name.strip().lower().replace("-", "_")
-
-    if name_clean == "round_robin":
-        from ewscan.agents.baselines import RoundRobinScheduler
-
-        return RoundRobinScheduler()
-    elif name_clean in ("uniform_random", "random"):
-        from ewscan.agents.baselines import UniformRandomScheduler
-
-        return UniformRandomScheduler()
-    elif name_clean in ("prior_weighted", "prior"):
-        from ewscan.agents.baselines import PriorWeightedScheduler
-
-        return PriorWeightedScheduler()
-    elif name_clean == "oracle":
-        from ewscan.agents.baselines import OracleScheduler
-
-        return OracleScheduler()
-    elif name_clean == "ucb1":
-        from ewscan.agents.ucb import UCB1Scheduler
-
-        return UCB1Scheduler()
-    elif name_clean in ("sliding_window_ucb", "sw_ucb", "swucb1"):
-        from ewscan.agents.nonstationary_ucb import SWUCB1Scheduler
-
-        return SWUCB1Scheduler()
-    elif name_clean in ("discounted_ucb", "d_ucb", "ducb1"):
-        from ewscan.agents.nonstationary_ucb import DUCB1Scheduler
-
-        return DUCB1Scheduler()
-    elif name_clean in ("thompson", "thompson_sampling", "ts"):
-        from ewscan.agents.thompson import ThompsonSamplingScheduler
-
-        return ThompsonSamplingScheduler()
-    elif name_clean in ("discounted_thompson", "discounted_thompson_sampling", "d_ts", "dts"):
-        from ewscan.agents.thompson import DiscountedThompsonScheduler
-
-        return DiscountedThompsonScheduler()
-    elif name_clean == "belief":
-        from ewscan.agents.pomdp import BeliefScheduler
-
-        return BeliefScheduler()
-    elif name_clean == "whittle":
-        from ewscan.agents.whittle import WhittleScheduler
-
-        return WhittleScheduler()
-    elif name_clean == "sniper":
-        from ewscan.agents.sniper import SniperScheduler
-
-        return SniperScheduler()
-    elif name_clean == "stub":
-        from ewscan.testing.fixtures import StubScheduler
-
-        return StubScheduler()
-    else:
-        raise ValueError(
-            f"Unknown scheduler name '{name}'. Available: round_robin, uniform_random, "
-            f"prior_weighted, oracle, ucb1, sliding_window_ucb, discounted_ucb, "
-            f"thompson_sampling, discounted_thompson, belief, whittle, sniper, stub"
-        )
+    """Compatibility wrapper for the shared scheduler registry."""
+    return build_scheduler(name)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -435,7 +435,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "-s",
         type=str,
         default="round_robin",
-        help="Scheduler name: round_robin, uniform_random, prior_weighted, oracle, ucb1, sliding_window_ucb, discounted_ucb, thompson_sampling, belief, whittle, sniper, stub (default: round_robin).",
+        help="Scheduler name from the shared release registry (default: round_robin).",
     )
     parser.add_argument(
         "--seed",

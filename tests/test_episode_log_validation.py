@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from ewscan.contracts import EmitterInfo, EpisodeConfig, EpisodeLog
+from ewscan.contracts import EmitterInfo, EpisodeConfig, EpisodeLog, Observation
 
 
 def _config(n_bands=2, n_slots=3, k=1, n_emitters=1) -> EpisodeConfig:
@@ -48,6 +48,48 @@ def test_valid_slots_wrong_shape_rejected():
         EpisodeLog(
             config=cfg, truth=truth, actions=actions, detections=detections,
             valid_slots=np.ones(cfg.n_slots + 1, dtype=bool),
+        )
+
+
+def test_settling_slots_default_to_invalid():
+    cfg = _config()
+    truth, actions, detections = _ok_arrays(cfg)
+    settling = np.array([False, True, False], dtype=bool)
+
+    log = EpisodeLog(
+        config=cfg,
+        truth=truth,
+        actions=actions,
+        detections=detections,
+        settling_slots=settling,
+    )
+
+    np.testing.assert_array_equal(log.valid_slots, ~settling)
+
+
+def test_settling_slot_cannot_be_marked_valid():
+    cfg = _config()
+    truth, actions, detections = _ok_arrays(cfg)
+
+    with pytest.raises(ValueError, match="settling slots must be invalid"):
+        EpisodeLog(
+            config=cfg,
+            truth=truth,
+            actions=actions,
+            detections=detections,
+            settling_slots=np.array([False, True, False], dtype=bool),
+            valid_slots=np.ones(cfg.n_slots, dtype=bool),
+        )
+
+
+def test_settling_observation_cannot_be_marked_valid():
+    with pytest.raises(ValueError, match="settling observations must be invalid"):
+        Observation(
+            slot=0,
+            bands=(0,),
+            detections=(False,),
+            settling=True,
+            valid=True,
         )
 
 

@@ -184,7 +184,6 @@ class TestSweepRunner:
             "discounted_ucb",
             "thompson_sampling",
             "discounted_thompson",
-            "stub",
         ]
         seeds = [10, 20]
 
