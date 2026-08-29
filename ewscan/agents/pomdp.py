@@ -3,6 +3,11 @@
 Maintains a per-band belief b_t = P(band is ON at slot t | history) via a
 Bayesian filter over the online p01/p10 transition estimates from
 `TransitionEstimator`. Never reads emitter truth or emitter parameters.
+
+Selection runs on `PhaseOccupancy` rather than on that filter. At k=1 a band is
+revisited every 11-16 slots, over which the Markov belief decays to its prior
+and ranks every band alike; the phase-conditioned posterior does not decay at
+all. The filter is kept because `belief` is the scheduler's published estimate.
 """
 
 from __future__ import annotations
@@ -56,7 +61,11 @@ class BeliefTracker:
 
 
 class BeliefScheduler(BaseLearningScheduler):
-    """Scan scheduler that selects bands by threat-weighted ON belief.
+    """Scan scheduler that selects bands by threat-weighted occupancy.
+
+    Ranks bands by phase-conditioned P(ON) plus one posterior standard
+    deviation. Exploration ends by itself once a band is certain enough that no
+    other band's optimistic value can reach it.
 
     Parameters
     ----------
