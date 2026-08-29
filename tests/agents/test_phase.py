@@ -213,3 +213,28 @@ class TestLongPeriodRecovery:
             if rng.random() < 0.5:
                 model.observe(0, slot, slot % 255 in active)
         assert model.period(0) == 255
+
+
+class TestCoupledLongPeriodRecovery:
+    def test_pools_mutually_exclusive_bands_into_one_phase_map(self):
+        rng = np.random.default_rng(12)
+        holder_by_phase = rng.integers(0, 4, size=255)
+        model = PhaseOccupancy(n_bands=5, capacity=3000)
+        scan_probability = np.array([0.75, 0.06, 0.06, 0.06, 0.07])
+
+        for slot in range(3000):
+            band = int(rng.choice(5, p=scan_probability))
+            if band < 4:
+                detection = holder_by_phase[slot % 255] == band
+            else:
+                detection = bool(rng.random() < 0.25)
+            model.observe(band, slot, detection)
+
+        assert model.coupled_period() == 255
+        assert set(model.coupled_members()) == {0, 1, 2, 3}
+
+        predicted = [
+            int(np.argmax(model.occupancy(slot))) for slot in range(255)
+        ]
+        accuracy = np.mean(np.asarray(predicted) == holder_by_phase)
+        assert accuracy > 0.8
