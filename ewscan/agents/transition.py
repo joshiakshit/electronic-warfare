@@ -125,17 +125,19 @@ class GapAwareTransitionEstimator:
         self._n_pairs = np.zeros(n_bands, dtype=np.int64)
         self._since_update = np.zeros(n_bands, dtype=np.int64)
 
-    def _propagate_belief(self, band: int, gap: int) -> float:
-        """Propagate belief forward by gap steps using T^d closed form."""
-        b = self._belief[band]
+    def _propagate_value(self, band: int, belief: float, gap: int) -> float:
         p01 = self._p01[band]
         p10 = self._p10[band]
         s = p01 + p10
         if s < 1e-15:
-            return b
+            return belief
         pi_on = p01 / s
         lam = 1.0 - s
-        return pi_on + (b - pi_on) * lam ** gap
+        return pi_on + (belief - pi_on) * lam**gap
+
+    def _propagate_belief(self, band: int, gap: int) -> float:
+        """Propagate belief forward by gap steps using T^d closed form."""
+        return self._propagate_value(band, float(self._belief[band]), gap)
 
     def _correct(self, band: int, detection: bool) -> None:
         """Bayes update: incorporate a detection observation."""
@@ -299,6 +301,27 @@ class GapAwareTransitionEstimator:
     @property
     def belief(self) -> NDArray[np.float64]:
         return self._belief.copy()
+
+    def belief_at(self, slot: int) -> NDArray[np.float64]:
+        """Return each posterior propagated to one common slot."""
+        if slot < 0:
+            raise ValueError(f"slot must be non-negative, got {slot}")
+
+        result = np.empty(self._n_bands, dtype=np.float64)
+        for band in range(self._n_bands):
+            last_slot = int(self._last_slot[band])
+            belief_slot = last_slot if last_slot >= 0 else 0
+            gap = slot - belief_slot
+            if gap < 0:
+                raise ValueError(
+                    f"slot {slot} precedes band {band}'s last observation at {last_slot}"
+                )
+            result[band] = self._propagate_value(
+                band,
+                float(self._belief[band]),
+                gap,
+            )
+        return result
 
     def uncertainty(self, band: int) -> float:
         """Normalized uncertainty: 1.0 at zero data, decreasing with evidence."""

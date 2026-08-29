@@ -48,6 +48,24 @@ class TestTdPropagation:
         result = est._propagate_belief(0, 10000)
         assert result == pytest.approx(pi_on, abs=1e-6)
 
+    def test_belief_at_propagates_each_band_to_requested_slot(self):
+        est = GapAwareTransitionEstimator(
+            n_bands=2,
+            p01_init=0.1,
+            p10_init=0.3,
+            pd=0.9,
+            pfa=0.01,
+        )
+        est.observe(0, 0, True)
+        posterior = est.belief[0]
+
+        current = est.belief_at(3)
+
+        expected = 0.25 + (posterior - 0.25) * 0.6**3
+        assert current[0] == pytest.approx(expected)
+        assert current[1] == pytest.approx(0.25 + (0.5 - 0.25) * 0.6**3)
+        assert est.belief[0] == posterior
+
 
 # --- Test 2: posterior update against analytic examples ---
 

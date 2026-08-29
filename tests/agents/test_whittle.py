@@ -28,6 +28,67 @@ class TestWhittleSchedulerInterface:
         with pytest.raises(RuntimeError, match="must be reset"):
             scheduler.act(None)
 
+    @pytest.mark.parametrize(
+        ("kwargs", "message"),
+        [
+            ({"ngrid": 1}, "ngrid"),
+            ({"nm": 1}, "nm"),
+            ({"sweeps": 0}, "sweeps"),
+        ],
+    )
+    def test_rejects_invalid_solver_sizes(self, kwargs, message):
+        params = {
+            "p01": ANCHOR_P01,
+            "p10": ANCHOR_P10,
+            "pd": ANCHOR_PD,
+            "pfa": ANCHOR_PFA,
+            "beta": 0.95,
+            "ngrid": 11,
+            "nm": 10,
+            "sweeps": 20,
+        }
+        params.update(kwargs)
+
+        with pytest.raises(ValueError, match=message):
+            solve_whittle_grid(**params)
+
+    def test_cached_arrays_are_not_shared_with_callers(self):
+        params = {
+            "p01": 0.123456,
+            "p10": 0.345678,
+            "pd": ANCHOR_PD,
+            "pfa": ANCHOR_PFA,
+            "beta": 0.95,
+            "ngrid": 11,
+            "nm": 10,
+            "sweeps": 20,
+        }
+        b, w = solve_whittle_grid(**params)
+        expected_b = b.copy()
+        expected_w = w.copy()
+        b[:] = -1.0
+        w[:] = -1.0
+
+        cached_b, cached_w = solve_whittle_grid(**params)
+
+        np.testing.assert_array_equal(cached_b, expected_b)
+        np.testing.assert_array_equal(cached_w, expected_w)
+
+    def test_close_transition_rates_do_not_share_a_cache_entry(self):
+        params = {
+            "p10": 0.3,
+            "pd": ANCHOR_PD,
+            "pfa": ANCHOR_PFA,
+            "beta": 0.95,
+            "ngrid": 31,
+            "nm": 20,
+            "sweeps": 50,
+        }
+        _, first = solve_whittle_grid(p01=0.1001, **params)
+        _, second = solve_whittle_grid(p01=0.1004, **params)
+
+        assert not np.array_equal(first, second)
+
 
 class TestMonotonicity:
     """Test 1: for a positively-correlated chain, W(b) is non-decreasing in b."""

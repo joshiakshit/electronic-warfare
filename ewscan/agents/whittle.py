@@ -10,6 +10,7 @@ C-3), never by bisecting m per belief point.
 from __future__ import annotations
 
 from dataclasses import replace
+from numbers import Integral, Real
 
 import numpy as np
 from numpy.typing import NDArray
@@ -18,7 +19,11 @@ from ewscan.agents.base import BaseLearningScheduler
 from ewscan.agents.transition import GapAwareTransitionEstimator
 from ewscan.contracts import DetectorCapability, EpisodeConfig, Observation, ScanAction
 
-_GRID_CACHE: dict[tuple[float, float, float, float, float, int, int, int], tuple[NDArray[np.float64], NDArray[np.float64]]] = {}
+_GRID_CACHE: dict[
+    tuple[float, float, float, float, float, int, int, int],
+    tuple[NDArray[np.float64], NDArray[np.float64]],
+] = {}
+_GRID_CACHE_LIMIT = 512
 
 
 def solve_whittle_grid(
@@ -36,14 +41,47 @@ def solve_whittle_grid(
     Returns (b_grid, w_grid). Correct-then-predict order per Addendum C-2:
     b is the post-predict belief, so tau_active(b, d) = predict(correct(b, d)).
 
-    Memoized by (p01, p10) rounded to 3 decimals: online transition estimates
-    repeat often across recomputes, and selection only needs W's ranking, so
-    the rounding is well within the already-accepted grid deviation.
+    Memoized by the exact solver inputs. Returned arrays do not share cache state.
     """
-    key = (round(p01, 3), round(p10, 3), pd, pfa, beta, ngrid, nm, sweeps)
+    for name, value, minimum in (
+        ("ngrid", ngrid, 2),
+        ("nm", nm, 2),
+        ("sweeps", sweeps, 1),
+    ):
+        if (
+            not isinstance(value, Integral)
+            or isinstance(value, bool)
+            or value < minimum
+        ):
+            raise ValueError(f"{name} must be an integer >= {minimum}, got {value!r}")
+    for name, value in (("p01", p01), ("p10", p10), ("pd", pd), ("pfa", pfa)):
+        if (
+            not isinstance(value, Real)
+            or isinstance(value, bool)
+            or not np.isfinite(value)
+            or not 0.0 <= value <= 1.0
+        ):
+            raise ValueError(f"{name} must be in [0, 1], got {value!r}")
+    if (
+        not isinstance(beta, Real)
+        or isinstance(beta, bool)
+        or not 0.0 <= beta < 1.0
+    ):
+        raise ValueError(f"beta must be in [0, 1), got {beta!r}")
+
+    key = (
+        float(p01),
+        float(p10),
+        float(pd),
+        float(pfa),
+        float(beta),
+        ngrid,
+        nm,
+        sweeps,
+    )
     cached = _GRID_CACHE.get(key)
     if cached is not None:
-        return cached
+        return cached[0].copy(), cached[1].copy()
 
     b = np.linspace(0.0, 1.0, ngrid)
 
@@ -88,6 +126,13 @@ def solve_whittle_grid(
     w = np.empty(ngrid, dtype=np.float64)
     for j in range(ngrid):
         column = f[:, j]
+        nonpositive = np.flatnonzero(column <= 0.0)
+        if nonpositive.size > 0:
+            first = int(nonpositive[0])
+            if np.any(column[first + 1 :] > 1e-9):
+                raise RuntimeError(
+                    f"arm is not indexable at belief grid position {j}"
+                )
         if column[0] <= 0.0:
             w[j] = m_grid[0]
         elif column[-1] > 0.0:
@@ -97,8 +142,10 @@ def solve_whittle_grid(
             f0, f1 = column[idx - 1], column[idx]
             m0, m1 = m_grid[idx - 1], m_grid[idx]
             w[j] = m0 + (0.0 - f0) * (m1 - m0) / (f1 - f0)
+    if len(_GRID_CACHE) >= _GRID_CACHE_LIMIT:
+        del _GRID_CACHE[next(iter(_GRID_CACHE))]
     _GRID_CACHE[key] = (b, w)
-    return b, w
+    return b.copy(), w.copy()
 
 
 class WhittleScheduler(BaseLearningScheduler):
@@ -134,6 +181,7 @@ class WhittleScheduler(BaseLearningScheduler):
         self._belief_grid: NDArray[np.float64] | None = None
         self._index_grid: NDArray[np.float64] | None = None
         self._slots_since_recompute: int = 0
+        self._next_slot: int = 0
 
     @property
     def name(self) -> str:
@@ -158,26 +206,27 @@ class WhittleScheduler(BaseLearningScheduler):
             pfa=self._detector_capability.effective_pfa,
         )
         self._slots_since_recompute = 0
+        self._next_slot = 0
         self._recompute_index()
 
     def _recompute_index(self) -> None:
         assert self._transition is not None and self._n_bands is not None
-        assert self._pfa is not None
+        assert self._pfa is not None and self._detector_capability is not None
         p01 = self._transition.p01()
         p10 = self._transition.p10()
+        self._belief_grid = np.linspace(0.0, 1.0, self._ngrid)
         index_grid = np.empty((self._n_bands, self._ngrid), dtype=np.float64)
         for band in range(self._n_bands):
-            grid, w = solve_whittle_grid(
+            _, w = solve_whittle_grid(
                 p01=float(p01[band]),
                 p10=float(p10[band]),
-                pd=self._pd_nominal,
+                pd=self._detector_capability.nominal_pd,
                 pfa=self._pfa,
                 beta=self._beta,
                 ngrid=self._ngrid,
                 nm=self._nm,
                 sweeps=self._sweeps,
             )
-            self._belief_grid = grid
             index_grid[band] = w
         self._index_grid = index_grid
         self._slots_since_recompute = 0
@@ -197,11 +246,14 @@ class WhittleScheduler(BaseLearningScheduler):
             for band, det in zip(obs.bands, obs.detections):
                 self._transition.observe(band, obs.slot, det)
 
+        selection_slot = obs.slot + 1 if obs is not None else self._next_slot
+        self._next_slot = selection_slot + 1
+
         self._slots_since_recompute += 1
         if self._slots_since_recompute >= self._recompute_interval:
             self._recompute_index()
 
-        belief = np.clip(self._transition.belief, 0.0, 1.0)
+        belief = np.clip(self._transition.belief_at(selection_slot), 0.0, 1.0)
         whittle_index = np.array(
             [
                 np.interp(belief[band], self._belief_grid, self._index_grid[band])
