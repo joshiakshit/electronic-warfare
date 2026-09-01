@@ -21,10 +21,9 @@ import numpy as np
 import pytest
 
 from ewscan.contracts import EmitterInfo, EpisodeConfig, EpisodeLog
-from ewscan.env.detection import pd_from_snr, pfa_from_threshold, threshold_from_pfa
+from ewscan.env.detection import pd_from_snr, threshold_from_pfa
 from ewscan.metrics.detection import (
     DetectionMetrics,
-    EmitterPdEstimate,
     PdEstimate,
     PfaEstimate,
     SensitivityEstimate,
@@ -34,7 +33,7 @@ from ewscan.metrics.detection import (
     estimate_pfa,
     estimate_sensitivity,
 )
-from ewscan.testing.fixtures import make_test_config, synthetic_log
+from ewscan.testing.fixtures import synthetic_log
 
 
 # =========================================================================

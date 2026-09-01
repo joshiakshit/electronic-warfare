@@ -14,7 +14,6 @@ import numpy as np
 import pytest
 
 from ewscan.contracts import (
-    EpisodeConfig,
     EpisodeLog,
     Observation,
     ScanAction,

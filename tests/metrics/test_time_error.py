@@ -14,11 +14,8 @@ import pytest
 from ewscan.agents.baselines import OracleScheduler, RoundRobinScheduler, UniformRandomScheduler
 from ewscan.contracts import EmitterInfo, EpisodeConfig, EpisodeLog
 from ewscan.metrics.time_error import (
-    BurstTimeError,
-    EmitterTimeError,
     TimeErrorMetrics,
     estimate_average_time_error,
-    estimate_per_emitter_time_error,
     estimate_time_error_metrics,
     extract_bursts,
 )

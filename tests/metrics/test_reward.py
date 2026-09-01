@@ -7,15 +7,12 @@ Verify criteria (PLAN.md 1E.4):
 
 from __future__ import annotations
 
-import math
-
 import numpy as np
 import pytest
 
 from ewscan.agents.reward import RewardFunction
 from ewscan.contracts import EmitterInfo, EpisodeConfig, EpisodeLog
 from ewscan.metrics.reward import (
-    RewardMetrics,
     estimate_average_reward,
     estimate_reward_metrics,
 )

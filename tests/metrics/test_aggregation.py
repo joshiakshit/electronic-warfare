@@ -11,17 +11,15 @@ import math
 import numpy as np
 import pytest
 
-from ewscan.agents.baselines import RoundRobinScheduler, UniformRandomScheduler
-from ewscan.contracts import EmitterInfo, EpisodeConfig, EpisodeLog
+from ewscan.agents.baselines import UniformRandomScheduler
+from ewscan.contracts import EmitterInfo, EpisodeLog
 from ewscan.metrics.aggregation import (
     AggregateMetrics,
-    MetricStats,
     aggregate_episodes,
-    aggregate_metric_records,
     compute_metric_stats,
     student_t_critical,
 )
-from ewscan.testing.fixtures import ScriptedEnv, make_test_config, synthetic_log
+from ewscan.testing.fixtures import ScriptedEnv, make_test_config
 
 
 # =========================================================================

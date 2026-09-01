@@ -10,7 +10,6 @@ Verifications:
 
 from __future__ import annotations
 
-import math
 from pathlib import Path
 
 import numpy as np
@@ -36,7 +35,6 @@ from ewscan.contracts import EmitterInfo, EpisodeConfig
 from ewscan.env.environment import RFEnvironment
 from ewscan.env.recorder import load_episode_log
 from ewscan.experiments.runner import (
-    EpisodeResult,
     EpisodeRunner,
     _build_scheduler_by_name,
     main,

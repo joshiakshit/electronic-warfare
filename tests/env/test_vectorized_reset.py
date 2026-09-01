@@ -8,7 +8,6 @@ emitters (Markov, jittered periodic, hopper) are untouched.
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
 from ewscan.contracts import EmitterInfo
 from ewscan.env import (

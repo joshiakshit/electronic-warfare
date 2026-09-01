@@ -1,345 +1,182 @@
-# E-WAVE: Adaptive Electronic Support Scan Scheduling
+# E-WAVE
 
-E-WAVE is a simulation and decision-support project for adaptive spectrum
-scanning. It models an Electronic Support receiver that can observe only a
-small part of a wide frequency range at each time step.
+**Adaptive Electronic Support scan scheduling using online machine learning.**
 
-The system learns where useful activity is likely to appear. It then chooses
-which frequency bands to scan next. It compares fixed scan patterns, online
-machine-learning methods, Bayesian state models, and periodic-signal
-prediction under the same hidden environment.
+A wideband receiver must monitor N frequency bands but can only scan K at a
+time. E-WAVE learns where and when to look using multi-armed bandits, Bayesian
+state tracking, and periodic-signal prediction. No offline training data or
+neural networks required — all learning happens online during each episode.
 
-E-WAVE is simulation-only. It does not transmit, interfere with signals,
-decode private communications, or control radio hardware.
-
-## The problem
-
-A wideband receiver may need to monitor many frequency bands while having only
-limited instantaneous bandwidth, processing capacity, or parallel channels.
-It cannot inspect every band continuously.
-
-A fixed sweep is simple, but it spends equal time on quiet and active bands.
-It can miss short bursts, revisit predictable signals at the wrong time, and
-adapt slowly when activity changes.
-
-E-WAVE represents this constraint with:
-
-- `N` frequency bands;
-- `K` bands that can be scanned in one time slot;
-- hidden emitter activity;
-- noisy detections and false alarms;
-- retuning and settling costs;
-- a scheduler that receives only past observations.
-
-The objective is not only to detect a signal after selecting its band. The
-receiver must first choose the right band at the right time.
-
-## What E-WAVE does
-
-For each episode, E-WAVE:
-
-1. Generates hidden emitter activity across bands and time.
-2. Asks a scheduler to choose exactly `K` bands.
-3. Applies the detector model to those bands.
-4. Returns noisy detection results to the scheduler.
-5. Lets the scheduler update its online model.
-6. Repeats the process for the configured number of slots.
-7. Scores the complete log against hidden simulation truth.
-
-The environment supports:
-
-- Gilbert-Elliott ON/OFF emitters;
-- periodic radar emitters with dwell, phase, and jitter;
-- continuous-wave emitters;
-- frequency-hopping emitters;
-- rotating scanning-beam emitters;
-- multiple emitters occupying the same band;
-- configurable SNR, detector threshold, false-alarm probability, and dwell;
-- parallel `K`-band actions;
-- retune settling intervals.
-
-The project includes a FastAPI backend and a React/Vite dashboard. The default
-showcase uses the `contested_spectrum` scenario with beam, hopping, periodic,
-and bursty activity.
-
-## How the idea developed
-
-The project started from one question:
-
-> If a receiver cannot observe the full spectrum, can it learn where and when
-> to look better than a fixed sweep?
-
-We developed the design in stages:
-
-1. Build deterministic baselines and a reproducible simulator.
-2. Add online bandit methods that learn useful bands from hits and misses.
-3. Add forgetting so learners can follow changing activity.
-4. Model hidden ON/OFF state instead of treating every observation as
-   independent.
-5. Detect periodic structure and reserve scans near predicted transmissions.
-6. Separate hidden simulator truth from all deployable schedulers.
-7. Evaluate every method with paired random seeds and common metrics.
-
-This progression kept the system measurable. Every advanced scheduler can be
-compared with round robin, random selection, standard learners, and an Oracle
-ceiling.
-
-## Machine-learning implementation
-
-E-WAVE uses online learning. It does not require an offline training dataset or
-a saved neural network.
-
-### Multi-armed bandits
-
-- **UCB1** balances empirical reward with an uncertainty bonus.
-- **Sliding-window UCB** uses recent evidence to follow changes.
-- **Discounted UCB** gradually reduces the value of old evidence.
-- **Thompson sampling** samples from a Beta posterior for each band.
-- **Discounted Thompson sampling** adds forgetting for restless activity.
-
-### Bayesian state tracking
-
-The belief scheduler estimates the probability that each band is currently ON.
-It predicts state changes with learned `p01` and `p10` transition rates. It
-then corrects the belief using detector probability of detection and false
-alarm.
-
-### Periodic prediction
-
-The Sniper scheduler wraps an online learner. It searches sparse observation
-history for supported period and phase candidates. A prediction overrides the
-inner learner only when the evidence and expected incremental value pass the
-configured gates.
-
-### Whittle research scheduler
-
-The repository also contains a numeric Whittle-index scheduler for a
-Gilbert-Elliott restless bandit. It learns transition rates, solves the
-single-arm subsidy problem on a belief grid, and ranks bands by interpolated
-index values.
-
-Sparse observations create gaps between visits to a band. This research path
-uses multi-step Markov propagation across those gaps instead of treating distant
-observations as adjacent samples.
-
-Whittle remains a research implementation. It is intentionally excluded from
-the public scheduler registry because it did not pass its previous release
-comparison. It must win a new multi-seed benchmark before release.
-
-## What we innovated
-
-The contributions are system-level combinations and verification mechanisms.
-They should not be read as claims that the underlying bandit algorithms were
-invented here.
-
-### Gap-aware learning from sparse scans
-
-The receiver rarely revisits one band in consecutive slots. E-WAVE bridges an
-arbitrary observation gap with the Markov transition matrix and accumulates
-expected one-step transition counts. This lets the model learn from the scan
-pattern it actually experiences.
-
-### Sparse periodic prediction with controlled overrides
-
-The periodic path creates candidates from detected-hit gaps, scores them with
-positive and negative observations, estimates phase, and validates later
-predictions. It records the inner action, executed action, prediction coverage,
-and override benefit.
-
-### Enforced information boundaries
-
-Normal schedulers receive a restricted `SchedulerConfig`. It contains no
-emitter locations, SNR values, emitter types, transition parameters, or hidden
-truth. External intelligence enters only through a labelled `ThreatPrior`.
-Blind, prior-aided, and Oracle runs remain separate.
-
-### Detector-consistent Bayesian decisions
-
-One immutable detector capability carries requested false-alarm probability,
-effective dwell-aware false-alarm probability, threshold, dwell, and nominal
-detection probability. The environment, Bayesian schedulers, metrics, API, and
-reports use the same calibrated values.
-
-### Fair and reproducible evaluation
-
-Independent random generators isolate emitter activity, detector noise, and
-scheduler randomness. Paired seeds therefore compare schedulers against the
-same hidden worlds without random-stream contamination.
-
-### Honest reward and truth separation
-
-The scheduler learns from observable feedback. The evaluator scores against
-hidden truth after the episode. E-WAVE reports learner reward and truth-based
-evaluation utility as different quantities.
-
-### Explainable replay
-
-The dashboard replays actions, detections, hidden truth, metrics, and each
-scheduler's real learning state. It does not present a generated generic
-confidence score.
-
-## Schedulers
-
-The public registry includes:
-
-- `round_robin`
-- `uniform_random`
-- `prior_weighted`
-- `oracle`
-- `ucb1`
-- `sliding_window_ucb`
-- `discounted_ucb`
-- `thompson_sampling`
-- `discounted_thompson`
-- `belief`
-- `sniper`
-
-Oracle is a simulation ceiling. It is not a deployable learner.
-
-## Scenarios
-
-- `sparse_bursty`: three bursty emitters across sixteen bands.
-- `mixed_threat`: continuous, periodic, frequent, and rare activity.
-- `periodic_radar`: three periodic emitters with different timing.
-- `contested_spectrum`: beam, hopping, periodic, and Markov activity.
-
-Scenario aliases such as `sparse`, `mixed`, `radar`, and `contested` are also
-accepted by the command-line tools.
-
-## Metrics
-
-E-WAVE reports:
-
-- probability of detection and false alarm;
-- detector sensitivity;
-- interception ratio and intercept rate;
-- time to first intercept and intercept fraction;
-- learner reward and truth-based evaluation utility;
-- prediction accuracy, coverage, and override telemetry;
-- intercept time error;
-- runtime;
-- multi-seed means and confidence intervals.
-
-## Installation
-
-Python 3.9 or newer and Node.js are required.
+## Quick start
 
 ```bash
 git clone https://github.com/joshiakshit/electronic-warfare.git
 cd electronic-warfare
-python -m venv .venv
-source .venv/bin/activate
+python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
-cd frontend
-npm install
-cd ..
 ```
 
-## Run one simulation
-
-Use a scenario name:
+Run a simulation:
 
 ```bash
-python -m ewscan.experiments \
-  --config contested_spectrum \
-  --scheduler sniper \
-  --seed 42
+python -m ewscan.experiments --config contested_spectrum --scheduler belief --seed 42
 ```
 
-Use a YAML configuration:
-
-```bash
-python -m ewscan.experiments \
-  --config configs/mvp.yaml \
-  --scheduler ucb1
-```
-
-## Run the dashboard
-
-Start the local API:
+Run the dashboard:
 
 ```bash
 uvicorn ewscan.api.server:app --reload
+# in another terminal
+cd frontend && npm install && npm run dev
 ```
 
-Start the frontend in another terminal:
+## How it works
 
-```bash
-cd frontend
-npm run dev
+```
+Environment generates hidden emitter activity across N bands
+    ↓
+Scheduler chooses K bands to scan
+    ↓
+Detector returns noisy hit/miss for each chosen band
+    ↓
+Scheduler updates its model from the results
+    ↓
+Repeat for T time slots
+    ↓
+Evaluator scores the scan log against hidden truth
 ```
 
-Open the local URL printed by Vite. The API allows the local frontend origin by
-default.
+The scheduler never sees the truth. It learns only from its own noisy
+observations. The Oracle scheduler (which does see truth) provides a
+performance ceiling for comparison.
+
+## Schedulers
+
+| Scheduler | Type | Approach |
+|---|---|---|
+| `round_robin` | Baseline | Visits bands in fixed order |
+| `uniform_random` | Baseline | Chooses bands randomly |
+| `prior_weighted` | Baseline | Follows an explicit threat prior |
+| `oracle` | Ceiling | Reads hidden truth (not deployable) |
+| `ucb1` | Bandit | Balances reward with exploration bonus |
+| `sliding_window_ucb` | Bandit | UCB with recent-window forgetting |
+| `discounted_ucb` | Bandit | UCB with exponential discounting |
+| `thompson_sampling` | Bandit | Samples from Beta posteriors |
+| `discounted_thompson` | Bandit | Thompson with forgetting |
+| `belief` | Bayesian | Tracks per-band ON probability with phase-conditioned occupancy |
+| `sniper` | Predictive | Wraps a bandit with periodic-transmission prediction |
+
+**Belief** and **Sniper** are the advanced schedulers. Belief beats Thompson
+sampling on all four scenarios. Sniper beats both baselines on periodic
+scenarios and falls back to its inner bandit elsewhere.
+
+## Emitters
+
+The simulated environment includes:
+
+- **Gilbert-Elliott**: Markov ON/OFF switching
+- **Periodic radar**: repeating active windows with optional jitter
+- **Continuous wave**: always active
+- **Frequency hopper**: moves between bands
+- **Scanning beam**: rotating antenna with varying received power
+- Multiple emitters can share a band; powers combine
+
+## Scenarios
+
+| Scenario | Description |
+|---|---|
+| `sparse_bursty` | Three bursty emitters, 16 bands |
+| `mixed_threat` | Continuous, periodic, frequent, and rare activity |
+| `periodic_radar` | Three periodic emitters with different timing |
+| `contested_spectrum` | Beam, hopping, periodic, and Markov activity |
+
+## Metrics
+
+- Probability of detection and false alarm
+- Interception ratio and intercept rate
+- Time to first intercept and intercept fraction
+- Learner reward (observation-based) and evaluation utility (truth-based)
+- Prediction accuracy, coverage, and override telemetry
+- Multi-seed means and 95% confidence intervals
+
+## Benchmarks
+
+30 paired seeds, blind track, K=1 over 16 bands:
+
+| Scenario | Belief | vs Thompson |
+|---|---:|---|
+| mixed_threat | 0.528 | +0.004 |
+| periodic_radar | 0.469 | +0.211 |
+| sparse_bursty | 0.352 | +0.073 |
+| contested_spectrum | 0.213 | +0.085 |
+
+All wins confirmed on held-out seeds (200-229) never used during development.
+Full benchmark data in [PLAN.md](PLAN.md).
 
 ## Run a benchmark
-
-The following command runs paired seeds and writes episode-level and aggregate
-CSV files:
 
 ```bash
 python -m ewscan.experiments.sweep \
   --config contested_spectrum \
   --schedulers round_robin,ucb1,thompson_sampling,belief,sniper,oracle \
   --num-seeds 30 \
-  --output benchmark_runs.csv \
-  --aggregate-output benchmark_summary.csv
+  --output results.csv \
+  --aggregate-output summary.csv
 ```
 
-Use aggregate results and confidence intervals for algorithm comparisons. Do
-not select a single favorable seed.
-
 ## Tests
-
-Run the Python suite:
 
 ```bash
 pytest tests/
 ```
 
-Run frontend checks:
-
 ```bash
-cd frontend
-npm run typecheck
-npm run lint
-npm test
-npm run build
+cd frontend && npm run typecheck && npm run lint && npm test && npm run build
 ```
 
 ## Project structure
 
-```text
+```
 ewscan/
   agents/        Scheduler implementations and learning models
-  api/           Local FastAPI service
-  env/           RF environment, emitters, detection, and recording
-  experiments/   Episode runner, scenarios, registry, and sweeps
-  metrics/       Detection, interception, reward, prediction, and timing
+  api/           FastAPI service for the dashboard
+  env/           RF environment, emitters, detection, recording
+  experiments/   Episode runner, scenarios, registry, sweeps
+  metrics/       Detection, interception, reward, prediction, timing
   testing/       Shared test fixtures
-  config.py      YAML loading
-  contracts.py   Shared immutable contracts and interfaces
+  contracts.py   Immutable contracts and interfaces
   detector.py    Detector capability and calibration
+  config.py      YAML configuration loading
   rng.py         Independent seeded random streams
-frontend/        React and Vite dashboard
-configs/         Example YAML scenarios
+frontend/        React + Vite dashboard
+configs/         YAML scenario definitions
 tests/           Python test suite
 ```
 
-## Current limits
+## Key design properties
 
-- The project uses simulated signals and detector outputs, not raw IQ samples.
-- It does not classify emitter identity or infer threat type.
-- Threat priority is either simulation metadata for evaluation or an explicit
-  external prior.
-- Whittle remains research-only.
-- Live replay and receiver adapters are not implemented.
-- Results depend on the declared scenario, detector model, scheduler settings,
-  and seed range.
-- No scheduler is expected to dominate every scenario and metric.
+- **Information boundary**: non-oracle schedulers never see emitter locations,
+  SNR, types, or transition parameters. External intelligence enters only
+  through a labelled `ThreatPrior`.
+- **Detector consistency**: one immutable detector capability object carries
+  calibrated Pfa, threshold, dwell, and Pd. Every component uses the same
+  values.
+- **Reproducibility**: independent RNG streams for emitters, detection, and
+  scheduling. Paired seeds compare algorithms against identical hidden worlds.
+- **Honest evaluation**: learner reward (what the scheduler sees) and evaluation
+  utility (truth-based scoring) are separate quantities.
 
-## Safety boundary
+## Requirements
 
-E-WAVE is a passive receive-scheduling simulation. Live transmit effects,
-interference, spoofing, active probing, payload interception, and third-party
-identifier collection are outside the project scope.
+- Python 3.9+
+- Node.js (for the dashboard)
+- NumPy, PyYAML, FastAPI, Uvicorn, Pydantic
+
+## License
+
+MIT
+
+## Contributing
+
+Contributions welcome. See [PLAN.md](PLAN.md) for current status, known limits,
+and future work including the live-data replay path and offensive EA roadmap.

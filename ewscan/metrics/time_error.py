@@ -40,7 +40,6 @@ Definitions
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Sequence
 
 import numpy as np
 from numpy.typing import NDArray

@@ -18,29 +18,15 @@ from typing import Any
 import numpy as np
 import pytest
 
-from ewscan.agents.baselines import (
-    OracleScheduler,
-    PriorWeightedScheduler,
-    RoundRobinScheduler,
-    UniformRandomScheduler,
-)
-from ewscan.agents.nonstationary_ucb import DUCB1Scheduler, SWUCB1Scheduler
-from ewscan.agents.reward import RewardFunction
-from ewscan.agents.thompson import ThompsonSamplingScheduler
+from ewscan.agents.baselines import RoundRobinScheduler
+from ewscan.agents.nonstationary_ucb import SWUCB1Scheduler
 from ewscan.agents.ucb import UCB1Scheduler
 from ewscan.contracts import EmitterInfo, EpisodeConfig
 from ewscan.experiments.sweep import (
-    DEFAULT_SCHEDULER_NAMES,
-    SweepResult,
-    SweepRunner,
-    _build_scheduler_by_name,
-    _clone_scheduler,
     main,
     run_sweep,
-    save_aggregate_csv,
-    save_sweep_csv,
 )
-from ewscan.testing.fixtures import StubScheduler, make_test_config
+from ewscan.testing.fixtures import make_test_config
 
 
 def _build_test_scenario(seed: int = 42, n_slots: int = 60) -> EpisodeConfig:

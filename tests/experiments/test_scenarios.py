@@ -16,21 +16,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from ewscan.agents.baselines import (
-    OracleScheduler,
-    PriorWeightedScheduler,
-    RoundRobinScheduler,
-    UniformRandomScheduler,
-)
-from ewscan.agents.thompson import ThompsonSamplingScheduler
 from ewscan.agents.ucb import UCB1Scheduler
 from ewscan.config import load_config
 from ewscan.contracts import EpisodeConfig
 from ewscan.experiments.runner import main as runner_main, run_episode
 from ewscan.experiments.scenarios import (
-    SCENARIO_ALIASES,
-    SCENARIO_BUILDERS,
-    SCENARIO_METADATA,
     canonical_scenario_name,
     get_all_scenarios,
     get_scenario,
