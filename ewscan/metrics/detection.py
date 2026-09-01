@@ -42,7 +42,7 @@ downstream aggregation (1E.7) can be computed without re-scanning the log.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import numpy as np
 from numpy.typing import NDArray

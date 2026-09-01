@@ -1,4 +1,3 @@
-import pytest
 from ewscan.contracts import EmitterInfo, EpisodeConfig
 from ewscan.agents.baselines import UniformRandomScheduler
 from ewscan.agents.ucb import UCB1Scheduler

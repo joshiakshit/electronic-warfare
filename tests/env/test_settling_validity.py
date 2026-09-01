@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import numpy as np
-
 from ewscan.contracts import EmitterInfo, EpisodeConfig, ScanAction
 from ewscan.env.environment import RFEnvironment
 

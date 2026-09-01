@@ -8,11 +8,10 @@ Selects bands according to:
 from __future__ import annotations
 
 import numpy as np
-from numpy.typing import NDArray
 
 from ewscan.agents.base import BaseLearningScheduler
 from ewscan.agents.reward import RewardFunction
-from ewscan.contracts import EpisodeConfig, Observation, ScanAction
+from ewscan.contracts import Observation, ScanAction
 
 
 class UCB1Scheduler(BaseLearningScheduler):

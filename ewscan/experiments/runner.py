@@ -25,7 +25,6 @@ from ewscan.contracts import (
     EpisodeConfig,
     EpisodeLog,
     Observation,
-    ScanAction,
     Scheduler,
     ThreatPrior,
     scheduler_config_from_episode,

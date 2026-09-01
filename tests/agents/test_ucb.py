@@ -16,7 +16,6 @@ from ewscan.agents.ucb import UCB1Scheduler
 from ewscan.contracts import (
     EmitterInfo,
     Observation,
-    ScanAction,
     Scheduler,
     ThreatPrior,
     scheduler_config_from_episode,

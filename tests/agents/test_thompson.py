@@ -16,8 +16,7 @@ from ewscan.agents.thompson import (
     BetaThompsonSamplingScheduler,
     ThompsonSamplingScheduler,
 )
-from ewscan.contracts import EmitterInfo, Observation, ScanAction, Scheduler, ThreatPrior
-from ewscan.env.environment import RFEnvironment
+from ewscan.contracts import EmitterInfo, Observation, Scheduler, ThreatPrior
 from ewscan.experiments.runner import _build_scheduler_by_name, run_episode
 from ewscan.testing.fixtures import ScriptedEnv, make_test_config
 

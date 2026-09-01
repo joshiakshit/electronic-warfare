@@ -46,7 +46,6 @@ htmlcov/
 # Local agent state
 .claude/
 HANDOFF.md
-AGENTS.md
 
 # Outputs
 *.csv
@@ -57,12 +56,6 @@ AGENTS.md
 !frontend/tsconfig.node.json
 results/
 logs/
-bugs.md
-user_explanation.md
-
-# Plans
-agent convos/
-project memories/
 
 # Frontend build artifacts
 frontend/dist/
