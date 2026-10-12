@@ -1,187 +1,66 @@
-> Java migration milestone (12 October 2026): a zero-runtime-dependency Java core
-> and recorded-input CLI now live alongside this Python application. Python, the
-> dashboard, and other algorithms remain intact. See [Java migration notes](JAVA_MIGRATION.md)
-> for build, embedding, fixture parity, and current limitations.
+# E-WAVE adaptive scanner
 
-# E-WAVE
+A small Java library that chooses which band to observe next using phase occupancy,
+adjacent-observation recency, uncertainty, and coupled-band inference. It accepts
+actual observations through a public API and includes a thin CLI for inspecting
+recorded input. The core has zero runtime dependencies.
 
-**Adaptive Electronic Support scan scheduling using online machine learning.**
+Requires Java 21 or newer and Maven. Maven plugin and JUnit versions are pinned in
+[pom.xml](pom.xml); JUnit is used only for tests.
 
-A wideband receiver must monitor N frequency bands but can only scan K at a
-time. E-WAVE learns where and when to look using multi-armed bandits, Bayesian
-state tracking, and periodic-signal prediction. No offline training data or
-neural networks required — all learning happens online during each episode.
-
-## Quick start
-
-```bash
-git clone https://github.com/joshiakshit/electronic-warfare.git
-cd electronic-warfare
-python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
+```sh
+mvn clean verify
+java -jar target/adaptive-scanner-0.1.0-SNAPSHOT.jar --help
+java -jar target/adaptive-scanner-0.1.0-SNAPSHOT.jar replay 3 128 71 observations.csv
 ```
 
-Run a simulation:
+Input is CSV with an optional exact header. Band indices start at zero; detection
+and validity are bits. An unavailable measurement is not counted as a miss.
 
-```bash
-python -m ewscan.experiments --config contested_spectrum --scheduler belief --seed 42
+```csv
+tick,band,detection,valid
+0,0,1,1
+2,1,0,0
+3,2,0,1
 ```
 
-Run the dashboard:
+The CLI streams `next_tick,selected_band,score,period` to stdout. Diagnostics go to
+stderr. Scores include optimism and can exceed one. Replay updates the model from
+the recorded band; it cannot measure outcomes on bands that were never observed.
 
-```bash
-uvicorn ewscan.api.server:app --reload
-# in another terminal
-cd frontend && npm install && npm run dev
+Embed the JAR directly without invoking the CLI:
+
+```java
+import ewave.AdaptiveScanner;
+
+var scanner = new AdaptiveScanner(AdaptiveScanner.Config.defaults(16, 2000, 42));
+var decision = scanner.choose(0, 1);
+int band = decision.bands()[0];
+// Execute a receiver request and provide its actual result:
+scanner.observe(band, 0, true, true);
+var next = scanner.choose(1, 1);
+scanner.reset();
 ```
 
-## How it works
+One scanner belongs to one thread and session. Ticks must represent a consistent
+elapsed-time cadence defined by the caller. The library rejects stale/duplicate
+feedback and returns defensive copies of snapshot arrays. Top-K selection is
+available, but receiver concurrency must be validated separately.
 
-```
-Environment generates hidden emitter activity across N bands
-    ↓
-Scheduler chooses K bands to scan
-    ↓
-Detector returns noisy hit/miss for each chosen band
-    ↓
-Scheduler updates its model from the results
-    ↓
-Repeat for T time slots
-    ↓
-Evaluator scores the scan log against hidden truth
-```
+The repository contains four production source files, Java tests, and six frozen
+Python reference fixtures. The Python application, dashboard, HTTP API, simulation
+workflows, and other algorithms were retired after fixed-history numerical parity
+passed. They remain recoverable at Git checkpoint `fb62f3e`.
 
-The scheduler never sees the truth. It learns only from its own noisy
-observations. The Oracle scheduler (which does see truth) provides a
-performance ceiling for comparison.
+Verification: 13 Java tests pass, including 4,212 numerical checks against frozen
+reference values with absolute tolerance `1e-9`, exact fitted periods/coupled groups,
+and non-tied decision parity. Tests and fixtures remain tracked for reproducible
+verification and are excluded from the library JAR. This establishes fixture parity, not live receiver
+performance. The JAR targets Java 21 bytecode and has been exercised on Java 25;
+Java 21 runtime and Raspberry Pi verification remain open.
 
-## Schedulers
+Hardware control and receiver/session execution are not implemented yet.
+[Java migration notes](JAVA_MIGRATION.md) explain the API, numerical choices,
+verification, local toolchain, and recovery of the historical reference.
 
-| Scheduler | Type | Approach |
-|---|---|---|
-| `round_robin` | Baseline | Visits bands in fixed order |
-| `uniform_random` | Baseline | Chooses bands randomly |
-| `prior_weighted` | Baseline | Follows an explicit threat prior |
-| `oracle` | Ceiling | Reads hidden truth (not deployable) |
-| `ucb1` | Bandit | Balances reward with exploration bonus |
-| `sliding_window_ucb` | Bandit | UCB with recent-window forgetting |
-| `discounted_ucb` | Bandit | UCB with exponential discounting |
-| `thompson_sampling` | Bandit | Samples from Beta posteriors |
-| `discounted_thompson` | Bandit | Thompson with forgetting |
-| `belief` | Bayesian | Tracks per-band ON probability with phase-conditioned occupancy |
-| `sniper` | Predictive | Wraps a bandit with periodic-transmission prediction |
-
-**Belief** and **Sniper** are the advanced schedulers. Belief beats Thompson
-sampling on all four scenarios. Sniper beats both baselines on periodic
-scenarios and falls back to its inner bandit elsewhere.
-
-## Emitters
-
-The simulated environment includes:
-
-- **Gilbert-Elliott**: Markov ON/OFF switching
-- **Periodic radar**: repeating active windows with optional jitter
-- **Continuous wave**: always active
-- **Frequency hopper**: moves between bands
-- **Scanning beam**: rotating antenna with varying received power
-- Multiple emitters can share a band; powers combine
-
-## Scenarios
-
-| Scenario | Description |
-|---|---|
-| `sparse_bursty` | Three bursty emitters, 16 bands |
-| `mixed_threat` | Continuous, periodic, frequent, and rare activity |
-| `periodic_radar` | Three periodic emitters with different timing |
-| `contested_spectrum` | Beam, hopping, periodic, and Markov activity |
-
-## Metrics
-
-- Probability of detection and false alarm
-- Interception ratio and intercept rate
-- Time to first intercept and intercept fraction
-- Learner reward (observation-based) and evaluation utility (truth-based)
-- Prediction accuracy, coverage, and override telemetry
-- Multi-seed means and 95% confidence intervals
-
-## Benchmarks
-
-30 paired seeds, blind track, K=1 over 16 bands:
-
-| Scenario | Belief | vs Thompson |
-|---|---:|---|
-| mixed_threat | 0.528 | +0.004 |
-| periodic_radar | 0.469 | +0.211 |
-| sparse_bursty | 0.352 | +0.073 |
-| contested_spectrum | 0.213 | +0.085 |
-
-All wins confirmed on held-out seeds (200-229) never used during development.
-Full benchmark data in [PLAN.md](PLAN.md).
-
-## Run a benchmark
-
-```bash
-python -m ewscan.experiments.sweep \
-  --config contested_spectrum \
-  --schedulers round_robin,ucb1,thompson_sampling,belief,sniper,oracle \
-  --num-seeds 30 \
-  --output results.csv \
-  --aggregate-output summary.csv
-```
-
-## Tests
-
-```bash
-pytest tests/
-```
-
-```bash
-cd frontend && npm run typecheck && npm run lint && npm test && npm run build
-```
-
-## Project structure
-
-```
-ewscan/
-  agents/        Scheduler implementations and learning models
-  api/           FastAPI service for the dashboard
-  env/           RF environment, emitters, detection, recording
-  experiments/   Episode runner, scenarios, registry, sweeps
-  metrics/       Detection, interception, reward, prediction, timing
-  testing/       Shared test fixtures
-  contracts.py   Immutable contracts and interfaces
-  detector.py    Detector capability and calibration
-  config.py      YAML configuration loading
-  rng.py         Independent seeded random streams
-frontend/        React + Vite dashboard
-configs/         YAML scenario definitions
-tests/           Python test suite
-```
-
-## Key design properties
-
-- **Information boundary**: non-oracle schedulers never see emitter locations,
-  SNR, types, or transition parameters. External intelligence enters only
-  through a labelled `ThreatPrior`.
-- **Detector consistency**: one immutable detector capability object carries
-  calibrated Pfa, threshold, dwell, and Pd. Every component uses the same
-  values.
-- **Reproducibility**: independent RNG streams for emitters, detection, and
-  scheduling. Paired seeds compare algorithms against identical hidden worlds.
-- **Honest evaluation**: learner reward (what the scheduler sees) and evaluation
-  utility (truth-based scoring) are separate quantities.
-
-## Requirements
-
-- Python 3.9+
-- Node.js (for the dashboard)
-- NumPy, PyYAML, FastAPI, Uvicorn, Pydantic
-
-## License
-
-MIT
-
-## Contributing
-
-Contributions welcome. See [PLAN.md](PLAN.md) for current status, known limits,
-and future work including the live-data replay path and offensive EA roadmap.
+Licensed under the [MIT license](LICENSE).

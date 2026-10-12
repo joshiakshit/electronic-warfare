@@ -1,7 +1,10 @@
 # Java core: first migration milestone
 
-Implemented 12 October 2026 alongside the unchanged Python reference. No dashboard,
-HTTP API, scheduler, or firmware files were removed. No commit or push was made.
+Implemented 12 October 2026, then verified against the Python reference before
+Java-only cleanup. Checkpoint `fb62f3e` preserves the pre-cleanup Python application,
+dashboard, other algorithms, fixture generator and Java port. Legacy application
+files and the local Python environment have now been removed. Firmware remains
+unchanged. The checkpoint is local; nothing has been pushed.
 
 ## Build and use
 
@@ -89,12 +92,21 @@ and tie-breaking state.
 `396df5a4862ddfd259077a5f749bca58bfeb420a`, source SHA-256 hashes, Python 3.14.8,
 NumPy 2.5.3, fixture hashes, and expected final periods/groups. Generation occurred
 before Java implementation. Fixtures are consumed directly by Java tests; Python
-is not invoked during Maven builds. To explicitly regenerate for a separately
-reviewed reference change:
+is not invoked during Maven builds. The Python generator is retained in the
+pre-cleanup checkpoint rather than shipped with the Java library.
+
+To recover the historical application without changing the Java working tree:
 
 ```sh
-PYTHONPATH=. .venv/bin/python tools/freeze_reference.py
+git worktree add --detach ../ewave-python-reference fb62f3e
 ```
+
+That separate checkout includes `tools/freeze_reference.py` and `pyproject.toml`.
+Create its own Python environment and install the project plus the recorded NumPy
+version before explicitly regenerating fixtures there. Do not copy regenerated
+expectations over the Java fixtures without reviewing the numerical changes.
+The generator will record the checkout revision (`fb62f3e`) rather than the original
+reference revision; the numerical source hashes are preserved in the checkpoint.
 
 Six fixtures contain 7,021 observations, 1,890 checkpoints, and 4,212 per-band
 numerical comparisons. They cover sparse period-20 recovery, aperiodic fallback,
@@ -162,5 +174,5 @@ one in-flight request, failure statuses, recording and stop/restart handling.
 The current CLI is recorded-input inspection and does not control hardware.
 Agree fixed tick mapping, scan duration/mode, and nominal detector assumptions
 before adding the ESP32-C3 adapter. Pi memory/latency and live observations remain
-open gates. Keep the Python reference, dashboard and other algorithms under the
-user's current instruction even though these fixture checks pass.
+open gates. The original simulation/evaluation workflows are available in the
+checkpoint; Java replacements for those workflows are not part of this cleanup.
