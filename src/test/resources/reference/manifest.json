@@ -1,0 +1,93 @@
+{
+  "revision": "396df5a4862ddfd259077a5f749bca58bfeb420a",
+  "python": "3.14.8 (main, Oct  1 2026, 00:00:00) [GCC 16.2.1 20260819 (Red Hat 16.2.1-2)]",
+  "numpy": "2.5.3",
+  "sources": {
+    "ewscan/agents/phase.py": "b7355ec7dff3bc2f2c1996988f3a7750c10123eb8ae3631ffc5100b78eeaba83",
+    "ewscan/agents/period.py": "df74b8da2ee748c5cc8cd5902245f1384f49cc21dfbfd683543c82dc42826c6a",
+    "ewscan/agents/history.py": "af1bbd96e27617cced62342b43f28d6169cedf855c5d587b0aa5405cec161477",
+    "ewscan/agents/pomdp.py": "ac875e658e23380ba701805866ce449e7fdf42e9491a1e16f47f370262155767",
+    "ewscan/agents/base.py": "6a77d31150ae0eaeb3a0260f98d2c013f0c991f514c7b5b9f2cb9498cde988dd"
+  },
+  "tolerance": 1e-09,
+  "cases": [
+    {
+      "file": "sparse_periodic.csv",
+      "sha256": "242f3daefedc1b30b6a1cd7d519e0a3367dea410338fa2a78d3319225ff84c86",
+      "observations": 247,
+      "checkpoints": 296,
+      "final_periods": [
+        20,
+        null
+      ],
+      "coupled_period": null,
+      "coupled_members": []
+    },
+    {
+      "file": "aperiodic.csv",
+      "sha256": "ef763dc7d9785a45204f443e03402f3986e685a11925aec4f764c3a15cb58fb6",
+      "observations": 290,
+      "checkpoints": 297,
+      "final_periods": [
+        null
+      ],
+      "coupled_period": null,
+      "coupled_members": []
+    },
+    {
+      "file": "cw_quiet.csv",
+      "sha256": "81395a4b28b75dc0c32466bc3a0c7e42c600081f7e47a8ab63e26f7558d612ab",
+      "observations": 800,
+      "checkpoints": 307,
+      "final_periods": [
+        null,
+        null,
+        null
+      ],
+      "coupled_period": null,
+      "coupled_members": []
+    },
+    {
+      "file": "bursty.csv",
+      "sha256": "a5510b084bc1f9127a3a619d716f61d3e01f3171a38d257b976acb50fd9602c3",
+      "observations": 650,
+      "checkpoints": 304,
+      "final_periods": [
+        null
+      ],
+      "coupled_period": null,
+      "coupled_members": []
+    },
+    {
+      "file": "long_period.csv",
+      "sha256": "f1e13e55ae2a2434f0e79d2d7bb2bf2f2d174a34ba8a98b624e165198027b708",
+      "observations": 2034,
+      "checkpoints": 333,
+      "final_periods": [
+        255
+      ],
+      "coupled_period": null,
+      "coupled_members": []
+    },
+    {
+      "file": "coupled.csv",
+      "sha256": "e9c51441e98d9fbd75583a5ee8d055f217daa6f1dab2c05e5b7c132d81f2f687",
+      "observations": 3000,
+      "checkpoints": 353,
+      "final_periods": [
+        51,
+        null,
+        null,
+        null,
+        null
+      ],
+      "coupled_period": 255,
+      "coupled_members": [
+        0,
+        1,
+        2,
+        3
+      ]
+    }
+  ]
+}

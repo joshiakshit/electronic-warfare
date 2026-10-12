@@ -1,3 +1,8 @@
+> Java migration milestone (12 October 2026): a zero-runtime-dependency Java core
+> and recorded-input CLI now live alongside this Python application. Python, the
+> dashboard, and other algorithms remain intact. See [Java migration notes](JAVA_MIGRATION.md)
+> for build, embedding, fixture parity, and current limitations.
+
 # E-WAVE
 
 **Adaptive Electronic Support scan scheduling using online machine learning.**
