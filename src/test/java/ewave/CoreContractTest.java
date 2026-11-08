@@ -40,12 +40,46 @@ class CoreContractTest {
         assertEquals(1,initial.snapshot().scores()[0]);
         for (int t = 0; t < 800; t++) scanner.observe(0,t,t % 20 == 5);
         assertEquals(20,scanner.snapshot(801).periods()[0]);
+        var fingerprint = scanner.snapshot(801, 10).fingerprints().getFirst();
+        assertEquals(200, fingerprint.fittedPeriodMs());
+        assertEquals("802.11 AP (long interval)", fingerprint.deviceHint());
+        assertTrue(fingerprint.fitConfidence() > .9 && fingerprint.fitConfidence() <= 1);
+        for (int t = 800; t < 1200; t++) scanner.observe(0,t,false);
+        var broken = scanner.snapshot(1200, 10);
+        assertEquals("PERIOD_BROKEN", broken.anomalies().get(1).reason());
+        assertEquals("Transient / mobile", broken.fingerprints().getFirst().deviceHint());
+        assertEquals(0, broken.fingerprints().getFirst().fitConfidence());
         scanner.reset();
         assertArrayEquals(initial.snapshot().scores(),scanner.snapshot(0).scores());
         assertArrayEquals(new long[3],scanner.snapshot(0).counts());
         assertArrayEquals(new int[3],scanner.snapshot(0).periods());
         assertEquals(0,scanner.snapshot(0).coupledPeriod());
+        assertTrue(scanner.snapshot(0).anomalies().isEmpty());
         assertArrayEquals(original,scanner.choose(0,3).bands());
+    }
+
+    @Test void flagsDeviationsAgainstThePrecedingSixtyValidObservations() {
+        var scanner = scanner();
+        scanner.observe(0, 0, true);
+        for (int tick = 1; tick <= 60; tick++) scanner.observe(0, tick, false);
+        scanner.observe(0, 61, true);
+        var start = scanner.snapshot(62).anomalies().get(1);
+        assertEquals("NEW_ACTIVITY", start.reason());
+        assertEquals(1000, start.deviation());
+        assertEquals(50, start.durationMillis(start.detectedAt().plusMillis(50)));
+
+        scanner.observe(0, 62, false, false);
+        scanner.observe(0, 63, true);
+        var ongoing = scanner.snapshot(64).anomalies().get(1);
+        assertEquals(start.detectedAt(), ongoing.detectedAt());
+        assertEquals(start.reason(), ongoing.reason());
+        double mean = 1.0 / 60;
+        assertEquals((1 - mean) / (Math.sqrt(mean * (1 - mean)) + .001), ongoing.deviation(), 1e-12);
+
+        scanner.observe(0, 64, false);
+        assertTrue(scanner.snapshot(65).anomalies().isEmpty());
+        scanner.observe(0, 65, true);
+        assertEquals("UNUSUAL_BURST", scanner.snapshot(66).anomalies().get(1).reason());
     }
 
     @Test void selectionRejectsInvalidRequestsAndUsesDeterministicNearTies() {

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import ewave.active.FrameInjector;
 import ewave.active.HandshakeAnalyzer;
@@ -22,6 +23,10 @@ import io.javalin.http.staticfiles.Location;
 import io.javalin.json.JavalinJackson;
 import io.javalin.websocket.WsContext;
 
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -224,11 +229,11 @@ public final class PassiveRfServer implements AutoCloseable {
             if (session == null) unavailable(ctx, "BLE"); else ctx.json(session.snapshot());
         });
         app.get("/api/channels", ctx -> {
-            var snapshot = wifi.getChannelSnapshot();
-            if (snapshot == null) {
-                ctx.status(503).json(Map.of("error", "Capture has not supplied a scanner yet"));
+            var state = wifi.getChannelSnapshot();
+            if (state == null) {
+                ctx.status(503).json(Map.of("error", "no scanner attached"));
             } else {
-                ctx.json(snapshot);
+                ctx.json(channelResponse(state));
             }
         });
         if (operations) {
@@ -239,6 +244,42 @@ public final class PassiveRfServer implements AutoCloseable {
             app.get("/api/ble/devices", ctx -> ctx.json(ble.getDevices()));
             app.get("/api/ble/advertisements", ctx -> ctx.json(ble.getAdvertisements()));
         }
+    }
+
+    private record ChannelDetails(int channel, int freqMhz, double score, double occupancyMean,
+                                  double fittedPeriodMs, double fitConfidence, String deviceHint,
+                                  List<Integer> coupledWith, ChannelAnomaly anomaly) {}
+
+    private record ChannelAnomaly(double deviation, Instant detectedAt, String reason, long durationMs) {}
+
+    private ObjectNode channelResponse(PacketBridge.ChannelSnapshot state) {
+        var snapshot = state.scanner();
+        double[] scores = snapshot.scores(), means = snapshot.means();
+        int[] coupledMembers = snapshot.coupledMembers();
+        var channels = new ArrayList<ChannelDetails>();
+        for (int band = 0; band < Math.min(13, scores.length); band++) {
+            int channel = band + 1;
+            var fingerprint = snapshot.fingerprints().get(band);
+            List<Integer> coupledWith = Arrays.binarySearch(coupledMembers, band) < 0 ? List.of()
+                    : Arrays.stream(coupledMembers).map(index -> index + 1)
+                            .filter(peer -> peer != channel && peer <= 13).boxed().toList();
+            var flag = snapshot.anomalies().get(channel);
+            var anomaly = flag == null ? null : new ChannelAnomaly(flag.deviation(), flag.detectedAt(),
+                    flag.reason(), flag.durationMillis(state.timestamp()));
+            channels.add(new ChannelDetails(channel, PacketBridge.channelFrequencyMhz(channel), scores[band],
+                    means[band], fingerprint.fittedPeriodMs(), fingerprint.fitConfidence(), fingerprint.deviceHint(),
+                    coupledWith, anomaly));
+        }
+
+        // Preserve the score arrays consumed by the bundled spectrum dashboard.
+        ObjectNode response = mapper.valueToTree(snapshot);
+        response.put("activeChannel", state.activeChannel());
+        response.put("lastChosen", state.lastChosen());
+        response.put("lastChosenFreqMhz", state.lastChosen() == null ? null
+                : PacketBridge.channelFrequencyMhz(state.lastChosen()));
+        response.put("timestamp", state.timestamp().toString());
+        response.set("channels", mapper.valueToTree(channels));
+        return response;
     }
 
     private void registerOperations() {

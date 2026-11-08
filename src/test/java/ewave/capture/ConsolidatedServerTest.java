@@ -46,7 +46,9 @@ class ConsolidatedServerTest {
             for (String asset : List.of("/ewave.js", "/ewave.css", "/graph.js", "/spectrum.js"))
                 assertEquals(200, get(client, server, asset).statusCode(), asset);
             assertEquals(404, get(client, server, "/dashboard.js").statusCode());
-            assertEquals(503, get(client, server, "/api/channels").statusCode());
+            var channels = get(client, server, "/api/channels");
+            assertEquals(503, channels.statusCode());
+            assertEquals("no scanner attached", mapper.readTree(channels.body()).path("error").asText());
             assertEquals(404, post(client, server, "/api/attack", "{}").statusCode());
             var foreign = client.send(HttpRequest.newBuilder(uri(server, "/api/attack/stop"))
                     .header("Origin", "https://foreign.example")
@@ -56,25 +58,41 @@ class ConsolidatedServerTest {
         }
     }
 
-    @Test void channelsAndDevicesComeFromTheCaptureScannerEvenAfterCaptureStops() throws Exception {
+    @Test void exposesChannelsWhileTheCaptureScannerIsRunningAndKeepsDevicesAfterStop() throws Exception {
         String packet = "1700000000.123456 " + MAC
                 + " > ff:ff:ff:ff:ff:ff, ethertype IPv4 (0x0800), length 128: UDP";
         var scanner = new AdaptiveScanner(AdaptiveScanner.Config.defaults(13, 128, 71));
-        Process process = new Process() {
-            @Override public InputStream getInputStream() { return new ByteArrayInputStream((packet + "\n").getBytes(java.nio.charset.StandardCharsets.UTF_8)); }
-            @Override public OutputStream getOutputStream() { return new ByteArrayOutputStream(); }
-            @Override public InputStream getErrorStream() { return InputStream.nullInputStream(); }
-            @Override public int waitFor() { return 0; }
-            @Override public int exitValue() { return 0; }
-            @Override public void destroy() { }
-        };
-        try (var bridge = new PacketBridge(builder -> process, Map.of("021122", "Lab Vendor"));
+        var process = new StreamingCaptureProcess();
+        var tuned = new StreamingCaptureProcess();
+        tuned.finish();
+        try (var bridge = new PacketBridge(builder -> builder.command().getFirst().equals("sudo") ? tuned : process,
+                     Map.of("021122", "Lab Vendor"));
              var ble = new BleBridge(bridge.getEventQueue(), bridge.getProfiler());
              var server = new PassiveRfServer(bridge, ble, true).start(0);
              var client = HttpClient.newHttpClient()) {
             bridge.start("lab0", scanner);
-            // The queued packet proves the finite capture has finished publishing its devices.
+            process.write((packet + "\n").getBytes(StandardCharsets.UTF_8));
             assertNotNull(bridge.getPacketQueue().poll(3, TimeUnit.SECONDS));
+
+            var channels = get(client, server, "/api/channels");
+            assertEquals(200, channels.statusCode());
+            var response = mapper.readTree(channels.body());
+            Instant.parse(response.path("timestamp").asText());
+            int chosen = response.path("lastChosen").asInt();
+            assertTrue(chosen >= 1 && chosen <= 13);
+            assertEquals(2407 + chosen * 5, response.path("lastChosenFreqMhz").asInt());
+            assertEquals(13, response.path("channels").size());
+            var first = response.path("channels").get(0);
+            assertEquals(1, first.path("channel").asInt());
+            assertEquals(2412, first.path("freqMhz").asInt());
+            assertEquals(response.path("scores").get(0).asDouble(), first.path("score").asDouble());
+            assertEquals(response.path("means").get(0).asDouble(), first.path("occupancyMean").asDouble());
+            assertEquals(0, first.path("fittedPeriodMs").asDouble());
+            assertEquals(0, first.path("fitConfidence").asDouble());
+            assertEquals("Transient / mobile", first.path("deviceHint").asText());
+            assertTrue(first.path("coupledWith").isEmpty());
+            assertTrue(first.path("anomaly").isNull());
+
             bridge.stop();
             var profiles = get(client, server, "/api/profiles");
             assertEquals(200, profiles.statusCode());
@@ -82,9 +100,7 @@ class ConsolidatedServerTest {
             assertEquals(MAC, profile.path("mac").asText());
             assertEquals(1, profile.path("packetCount").asInt());
             assertTrue(profile.path("estimatedMeters").isNull());
-            var channels = get(client, server, "/api/channels");
-            assertEquals(200, channels.statusCode());
-            assertEquals(wire(bridge.getChannelSnapshot()), mapper.readTree(channels.body()));
+            assertEquals(503, get(client, server, "/api/channels").statusCode());
             var devices = mapper.readTree(get(client, server, "/api/devices").body());
             assertEquals("Lab Vendor", devices.path(MAC).path("vendor").asText());
             assertEquals(MAC, devices.path(MAC).path("mac").asText());

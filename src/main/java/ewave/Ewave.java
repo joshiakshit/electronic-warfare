@@ -20,14 +20,16 @@ public final class Ewave {
         boolean probes = false;
         boolean ble = false;
         boolean passiveRf = false;
+        boolean adaptive = false;
         boolean ops = false;
         int hci = 0;
         Path replay = null;
         for (int i = 0; i < args.length; i++) {
             String option = args[i];
             if (option.equals("--help")) {
-                System.out.println("Usage: java -jar ewave-0.1.0-SNAPSHOT.jar [--iface INTERFACE] [--port PORT] [--bands BANDS] [--passive-rf] [--ops] [--probes] [--ble] [--hci INDEX] [--replay FILE]");
+                System.out.println("Usage: java -jar ewave-0.1.0-SNAPSHOT.jar [--iface INTERFACE] [--port PORT] [--bands BANDS] [--passive-rf] [--adaptive] [--ops] [--probes] [--ble] [--hci INDEX] [--replay FILE]");
                 System.out.println("--passive-rf: privacy-filtered reports on loopback. Wi-Fi by default, --ble for BLE only, --probes --ble for both.");
+                System.out.println("--adaptive: combine channel hopping and Spectrum with --passive-rf on a prepared monitor interface.");
                 System.out.println("--ops: enable the local lab operations when using --passive-rf.");
                 System.out.println("--probes: passively decode Wi-Fi probe requests on a prepared monitor-mode interface.");
                 System.out.println("--ble: passive BLE advertisements (Python 3/Linux); --hci selects the adapter (default 0).");
@@ -40,6 +42,7 @@ public final class Ewave {
                 continue;
             }
             if (option.equals("--passive-rf")) { passiveRf = true; continue; }
+            if (option.equals("--adaptive")) { adaptive = true; continue; }
             if (option.equals("--ops")) { ops = true; continue; }
             if (option.equals("--ble")) { ble = true; continue; }
             if (!option.equals("--iface") && !option.equals("--port") && !option.equals("--bands") && !option.equals("--hci") && !option.equals("--replay")) {
@@ -65,6 +68,8 @@ public final class Ewave {
             throw new IllegalArgumentException("--replay cannot be combined with --ops, --probes or --ble");
         boolean operations = replay == null && (ops || !passiveRf);
         boolean monitor = probes || passiveRf && !ble;
+        if (adaptive && (!passiveRf || !monitor || replay != null || ops))
+            throw new IllegalArgumentException("--adaptive requires passive Wi-Fi capture without --ops or --replay");
         var shutdown = new CountDownLatch(1);
         try (var bridge = new PacketBridge(); var bluetooth = new BleBridge(bridge.getEventQueue(), bridge.getProfiler());
              var server = new PassiveRfServer(bridge, bluetooth, operations)) {
@@ -78,7 +83,8 @@ public final class Ewave {
             Runtime.getRuntime().addShutdownHook(hook);
             try {
                 if (replay != null) bridge.startReplay(replay);
-                else if (monitor) bridge.startPassive(iface, operations);
+                else if (monitor) bridge.startPassive(iface, operations,
+                        adaptive ? new AdaptiveScanner(AdaptiveScanner.Config.defaults(bands, 2048, 42L)) : null);
                 else if (!ble) bridge.start(iface, new AdaptiveScanner(AdaptiveScanner.Config.defaults(bands, 2048, 42L)));
                 if (ble) bluetooth.startPassive(hci);
                 server.start(port);

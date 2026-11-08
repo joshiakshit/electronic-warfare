@@ -21,6 +21,7 @@ import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.ArrayDeque;
 import java.util.Arrays;
@@ -31,11 +32,13 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -62,7 +65,8 @@ import java.util.stream.Stream;
  */
 public final class PacketBridge implements AutoCloseable {
     private static final System.Logger LOG = System.getLogger(PacketBridge.class.getName());
-    private static final long TICK_NANOS = TimeUnit.MILLISECONDS.toNanos(100);
+    private static final int TICK_MILLIS = 100;
+    private static final long TICK_NANOS = TimeUnit.MILLISECONDS.toNanos(TICK_MILLIS);
     private static final String MAC = "(?:[0-9a-f]{2}:){5}[0-9a-f]{2}";
     private static final Pattern TIMESTAMP = Pattern.compile("^\\s*(\\d+(?:\\.\\d+)?)\\s+");
     private static final Pattern ETHERNET = Pattern.compile("(" + MAC + ")\\s*>\\s*(" + MAC + ")", Pattern.CASE_INSENSITIVE);
@@ -96,7 +100,6 @@ public final class PacketBridge implements AutoCloseable {
     private volatile int channel;
     // Guarded by this, including every session's counters and pending packets.
     private Session session;
-    private AdaptiveScanner lastScanner;
     private long tick;
     private long probeCount;
     private String captureMode = "packets";
@@ -155,7 +158,15 @@ public final class PacketBridge implements AutoCloseable {
     }
 
     public synchronized void startPassive(String iface, boolean collectLabTargets) throws IOException {
-        startCapture(iface, null, "passive-rf", collectLabTargets);
+        startPassive(iface, collectLabTargets, null);
+    }
+
+    /** Runs the monitor decoder and optionally schedules the same radio from its frame observations. */
+    public synchronized void startPassive(String iface, boolean collectLabTargets, AdaptiveScanner scanner) throws IOException {
+        if (scanner != null && scanner.config().bands() < 13) {
+            throw new IllegalArgumentException("Channels 1..13 require at least 13 scanner bands");
+        }
+        startCapture(iface, scanner, "passive-rf", collectLabTargets);
     }
 
     /** Reads an existing PCAP in order, as fast as the decoder can process it. */
@@ -168,7 +179,6 @@ public final class PacketBridge implements AutoCloseable {
         replay = started;
         health = started.health;
         passiveWifi = reports;
-        lastScanner = null;
         captureMode = "replay";
         captureInterface = null;
         captureError = null;
@@ -293,14 +303,14 @@ public final class PacketBridge implements AutoCloseable {
                 else readPackets(started);
             }, "ewave-packet-reader");
             started.reader.setDaemon(true);
-            if (scanner != null) started.timer.scheduleAtFixedRate(() -> onTimer(started), 100, 100, TimeUnit.MILLISECONDS);
+            if (scanner != null) started.timer.scheduleAtFixedRate(() -> onTimer(started, iface),
+                    TICK_MILLIS, TICK_MILLIS, TimeUnit.MILLISECONDS);
             if (reports != null) {
                 started.timer.scheduleAtFixedRate(reports::purge, 1, 1, TimeUnit.MINUTES);
                 started.timer.scheduleWithFixedDelay(() -> sampleMonitor(started, iface), 0, 5, TimeUnit.SECONDS);
                 Thread.ofPlatform().daemon().name("ewave-monitor-diagnostics").start(() -> readDiagnostics(started));
             }
             started.reader.start();
-            lastScanner = scanner;
         } catch (RuntimeException | Error failure) {
             session = null;
             terminate(started);
@@ -345,14 +355,20 @@ public final class PacketBridge implements AutoCloseable {
         return Map.copyOf(status);
     }
 
-    /** Summary scanner scores at the next capture tick; null before summary capture
-     * or after starting probe mode. The summary scanner remains available after stop.
-     */
-    public synchronized AdaptiveScanner.Snapshot getChannelSnapshot() {
-        if (lastScanner == null) return null;
-        synchronized (lastScanner) {
-            return lastScanner.snapshot(tick);
+    public record ChannelSnapshot(AdaptiveScanner.Snapshot scanner, Integer activeChannel, Integer lastChosen,
+                                  Instant timestamp) {}
+
+    /** Summary scanner and radio state at the next capture tick, or null without a running scanner. */
+    public synchronized ChannelSnapshot getChannelSnapshot() {
+        if (session == null || session.scanner == null) return null;
+        synchronized (session.scanner) {
+            return new ChannelSnapshot(session.scanner.snapshot(tick, TICK_MILLIS),
+                    channel == 0 ? null : channel, session.lastChosen, Instant.now());
         }
+    }
+
+    public static Integer channelFrequencyMhz(int channel) {
+        return channel < 1 || channel > 13 ? null : 2407 + channel * 5;
     }
 
     public synchronized boolean isRunning() { return session != null || replay != null && replay.running(); }
@@ -417,6 +433,11 @@ public final class PacketBridge implements AutoCloseable {
                     current.health.record(Dot11FrameDecoder.frameControl(packet, link), complete, frame,
                             timestamp, now, monotonicMillis());
                     if (frame == null) return;
+                    if (current.scanner != null) {
+                        advanceTicks(current, System.nanoTime());
+                        int observedChannel = Dot11FrameDecoder.channel(frame.frequencyMhz());
+                        if (observedChannel >= 1 && observedChannel <= 13) current.counts[observedChannel]++;
+                    }
                     var observed = recordMonitorFrame(frame, reports, collectLabTargets);
                     if (observed.inventory() && now >= current.nextDeviceEvent) {
                         current.nextDeviceEvent = now + 1000;
@@ -576,10 +597,22 @@ public final class PacketBridge implements AutoCloseable {
         eventQueue.add(EwaveEvent.probeRequest(probe));
     }
 
-    private void onTimer(Session current) {
+    private void onTimer(Session current, String iface) {
         try {
             synchronized (this) {
-                if (session == current) advanceTicks(current, System.nanoTime());
+                if (session != current) return;
+                advanceTicks(current, System.nanoTime());
+                if (tick == current.lastDecisionTick) return;
+                // The packet reader can also close windows, so check the tick even
+                // when advanceTicks did not close a window in this callback.
+                int chosen;
+                synchronized (current.scanner) {
+                    chosen = current.scanner.choose(tick, 1).bands()[0] + 1;
+                }
+                current.lastDecisionTick = tick;
+                current.lastChosen = chosen;
+                Integer frequency = channelFrequencyMhz(chosen);
+                if (frequency != null) current.retuner.execute(() -> retune(current, iface, chosen, frequency));
             }
         } catch (RuntimeException failure) {
             LOG.log(System.Logger.Level.WARNING, "Capture tick failed", failure);
@@ -587,11 +620,48 @@ public final class PacketBridge implements AutoCloseable {
         }
     }
 
+    private void retune(Session current, String iface, int chosen, int frequency) {
+        if (Thread.currentThread().isInterrupted()) return;
+        synchronized (this) {
+            if (session != current) return;
+            if (current.health != null && current.tunedChannel == chosen) return;
+            current.tuning = true;
+        }
+        var builder = new ProcessBuilder("sudo", "iw", "dev", iface, "set", "freq", Integer.toString(frequency))
+                .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+                .redirectError(ProcessBuilder.Redirect.DISCARD);
+        LOG.log(System.Logger.Level.INFO, "[AdaptiveScanner] chose channel " + chosen + " → " + frequency + "MHz");
+        Process tuning = null;
+        try {
+            tuning = processStarter.start(builder);
+            if (tuning.waitFor(2, TimeUnit.SECONDS) && tuning.exitValue() == 0) {
+                synchronized (this) {
+                    if (session == current) {
+                        channel = chosen;
+                        current.tunedChannel = chosen;
+                    }
+                }
+            }
+        } catch (IOException failure) {
+            LOG.log(System.Logger.Level.DEBUG, "Could not launch radio retune", failure);
+        } catch (InterruptedException stopped) {
+            Thread.currentThread().interrupt();
+        } finally {
+            if (tuning != null && tuning.isAlive()) tuning.destroyForcibly();
+            synchronized (this) {
+                current.tuning = false;
+            }
+        }
+    }
+
     private void advanceTicks(Session current, long now) {
         while (now - current.nextBoundary >= 0) {
             synchronized (current.scanner) {
                 for (int band = 1; band <= 13; band++) {
-                    current.scanner.observe(band - 1, tick, current.counts[band] > 0, true);
+                    boolean detected = current.counts[band] > 0;
+                    // A monitor radio cannot report quiet observations on channels it did not sample.
+                    boolean valid = current.health == null || detected || !current.tuning && current.tunedChannel == band;
+                    current.scanner.observe(band - 1, tick, detected, valid);
                 }
             }
             Arrays.fill(current.counts, 0);
@@ -633,6 +703,7 @@ public final class PacketBridge implements AutoCloseable {
 
     private static void terminate(Session current) {
         current.timer.shutdownNow();
+        if (current.retuner != null) current.retuner.shutdownNow();
         if (current.reader != null && current.reader != Thread.currentThread()) current.reader.interrupt();
         current.process.destroy();
         boolean interrupted = false;
@@ -777,13 +848,18 @@ public final class PacketBridge implements AutoCloseable {
         return Map.copyOf(result);
     }
 
-    private static final class Session {
+    private final class Session {
         final Process process;
         final AdaptiveScanner scanner;
         final CaptureHealth health;
+        final ThreadPoolExecutor retuner;
         final long[] counts = new long[14];
         final List<PacketEvent> pending = new ArrayList<>();
         long nextDeviceEvent, nextProbeEvent;
+        long lastDecisionTick = tick;
+        Integer lastChosen;
+        int tunedChannel;
+        boolean tuning;
         final ScheduledExecutorService timer = Executors.newSingleThreadScheduledExecutor(task -> {
             Thread thread = new Thread(task, "ewave-capture-ticks");
             thread.setDaemon(true);
@@ -796,6 +872,11 @@ public final class PacketBridge implements AutoCloseable {
             this.process = process;
             this.scanner = scanner;
             this.health = health;
+            // Serialize commands and keep only the latest pending choice if iw is slow.
+            retuner = scanner == null ? null : new ThreadPoolExecutor(1, 1, 0, TimeUnit.MILLISECONDS,
+                    new ArrayBlockingQueue<>(1),
+                    task -> Thread.ofPlatform().daemon().name("ewave-radio-retune").unstarted(task),
+                    new ThreadPoolExecutor.DiscardOldestPolicy());
         }
     }
 

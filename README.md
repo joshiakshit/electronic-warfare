@@ -47,11 +47,13 @@ java -jar target/ewave-0.1.0-SNAPSHOT.jar --passive-rf --iface wlo1
 | --- | --- |
 | Wi-Fi summary and spectrum | `--iface wlo1` |
 | Passive Wi-Fi inventory and probe audit | `--passive-rf --iface wlo1` |
+| Live Intel and adaptive Spectrum on a monitor interface | `--passive-rf --adaptive --iface wlo1` |
 | Passive BLE | `--passive-rf --ble --hci 0` |
 | Passive Wi-Fi and BLE | `--passive-rf --probes --iface wlo1 --ble --hci 0` |
 
-The Wi-Fi summary mode uses the current interface configuration. Run the JAR
-with `--help` for all launcher options. Passive RF mode disables lab operations
+Wi-Fi summary mode uses the current interface configuration and requests 2.4 GHz
+channel changes through `sudo iw` as the adaptive scanner selects channels.
+Run the JAR with `--help` for all launcher options. Passive RF mode disables lab operations
 by default. The standard live launcher enables the Ops controls. Use these
 controls only on networks and devices you are authorized to test.
 

@@ -1,6 +1,7 @@
 package ewave.capture;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import ewave.core.AdaptiveScanner;
 import ewave.fixtures.BleFrames;
 import ewave.fixtures.ProbeFrames;
 import ewave.fixtures.StreamingCaptureProcess;
@@ -23,12 +24,43 @@ import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.function.BooleanSupplier;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 @Timeout(15)
 class PassiveRfCaptureTest {
+    @Test void servesInventoryAndAdaptiveChannelsFromOneMonitorCapture() throws Exception {
+        var capture = new StreamingCaptureProcess();
+        var tune = new StreamingCaptureProcess();
+        var retunes = new LinkedBlockingQueue<List<String>>();
+        try (var wifi = new PacketBridge(builder -> {
+            if (builder.command().getFirst().equals("tcpdump")) return capture;
+            retunes.add(List.copyOf(builder.command()));
+            return tune;
+        }, Map.of());
+             var ble = new BleBridge(wifi.getEventQueue(), wifi.getProfiler());
+             var server = new PassiveRfServer(wifi, ble);
+             var client = HttpClient.newHttpClient()) {
+            var scanner = new AdaptiveScanner(AdaptiveScanner.Config.defaults(13, 128, 71));
+            wifi.startPassive("lab0mon", false, scanner);
+            server.start(0);
+            byte[] packet = ProbeFrames.radiotap(ProbeFrames.frame("Fixture"));
+            byte[] pcap = ProbeFrames.pcap(ByteOrder.LITTLE_ENDIAN, true, 127, packet);
+            ByteBuffer.wrap(pcap).order(ByteOrder.LITTLE_ENDIAN).putInt(24, (int) (System.currentTimeMillis() / 1000));
+            capture.write(pcap);
+            assertNotNull(retunes.poll(3, TimeUnit.SECONDS));
+            await(() -> wifi.getChannelSnapshot().scanner().counts()[5] == 1);
+            var mapper = new ObjectMapper();
+            assertEquals(1, mapper.readTree(get(client, server, "/api/inventory").body()).size());
+            var channels = mapper.readTree(get(client, server, "/api/channels").body());
+            assertEquals(13, channels.path("channels").size());
+            assertEquals(1, channels.path("counts").get(5).asInt());
+            assertEquals(0, channels.path("counts").get(0).asInt());
+        }
+    }
+
     @Test void streamsBinaryCapturesToReadOnlyReportsWithoutLegacyEventsOrRawIdentifiers() throws Exception {
         var wifiProcess = new StreamingCaptureProcess();
         var bleProcess = new StreamingCaptureProcess();

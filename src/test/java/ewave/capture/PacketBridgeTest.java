@@ -19,6 +19,7 @@ import java.util.ArrayDeque;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
@@ -90,7 +91,7 @@ class PacketBridgeTest {
 
     @Test void launchesWithoutShellAndCreatesUpdatesImmutableDeviceRecords() throws Exception {
         FakeProcess process = new FakeProcess();
-        try (PacketBridge bridge = new PacketBridge(builder -> {
+        try (PacketBridge bridge = summaryBridge(builder -> {
             assertEquals(List.of("tcpdump", "-i", "wlo1;echo", "-e", "-l", "-n", "-tt"), builder.command());
             assertEquals(ProcessBuilder.Redirect.INHERIT, builder.redirectError());
             assertFalse(builder.redirectErrorStream());
@@ -136,7 +137,7 @@ class PacketBridgeTest {
         FakeProcess second = new FakeProcess();
         var processes = new ArrayDeque<>(List.of(first, second));
         var scanner = scanner();
-        try (PacketBridge bridge = new PacketBridge(builder -> processes.remove(), Map.of())) {
+        try (PacketBridge bridge = summaryBridge(builder -> processes.remove(), Map.of())) {
             bridge.setChannel(6);
             bridge.start("wlo1", scanner);
             first.write(ETHERNET);
@@ -160,11 +161,38 @@ class PacketBridgeTest {
         }
     }
 
+    @Test void retunesToTheScannerChoiceWithoutHoldingUpObservationWindows() throws Exception {
+        var capture = new FakeProcess();
+        var tune = new FakeProcess();
+        var started = new LinkedBlockingQueue<ProcessBuilder>();
+        var scanner = scanner();
+        var expected = scanner();
+        for (int band = 0; band < 13; band++) expected.observe(band, 0, false);
+        int chosen = expected.choose(1, 1).bands()[0] + 1;
+        try (var bridge = new PacketBridge(builder -> {
+            if (builder.command().getFirst().equals("tcpdump")) return capture;
+            started.add(builder);
+            return tune;
+        }, Map.of())) {
+            bridge.start("wlo1", scanner);
+            var command = started.poll(1, TimeUnit.SECONDS);
+            assertNotNull(command);
+            assertEquals(List.of("sudo", "iw", "dev", "wlo1", "set", "freq", Integer.toString(2407 + chosen * 5)),
+                    command.command());
+            assertEquals(ProcessBuilder.Redirect.DISCARD, command.redirectOutput());
+            assertEquals(ProcessBuilder.Redirect.DISCARD, command.redirectError());
+            await(() -> observations(scanner) >= 3);
+            assertTrue(tune.isAlive());
+            assertNull(bridge.getChannelSnapshot().activeChannel());
+            await(() -> !tune.isAlive());
+        }
+    }
+
     @Test void mapsFirstAndLastChannelsToScannerBandBoundaries() throws Exception {
         for (int channel : new int[]{1, 13}) {
             FakeProcess process = new FakeProcess();
             var scanner = scanner();
-            try (PacketBridge bridge = new PacketBridge(builder -> process, Map.of())) {
+            try (PacketBridge bridge = summaryBridge(builder -> process, Map.of())) {
                 bridge.setChannel(channel);
                 bridge.start("wlo1", scanner);
                 process.write(ETHERNET);
@@ -186,7 +214,7 @@ class PacketBridgeTest {
     @Test void channel14AndUnknownPacketsAreQueuedWithoutFalseChannelDetections() throws Exception {
         FakeProcess process = new FakeProcess();
         var scanner = scanner();
-        try (PacketBridge bridge = new PacketBridge(builder -> process, Map.of())) {
+        try (PacketBridge bridge = summaryBridge(builder -> process, Map.of())) {
             bridge.start("wlo1", scanner);
             process.write(ETHERNET);
             assertEquals(0, bridge.getPacketQueue().poll(2, TimeUnit.SECONDS).channel());
@@ -205,7 +233,7 @@ class PacketBridgeTest {
 
     @Test void eofStopsCaptureAndDrainsPendingPackets() throws Exception {
         FakeProcess process = new FakeProcess();
-        try (PacketBridge bridge = new PacketBridge(builder -> process, Map.of())) {
+        try (PacketBridge bridge = summaryBridge(builder -> process, Map.of())) {
             bridge.start("wlo1", scanner());
             process.write(ETHERNET);
             await(() -> bridge.getDevices().size() == 2);
@@ -226,7 +254,7 @@ class PacketBridgeTest {
         };
         FakeProcess healthy = new FakeProcess();
         AtomicInteger launches = new AtomicInteger();
-        try (PacketBridge bridge = new PacketBridge(builder -> switch (launches.getAndIncrement()) {
+        try (PacketBridge bridge = summaryBridge(builder -> switch (launches.getAndIncrement()) {
             case 0 -> throw new IOException("simulated launch failure");
             case 1 -> failedRead;
             default -> healthy;
@@ -245,7 +273,7 @@ class PacketBridgeTest {
 
     @Test void validatesStartAndChannelArgumentsAndExcludesGroupAddresses() throws Exception {
         FakeProcess process = new FakeProcess();
-        try (PacketBridge bridge = new PacketBridge(builder -> process, Map.of())) {
+        try (PacketBridge bridge = summaryBridge(builder -> process, Map.of())) {
             assertThrows(IllegalArgumentException.class, () -> bridge.start(" ", scanner()));
             assertThrows(NullPointerException.class, () -> bridge.start("wlo1", null));
             assertThrows(IllegalArgumentException.class, () -> bridge.start("wlo1",
@@ -270,14 +298,14 @@ class PacketBridgeTest {
                 return this;
             }
         };
-        try (PacketBridge bridge = new PacketBridge(builder -> process, Map.of())) {
+        try (PacketBridge bridge = summaryBridge(builder -> process, Map.of())) {
             bridge.start("wlo1", scanner());
             bridge.stop();
             assertEquals(1, forced.get());
             assertFalse(process.isAlive());
 
             FakeProcess interruptedProcess = new FakeProcess();
-            try (PacketBridge interruptedBridge = new PacketBridge(builder -> interruptedProcess, Map.of())) {
+            try (PacketBridge interruptedBridge = summaryBridge(builder -> interruptedProcess, Map.of())) {
                 interruptedBridge.start("wlo1", scanner());
                 Thread.currentThread().interrupt();
                 try {
@@ -417,6 +445,13 @@ class PacketBridgeTest {
             assertTrue(error.contains("monitor interface and tcpdump permissions"));
             assertEquals("wlo1", bridge.getCaptureStatus().get("captureInterface"));
         }
+    }
+
+    private static PacketBridge summaryBridge(PacketBridge.ProcessStarter capture, Map<String, String> vendors) {
+        return new PacketBridge(builder -> {
+            if (builder.command().getFirst().equals("sudo")) throw new IOException("Simulated unavailable retune");
+            return capture.start(builder);
+        }, vendors);
     }
 
     private static long observations(AdaptiveScanner scanner) {

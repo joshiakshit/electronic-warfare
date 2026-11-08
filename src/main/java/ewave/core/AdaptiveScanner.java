@@ -1,5 +1,7 @@
 package ewave.core;
 
+import java.time.Duration;
+import java.time.Instant;
 import java.util.*;
 
 /** Embeddable single-threaded scheduler. Inputs contain receiver observations only.
@@ -23,12 +25,22 @@ public final class AdaptiveScanner {
             return new Config(bands,capacity,48,6,1,4,200,.9,.01,.3,.03,1,seed);
         }
     }
+    public record AnomalyFlag(int channel, double deviation, Instant detectedAt, String reason) {
+        public long durationMillis(Instant timestamp) {
+            return Math.max(0, Duration.between(detectedAt, timestamp).toMillis());
+        }
+    }
+    public record Fingerprint(String deviceHint, double fittedPeriodMs, double fitConfidence) {}
+
     /** Scores include optimism and may exceed one; they are not probabilities. Zero period means no fit. */
     public record Snapshot(long tick, double[] means, double[] spreads, double[] scores,
-                           int[] periods, long[] counts, int coupledPeriod, int[] coupledMembers) {
+                           int[] periods, long[] counts, int coupledPeriod, int[] coupledMembers,
+                           Map<Integer, AnomalyFlag> anomalies, List<Fingerprint> fingerprints) {
         public Snapshot {
             means = means.clone(); spreads = spreads.clone(); scores = scores.clone();
             periods = periods.clone(); counts = counts.clone(); coupledMembers = coupledMembers.clone();
+            anomalies = Map.copyOf(anomalies);
+            fingerprints = List.copyOf(fingerprints);
         }
         @Override public double[] means() { return means.clone(); }
         @Override public double[] spreads() { return spreads.clone(); }
@@ -47,15 +59,27 @@ public final class AdaptiveScanner {
     private Random random;
     private long latestTick;
     private final long[] feedbackTicks;
+    private final AnomalyDetector[] anomalyDetectors;
+    private final PeriodFit.History[] fitEvidence;
+    private final double[] fitConfidence;
+    private final long[] observationsSinceConfidence;
     public AdaptiveScanner(Config config) {
         this.config = Objects.requireNonNull(config);
         feedbackTicks = new long[config.bands()];
+        anomalyDetectors = new AnomalyDetector[config.bands()];
+        fitEvidence = new PeriodFit.History[config.bands()];
+        fitConfidence = new double[config.bands()];
+        observationsSinceConfidence = new long[config.bands()];
         reset();
     }
     /** Start a new independent session, including a fresh seeded tie-breaking stream. */
     public void reset() {
         model = new PhaseModel(config); random = new Random(config.seed()); latestTick = -1;
         Arrays.fill(feedbackTicks,-1);
+        Arrays.setAll(anomalyDetectors, band -> new AnomalyDetector());
+        Arrays.setAll(fitEvidence, band -> new PeriodFit.History(config.capacity()));
+        Arrays.fill(fitConfidence, 0);
+        Arrays.fill(observationsSinceConfidence, 0);
     }
     public Config config() { return config; }
     public void observe(int band, long tick, boolean detection) { observe(band,tick,detection,true); }
@@ -64,19 +88,47 @@ public final class AdaptiveScanner {
         if (band < 0 || band >= config.bands()) throw new IllegalArgumentException("Unknown band: " + band);
         checkTick(tick);
         if (tick < latestTick || tick <= feedbackTicks[band]) throw new IllegalArgumentException("Stale or duplicate feedback");
-        if (valid) model.observe(band,tick,detection);
+        if (valid) {
+            int previousPeriod = model.period(band);
+            model.observe(band,tick,detection);
+            int period = model.period(band);
+            anomalyDetectors[band].observe(band + 1, detection, previousPeriod, period);
+
+            fitEvidence[band].append(tick, detection);
+            if (period != 0 && (period != previousPeriod
+                    || ++observationsSinceConfidence[band] >= config.refitInterval())) {
+                fitConfidence[band] = PeriodFingerprinter.confidence(fitEvidence[band].recent(), period);
+                observationsSinceConfidence[band] = 0;
+            } else if (period == 0) {
+                fitConfidence[band] = 0;
+            }
+        }
         feedbackTicks[band] = tick; latestTick = tick;
     }
     public Snapshot snapshot(long tick) {
+        return snapshot(tick, 0);
+    }
+    /** A zero cadence leaves physical period lengths and labels unspecified for fitted bands. */
+    public Snapshot snapshot(long tick, double tickMillis) {
         checkTick(tick);
+        if (!Double.isFinite(tickMillis) || tickMillis < 0 || !Double.isFinite(tickMillis * config.maxPeriod())) {
+            throw new IllegalArgumentException("Invalid tick duration");
+        }
         double[] means = new double[config.bands()], spreads = means.clone(), scores = means.clone();
         int[] periods = new int[config.bands()];
+        var fingerprints = new ArrayList<Fingerprint>(config.bands());
+        var anomalies = new HashMap<Integer, AnomalyFlag>();
         for (int band = 0; band < config.bands(); band++) {
             double[] posterior = model.posterior(band,tick);
             means[band] = posterior[0]; spreads[band] = posterior[1];
             scores[band] = model.score(band,tick); periods[band] = model.period(band);
+            double millis = periods[band] * tickMillis;
+            fingerprints.add(new Fingerprint(PeriodFingerprinter.hint(periods[band], millis), millis, fitConfidence[band]));
+            AnomalyFlag flag = anomalyDetectors[band].active();
+            if (flag != null) anomalies.put(flag.channel(), flag);
         }
-        return new Snapshot(tick,means,spreads,scores,periods,model.counts(),model.coupledPeriod(),model.members());
+        return new Snapshot(tick,means,spreads,scores,periods,model.counts(),model.coupledPeriod(),model.members(),
+                anomalies,fingerprints);
     }
     /** Select distinct bands in rank order. Near ties use uniform seeded Java randomness.
      * Same seed numbers do not reproduce NumPy's random stream.
@@ -101,7 +153,8 @@ public final class AdaptiveScanner {
                 scores[b] *= Math.max(.1,weights[b]);
                 if (!Double.isFinite(scores[b])) throw new IllegalArgumentException("Weighted score overflow");
             }
-            snapshot = new Snapshot(tick,snapshot.means(),snapshot.spreads(),scores,snapshot.periods(),snapshot.counts(),snapshot.coupledPeriod(),snapshot.coupledMembers());
+            snapshot = new Snapshot(tick,snapshot.means(),snapshot.spreads(),scores,snapshot.periods(),
+                    snapshot.counts(),snapshot.coupledPeriod(),snapshot.coupledMembers(),snapshot.anomalies(),snapshot.fingerprints());
         }
         int[] selected = new int[k];
         for (int i = 0; i < k; i++) {
