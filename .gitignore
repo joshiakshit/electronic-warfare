@@ -1,6 +1,10 @@
 # Java build
 /target/
 *.class
+*.jar
+node_modules/
+__pycache__/
+*.pyc
 
 # IDE and editor files
 .vscode/
@@ -21,7 +25,38 @@ planned-work/
 *.json
 results/
 logs/
+/.ewave-run/
+*.cap
+*.pcap
+*.pcapng
+*.btsnoop
+
+# Local credentials and environment overrides
+.env
+.env.*
+!.env.example
+
+# Synthetic capture fixtures used by tests and offline replay
+!/src/test/resources/probes/probe-requests.pcap
+!/src/test/resources/ble/advertisements.btsnoop
 
 # Frozen numerical reference fixtures
 !src/test/resources/reference/*.csv
 !src/test/resources/reference/manifest.json
+
+# Bundled RF settings and test fixtures
+!src/main/resources/fingerprints.csv
+!src/main/resources/ble/rules.json
+!src/test/resources/ble/*.csv
+
+# Optional RF catalogs generated locally
+/src/main/resources/ble/company-identifiers.csv
+/src/main/resources/ble/gatt-services.csv
+/src/main/resources/ble/member-services.csv
+/src/main/resources/oui.txt
+/src/main/resources/oui-specific.txt
+
+# Local project scripts, notes, and agent guidance
+/scripts/
+/notes.md
+AGENTS.md

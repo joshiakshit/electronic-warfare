@@ -1,0 +1,2 @@
+A4:C3:F0	Fixture	Fixture Manufacturer
+00:11:22	Fixture	Fixture Base Allocation

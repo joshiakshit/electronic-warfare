@@ -1,8 +1,11 @@
-package ewave;
+package ewave.core;
 
-import java.io.*;
+import java.io.IOException;
+import java.io.PrintStream;
+import java.io.Reader;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.*;
+import java.nio.file.Files;
+import java.nio.file.Path;
 
 /** Finite recorded-observation inspection. Does not invent outcomes for selected bands. */
 public final class Main {
@@ -10,7 +13,7 @@ public final class Main {
     public static void main(String[] args) { System.exit(run(args,System.out,System.err)); }
     static int run(String[] args, PrintStream out, PrintStream err) {
         if (args.length == 1 && args[0].equals("--help")) {
-            out.println("Usage: java -jar adaptive-scanner.jar replay BANDS CAPACITY SEED INPUT.csv");
+            out.println("Usage: java -cp target/ewave-0.1.0-SNAPSHOT.jar ewave.core.Main replay BANDS CAPACITY SEED INPUT.csv");
             out.println("Input: tick,band,detection,valid (header optional; bits are 0 or 1).");
             out.println("Output: next_tick,selected_band,score,period. Replay inspects recorded observations; it does not measure counterfactual performance.");
             return 0;

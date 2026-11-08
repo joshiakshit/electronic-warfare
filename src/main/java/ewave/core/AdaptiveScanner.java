@@ -1,4 +1,4 @@
-package ewave;
+package ewave.core;
 
 import java.util.*;
 

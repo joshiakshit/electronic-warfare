@@ -1,66 +1,104 @@
-# E-WAVE adaptive scanner
+# ewave
 
-A small Java library that chooses which band to observe next using phase occupancy,
-adjacent-observation recency, uncertainty, and coupled-band inference. It accepts
-actual observations through a public API and includes a thin CLI for inspecting
-recorded input. The core has zero runtime dependencies.
+ewave is a local RF analysis dashboard for Wi-Fi and Bluetooth Low Energy
+(BLE). It captures or replays Wi-Fi traffic, audits probe requests, summarizes
+BLE advertisements, and visualizes observed devices and channel activity. An
+adaptive scanner scores channels from recorded observations. The dashboard binds
+to loopback.
 
-Requires Java 21 or newer and Maven. Maven plugin and JUnit versions are pinned in
-[pom.xml](pom.xml); JUnit is used only for tests.
+## Quick start
+
+Install Java 21 or newer and Maven, then build the runnable JAR.
 
 ```sh
-mvn clean verify
-java -jar target/adaptive-scanner-0.1.0-SNAPSHOT.jar --help
-java -jar target/adaptive-scanner-0.1.0-SNAPSHOT.jar replay 3 128 71 observations.csv
+git clone https://github.com/joshiakshit/electronic-warfare.git
+cd electronic-warfare
+mvn clean package
 ```
 
-Input is CSV with an optional exact header. Band indices start at zero; detection
-and validity are bits. An unavailable measurement is not counted as a miss.
+Try the dashboard with the bundled synthetic capture. Once the JAR is built,
+replay and the dashboard work without internet access, radio hardware, or
+elevated privileges.
 
-```csv
-tick,band,detection,valid
-0,0,1,1
-2,1,0,0
-3,2,0,1
+```sh
+java -jar target/ewave-0.1.0-SNAPSHOT.jar \
+  --replay src/test/resources/probes/probe-requests.pcap --port 0
 ```
 
-The CLI streams `next_tick,selected_band,score,period` to stdout. Diagnostics go to
-stderr. Scores include optimism and can exceed one. Replay updates the model from
-the recorded band; it cannot measure outcomes on bands that were never observed.
+Open the loopback URL printed at startup. Replay processes four probe requests
+and leaves the dashboard available for inspection. Press Ctrl+C to stop it.
 
-Embed the JAR directly without invoking the CLI:
+## Live capture
 
-```java
-import ewave.AdaptiveScanner;
+Live Wi-Fi capture requires Linux, `tcpdump`, capture permissions, and a
+compatible adapter. Live BLE requires Linux, Python 3, capture permissions,
+and a compatible HCI adapter.
 
-var scanner = new AdaptiveScanner(AdaptiveScanner.Config.defaults(16, 2000, 42));
-var decision = scanner.choose(0, 1);
-int band = decision.bands()[0];
-// Execute a receiver request and provide its actual result:
-scanner.observe(band, 0, true, true);
-var next = scanner.choose(1, 1);
-scanner.reset();
+Replace `wlo1` or HCI index `0` with the appropriate adapter. Prepare monitor
+mode for passive Wi-Fi inventory and combined capture.
+
+For example, to start passive Wi-Fi capture from the repository root:
+
+```sh
+java -jar target/ewave-0.1.0-SNAPSHOT.jar --passive-rf --iface wlo1
 ```
 
-One scanner belongs to one thread and session. Ticks must represent a consistent
-elapsed-time cadence defined by the caller. The library rejects stale/duplicate
-feedback and returns defensive copies of snapshot arrays. Top-K selection is
-available, but receiver concurrency must be validated separately.
+| Mode | Arguments after the JAR path |
+| --- | --- |
+| Wi-Fi summary and spectrum | `--iface wlo1` |
+| Passive Wi-Fi inventory and probe audit | `--passive-rf --iface wlo1` |
+| Passive BLE | `--passive-rf --ble --hci 0` |
+| Passive Wi-Fi and BLE | `--passive-rf --probes --iface wlo1 --ble --hci 0` |
 
-The repository contains four production source files, Java tests, and six frozen
-Python reference fixtures. The Python application, dashboard, HTTP API, simulation
-workflows, and other algorithms were retired after fixed-history numerical parity
-passed. They remain recoverable at Git checkpoint `fb62f3e`.
+The Wi-Fi summary mode uses the current interface configuration. Run the JAR
+with `--help` for all launcher options. Passive RF mode disables lab operations
+by default. The standard live launcher enables the Ops controls. Use these
+controls only on networks and devices you are authorized to test.
 
-Verification: 13 Java tests pass, including 4,212 numerical checks against frozen
-reference values with absolute tolerance `1e-9`, exact fitted periods/coupled groups,
-and non-tied decision parity. Tests and fixtures remain tracked for reproducible
-verification and are excluded from the library JAR. This establishes fixture parity, not live receiver
-performance. The JAR targets Java 21 bytecode and has been exercised on Java 25;
-Java 21 runtime and Raspberry Pi verification remain open.
+## Optional vendor and Bluetooth names
 
-Hardware control and receiver/session execution are not implemented yet.
-[Java migration notes](JAVA_MIGRATION.md) explain the API, numerical choices,
-verification, local toolchain, and recovery of the historical reference.
+Capture, replay, and device classification work with the default build. The
+full lookup catalogs are generated locally when you want Wi-Fi manufacturer
+names or BLE registry matches for company IDs and service UUIDs.
 
-Licensed under the [MIT license](LICENSE).
+For Wi-Fi names, install Wireshark's `tshark` and export its manufacturer table
+from the repository root.
+
+```sh
+tshark -G manuf > src/main/resources/oui.txt
+```
+
+For BLE names, use Python 3 with PyYAML and a checkout of the
+[Bluetooth SIG Assigned Numbers repository](https://bitbucket.org/bluetooth-SIG/public/).
+Run the generator with the path to that checkout.
+
+```sh
+python3 tools/generate_ble_catalogs.py /path/to/bluetooth-sig-public
+```
+
+Run `mvn clean package` again to include the generated catalogs in your local JAR.
+Keep the generated catalogs and any JAR built with them local. For a distributable
+default build, package from a fresh checkout.
+
+## Repository layout
+
+| Path | Purpose |
+| --- | --- |
+| `src/main/java/ewave/` | Launcher, scanner, capture, decoders, device profiling, lab operations, and HTTP server |
+| `src/main/resources/` | Dashboard assets, classification rules, and BLE capture helper |
+| `src/test/` | Java tests and checked-in synthetic and numerical fixtures |
+| `tools/` | Numerical comparison and optional BLE catalog generator |
+
+## Development
+
+```sh
+mvn test
+```
+
+The scanner also has a separate CSV replay entry point. Run
+`java -cp target/ewave-0.1.0-SNAPSHOT.jar ewave.core.Main --help` for its input
+format and usage.
+
+## License
+
+[MIT](LICENSE)

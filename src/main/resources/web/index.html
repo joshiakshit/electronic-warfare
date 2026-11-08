@@ -1,0 +1,314 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ewave · RF Console</title>
+  <link rel="stylesheet" href="/ewave.css">
+  <script src="/graph.js" defer></script>
+  <script src="/spectrum.js" defer></script>
+  <script src="/ewave.js" defer></script>
+</head>
+<body>
+<aside class="sidebar">
+  <div class="brand">ewave</div>
+  <nav aria-label="Console">
+    <button class="nav active" data-view="intel" aria-current="page"><span>◉</span> INTEL</button>
+    <button class="nav" data-view="nearby"><span>⌁</span> NEARBY</button>
+    <button class="nav" data-view="map"><span>◎</span> MAP</button>
+    <button class="nav" data-view="health"><span>◈</span> CAPTURE HEALTH</button>
+    <button class="nav" data-view="spectrum"><span>≋</span> SPECTRUM</button>
+    <button class="nav" data-view="probe"><span>⊞</span> PROBE LAB</button>
+    <button class="nav" data-view="ops"><span>⚡</span> OPS</button>
+  </nav>
+  <div class="sidebar-status">
+    <div><b>WiFi</b><i id="wifi-dot" class="dot"></i><span id="wifi-status">Connecting</span></div>
+    <div><b>BLE</b><i id="ble-dot" class="dot"></i><span id="ble-status">Connecting</span></div>
+    <div><b>Uptime</b><span id="uptime" class="mono">00:00:00</span></div>
+  </div>
+</aside>
+<main>
+  <p id="connection" class="banner amber" role="status" hidden>Event stream disconnected. Reconnecting in 3 seconds.</p>
+
+  <section id="intel" class="view">
+    <div class="title-row"><h1>Intel</h1><button data-network-setup>My Network setup</button></div>
+    <div class="stats" aria-label="Inventory totals">
+      <div class="panel"><span>Observed WiFi addresses</span><strong id="wifi-total">—</strong></div>
+      <div class="panel"><span>Observed BLE addresses</span><strong id="ble-total">—</strong></div>
+      <div class="panel"><span>Probes</span><strong id="probe-total">—</strong></div>
+      <div class="panel"><span>Unique vendors</span><strong id="vendor-total">—</strong></div>
+    </div>
+    <article id="pinned-panel" class="panel pinned-panel" hidden>
+      <header><h2>Pinned devices</h2><span class="caption">Exact Wi-Fi address matches</span></header>
+      <div id="pinned-devices" class="pinned-devices"></div>
+    </article>
+    <div class="intel-grid">
+      <article class="panel">
+        <header><h2>Device feed</h2><span id="feed-count" class="caption"></span></header>
+        <div class="filters">
+          <label class="scope-control">Scope
+            <select id="intel-scope"><option value="network">My Network · Last 5 minutes</option><option value="all">All observed</option></select>
+          </label>
+          <label id="intel-ap-control" class="scope-control">AP <select id="intel-ap" aria-label="Intel access point"></select></label>
+          <div class="segmented" aria-label="Radio filter">
+            <button class="chosen" data-radio="all" aria-pressed="true">All</button><button data-radio="wifi" aria-pressed="false">WiFi</button><button data-radio="ble" aria-pressed="false">BLE</button>
+          </div>
+          <label class="range">RSSI <input id="rssi" type="range" min="-100" max="0" value="-100"><output id="rssi-value">Any</output></label>
+          <input id="search" type="search" placeholder="Search devices" aria-label="Search devices">
+        </div>
+        <p id="feed-summary" class="feed-summary caption" hidden></p>
+        <div class="table-wrap feed">
+          <table><thead><tr><th>Vendor</th><th>Type</th><th>MAC / ID</th><th>RSSI</th><th>Dist</th><th>First seen</th><th>Pkts</th></tr></thead>
+          <tbody id="device-rows"></tbody></table>
+          <p id="feed-empty" class="empty loading">◉ Loading inventory</p>
+          <button id="more-intel" class="map-more" hidden>Show more addresses</button>
+        </div>
+      </article>
+      <article class="panel">
+        <header><h2>Device detail</h2><span id="detail-radio" class="caption"></span></header>
+        <div id="device-detail"><p class="empty">◉ Select a device to inspect it</p></div>
+        <section id="signal-history" class="detail-section" hidden>
+          <h2>RSSI history</h2>
+          <div id="signal-chart"></div>
+        </section>
+        <section class="detail-section" aria-label="Lab fingerprints">
+          <button id="open-fingerprint-samples" type="button">Review lab fingerprints</button>
+          <form id="fingerprint-form" class="fingerprint-form" hidden>
+            <p class="caption">Save a sample from this enrolled device for manual review.</p>
+            <label>Observed fingerprint <select id="fingerprint-choice" required></select></label>
+            <label>Known device class <input id="fingerprint-family" maxlength="64" placeholder="e.g. Phone" required></label>
+            <label>OS or platform (optional) <input id="fingerprint-os" maxlength="64"></label>
+            <div><button type="submit" disabled>Save lab sample</button></div>
+            <p id="fingerprint-message" class="caption" role="status"></p>
+          </form>
+        </section>
+      </article>
+    </div>
+  </section>
+
+  <dialog id="fingerprint-dialog" class="panel network-dialog" aria-labelledby="fingerprint-heading">
+    <header>
+      <h2 id="fingerprint-heading">Lab fingerprints</h2>
+      <form method="dialog"><button>Close</button></form>
+    </header>
+    <div class="body">
+      <p class="caption">Save samples from known devices in My Network. These samples stay separate from recognition hints.</p>
+      <a href="/api/fingerprint-samples" download="ewave-fingerprint-samples.json">Download JSON</a>
+      <p id="sample-message" class="caption" role="status"></p>
+      <div id="fingerprint-samples" class="fingerprint-samples"></div>
+    </div>
+  </dialog>
+
+  <section id="nearby" class="view" hidden>
+    <div class="title-row"><h1>Nearby</h1><button data-network-setup>My Network setup</button></div>
+    <article class="panel">
+      <header><h2>Observed access points outside My Network</h2><button id="all-observations">Browse retained addresses</button></header>
+      <p class="feed-summary caption">Recent AP advertisements on the tuned channel. Capture scope controls which clients enter the inventory.</p>
+      <div class="table-wrap corpus">
+        <table><thead><tr><th>Access point</th><th>Channel</th><th>RSSI</th><th>Last seen</th><th></th></tr></thead>
+          <tbody id="nearby-rows"></tbody></table>
+        <p id="nearby-empty" class="empty loading">⌁ Loading nearby access points</p>
+      </div>
+    </article>
+    <article class="panel registry-panel">
+      <header><h2>Bluetooth SIG matches</h2><span class="caption">Advertisement counts</span></header>
+      <p class="feed-summary caption">Company IDs and service UUID assignments identify registry entries.</p>
+      <div class="table-wrap corpus">
+        <table><thead><tr><th>Code</th><th>Assignment</th><th>Type</th><th>Advertisements</th></tr></thead>
+          <tbody id="ble-registry-rows"></tbody></table>
+        <p id="ble-registry-empty" class="empty">⌁ No Bluetooth matches yet</p>
+      </div>
+    </article>
+  </section>
+
+  <section id="map" class="view" hidden>
+    <h1>Map</h1>
+    <article class="panel">
+      <header class="controls">
+        <label>Focus <select id="map-ap" aria-label="Map access point"></select></label>
+        <button id="reset-graph">Reset focus</button>
+        <label><input id="show-ble" type="checkbox"> Show BLE</label>
+        <label><input id="show-unassociated" type="checkbox"> Show unassociated</label>
+        <a href="/api/topology.dot" download="topology.dot">Export DOT</a>
+        <span id="node-count" class="caption push">— nodes</span>
+      </header>
+      <div id="graph-wrap">
+        <svg id="topology-graph" role="group" aria-label="Observed access points and clients"></svg>
+        <p id="graph-empty" class="empty overlay loading">◎ Loading topology</p>
+      </div>
+      <button id="more-map-aps" class="map-more" hidden>Show more APs</button>
+      <p id="map-selection" class="caption map-selection" aria-live="polite">Select a node to see its details.</p>
+      <div id="map-evidence" class="map-evidence" hidden></div>
+      <div class="legend"><span class="blue">● AP</span><span class="green">● Phone</span><span class="amber-text">● Laptop</span><span>● Unknown / unassociated</span></div>
+    </article>
+  </section>
+
+  <section id="health" class="view" hidden>
+    <div class="title-row"><h1>Capture Health</h1><span id="health-status" class="caption" role="status">Loading capture health</span></div>
+    <p id="health-error" class="banner amber" role="status" hidden></p>
+    <div id="health-metrics" hidden>
+      <div class="stats" aria-label="Capture health totals">
+        <div class="panel"><span>Frames received</span><strong id="health-total">—</strong></div>
+        <div class="panel"><span>Frames per second</span><strong id="health-fps">—</strong></div>
+        <div class="panel"><span>Decoder rejects</span><strong id="health-rejects">—</strong></div>
+        <div class="panel"><span>Kernel drops</span><strong id="health-drops">—</strong></div>
+      </div>
+      <div class="two-col">
+        <article class="panel">
+          <header><h2>Capture source</h2></header>
+          <div class="body"><dl id="health-source" class="facts"></dl></div>
+        </article>
+        <article class="panel">
+          <header><h2>Frame breakdown</h2><span id="health-window" class="caption"></span></header>
+          <table><thead><tr><th>Frame type</th><th>Count</th><th>Frames / sec</th></tr></thead>
+            <tbody id="health-frames"></tbody></table>
+          <div class="body"><dl id="health-decoder" class="facts"></dl>
+            <p class="caption">Live capture filters for management and data. Replay counts every frame type present in the file.</p></div>
+        </article>
+      </div>
+    </div>
+    <article class="panel registry-panel">
+      <header><h2>Offline PCAP replay</h2></header>
+      <div class="body stack">
+        <p>Replay an existing 802.11 PCAP through the same decoder. Use another port to keep a live capture open.</p>
+        <code>java -jar target/ewave-0.1.0-SNAPSHOT.jar --replay capture.pcap --port 7071</code>
+      </div>
+    </article>
+  </section>
+
+  <section id="spectrum" class="view" hidden>
+    <div class="title-row"><h1>Spectrum</h1><span id="spectrum-updated" class="caption"></span></div>
+    <article class="panel spectrum-top">
+      <header><h2>Channel scores</h2><span class="caption">2.4 GHz · channels 1–13</span></header>
+      <p id="spectrum-empty" class="empty loading">≋ Loading scanner snapshot</p>
+      <div id="channel-chart" hidden><div id="coupled" class="coupled"></div><div id="channel-bars" class="channel-bars"></div></div>
+    </article>
+    <div class="two-col">
+      <article class="panel">
+        <header><h2>Period fit</h2></header>
+        <div class="table-wrap"><table><thead><tr><th>Channel</th><th>Period (ms)</th><th>Confidence</th><th>Observations</th></tr></thead><tbody id="period-rows"></tbody></table></div>
+        <p id="period-empty" class="empty">≋ No fitted channels</p>
+      </article>
+      <article class="panel">
+        <header><h2>Phase Occupancy — last 60s</h2></header>
+        <div id="heatmap" aria-label="Phase occupancy by channel and two-second bucket"></div>
+      </article>
+    </div>
+  </section>
+
+  <section id="probe" class="view" hidden>
+    <h1>Probe Lab</h1>
+    <p class="banner amber">⚠ These SSIDs were broadcast by nearby devices without joining any network. Each reveals a previously trusted connection.</p>
+    <div id="audit-summary" class="audit-summary caption" aria-live="polite"></div>
+    <article class="panel">
+      <header><h2>SSID corpus</h2><span id="probe-visibility" class="caption"></span></header>
+      <div class="table-wrap corpus"><table><thead><tr><th>SSID</th><th>Devices</th><th>First seen</th><th>Last seen</th><th>ISP guess</th></tr></thead><tbody id="ssid-rows"></tbody></table>
+        <p id="ssid-empty" class="empty loading">⊞ Loading probe audit</p></div>
+    </article>
+    <div class="two-col">
+      <article class="panel">
+        <header><h2 id="ssid-device-title">Devices that probed this SSID</h2></header>
+        <div class="table-wrap corpus"><table><thead><tr><th>MAC / ID</th><th>Vendor</th><th>RSSI</th><th>Last seen</th></tr></thead><tbody id="ssid-devices"></tbody></table>
+          <p id="ssid-device-empty" class="empty">⊞ Select an SSID to inspect it</p></div>
+      </article>
+      <article class="panel">
+        <header><h2>Probe timeline</h2><span class="caption">Last 10 min · 30 s buckets</span></header>
+        <svg id="probe-timeline" viewBox="0 0 520 175" role="img" aria-label="Probe count over time"></svg>
+      </article>
+    </div>
+  </section>
+
+  <section id="ops" class="view" hidden>
+    <h1>Ops</h1>
+    <p id="ops-notice" class="banner amber" hidden>Lab operations are disabled. Launch with <code>--ops</code> alongside <code>--passive-rf</code> to enable them.</p>
+    <div class="ops-grid">
+      <article class="panel">
+        <header><h2>Targets</h2></header>
+        <div class="body stack">
+          <label>Access point<select id="ap-target"><option value="">Select cached AP</option></select></label>
+          <label>Client<select id="client-target"><option value="">None selected</option></select></label>
+          <form id="manual-form" class="stack">
+            <label>Manual MAC<input id="manual-mac" placeholder="00:11:22:33:44:55" spellcheck="false"></label>
+            <button type="submit">Add</button>
+          </form>
+          <button id="lan-button">Scan LAN</button>
+          <div id="target-chips" class="chips"></div>
+          <p id="target-message" class="caption" role="status"></p>
+        </div>
+      </article>
+      <article class="panel">
+        <header class="segmented tabs" aria-label="Operations">
+          <button class="chosen" data-operation="deauth" aria-pressed="true">Deauth</button>
+          <button data-operation="handshake" aria-pressed="false">Handshake</button>
+          <button data-operation="verify" aria-pressed="false">Verify PSK</button>
+        </header>
+        <form id="deauth-form" class="body stack">
+          <label>Frame count<input id="deauth-count" type="number" min="1" step="1" value="10" required></label>
+          <label>Monitor interface<input id="deauth-interface" value="wlo1" required></label>
+          <div class="controls"><button class="danger" type="submit">Fire deauth</button><button type="button" data-stop>Stop</button></div>
+          <p id="deauth-status" class="op-status" role="status">Idle</p>
+        </form>
+        <form id="handshake-form" class="body stack" hidden>
+          <label>Channel<input id="handshake-channel" type="number" min="1" max="233" value="6" required></label>
+          <label>Monitor interface<input id="handshake-interface" value="wlo1" required></label>
+          <div class="controls"><button class="primary" type="submit">Start capture</button><button type="button" data-stop>Stop</button></div>
+          <ol id="handshake-stages" class="stages">
+            <li>Tuning frequency</li><li>Waiting for beacon</li><li>Waiting for device reconnect</li><li>Finishing capture</li><li>Complete</li>
+          </ol>
+          <p id="handshake-status" class="op-status" role="status">Idle</p>
+          <button id="verify-jump" type="button" hidden>Verify PSK →</button>
+        </form>
+        <form id="verify-form" class="body stack" hidden>
+          <label>Capture file path<input id="capture-path" required spellcheck="false"></label>
+          <label>Wordlist path<input id="wordlist" value="/usr/share/wordlists/rockyou.txt" required spellcheck="false"></label>
+          <div class="controls"><button class="primary" type="submit">Run Aircrack</button><button type="button" data-stop>Stop</button></div>
+          <p id="verify-status" class="op-status" role="status">Idle</p>
+          <strong id="psk" class="key mono" hidden></strong>
+          <details id="verify-details" hidden><summary>Full output</summary><pre id="verify-output"></pre></details>
+        </form>
+      </article>
+      <article class="panel">
+        <header><h2>Console</h2><button id="clear-console">Clear</button></header>
+        <div id="console" class="console mono" role="log" aria-label="Operation log"></div>
+      </article>
+    </div>
+  </section>
+</main>
+<dialog id="network-dialog" class="panel network-dialog" aria-labelledby="network-title">
+  <header><h2 id="network-title">My Network setup</h2><button id="close-network" type="button" aria-label="Close My Network setup">Close</button></header>
+  <div class="body stack">
+    <p class="caption">Choose an observed AP, use its Wi-Fi name to narrow the list, or enter a known BSSID. Pin devices by the Wi-Fi address they use on your network.</p>
+    <p id="network-message" class="caption" role="status"></p>
+    <div class="two-col network-columns">
+      <section aria-labelledby="saved-ap-title">
+        <h2 id="saved-ap-title">Access points</h2>
+        <ul id="saved-aps" class="network-entries"></ul>
+        <form id="find-network-ap" class="stack network-find">
+          <label>Filter by Wi-Fi name (optional) <input id="find-ssid" placeholder="Exact network name" spellcheck="false" required></label>
+          <button type="submit">Find observed APs</button>
+        </form>
+        <form id="add-network-ap" class="stack">
+          <label>Observed access point <select id="observed-ap"><option value="">Enter a BSSID manually</option></select></label>
+          <label id="manual-ap-label">BSSID <input id="network-bssid" placeholder="00:11:22:33:44:55" spellcheck="false" required></label>
+          <label>AP label <input id="network-ap-label" placeholder="Home 2.4 GHz" maxlength="64" required></label>
+          <button type="submit">Save access point</button>
+        </form>
+      </section>
+      <section aria-labelledby="saved-device-title">
+        <h2 id="saved-device-title">Pinned devices</h2>
+        <ul id="saved-devices" class="network-entries"></ul>
+        <form id="add-network-device" class="stack">
+          <label>Device Wi-Fi MAC <input id="network-device-mac" placeholder="00:11:22:33:44:55" spellcheck="false" required></label>
+          <label>Device label <input id="network-device-label" placeholder="My Phone" maxlength="64" required></label>
+          <button type="submit">Pin device</button>
+        </form>
+      </section>
+    </div>
+    <div class="network-scope">
+      <label><input type="checkbox" id="restrict-network"> Restrict Wi-Fi collection to saved APs</label>
+      <p id="network-scope-note" class="caption">Changing scope clears current Wi-Fi reports. Nearby AP advertisements remain visible.</p>
+    </div>
+  </div>
+</dialog>
+</body>
+</html>
