@@ -7,6 +7,7 @@ import ewave.fixtures.BleFrames;
 import ewave.fixtures.StreamingCaptureProcess;
 import ewave.model.DeviceRecord;
 import ewave.model.EwaveEvent;
+import ewave.passive.DeviceProfiler;
 import ewave.ui.PassiveRfServer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -58,15 +59,40 @@ class ConsolidatedServerTest {
         }
     }
 
+    @Test void comparesBothPoliciesOnTheSameFixtureWithoutACapture() throws Exception {
+        try (var bridge = new PacketBridge();
+             var ble = new BleBridge(bridge.getEventQueue(), bridge.getProfiler());
+             var server = new PassiveRfServer(bridge, ble, false).start(0);
+             var client = HttpClient.newHttpClient()) {
+            var response = get(client, server, "/api/channels/demo");
+            assertEquals(200, response.statusCode());
+            assertEquals(response.body(), get(client, server, "/api/channels/demo").body());
+            var demo = mapper.readTree(response.body());
+            assertEquals(6, demo.path("fixedChannel").asInt());
+            assertEquals(0, demo.at("/fixed/detections/0/delayMs").asInt(-1));
+            assertTrue(demo.at("/fixed/detections/1/delayMs").isNull());
+            assertEquals(1350, demo.at("/adaptive/detections/1/delayMs").asInt());
+            assertEquals(950, demo.at("/adaptive/detections/2/delayMs").asInt());
+            for (String name : List.of("fixed", "adaptive")) {
+                var run = demo.path(name);
+                long dwell = 0;
+                for (var channel : run.path("dwellMs")) dwell += channel.asLong();
+                assertEquals(demo.path("durationMs").asLong(),
+                        dwell + run.path("retunes").asLong() * demo.path("simulatedRetuneMs").asLong());
+                assertEquals(140, run.path("capturedFrames").asInt() + run.path("missedFrames").asInt());
+            }
+        }
+    }
+
     @Test void exposesChannelsWhileTheCaptureScannerIsRunningAndKeepsDevicesAfterStop() throws Exception {
         String packet = "1700000000.123456 " + MAC
                 + " > ff:ff:ff:ff:ff:ff, ethertype IPv4 (0x0800), length 128: UDP";
-        var scanner = new AdaptiveScanner(AdaptiveScanner.Config.defaults(13, 128, 71));
+        var scanner = new AdaptiveScanner(AdaptiveScanner.Config.defaults(13, 128, 71), 120);
         var process = new StreamingCaptureProcess();
         var tuned = new StreamingCaptureProcess();
         tuned.finish();
         try (var bridge = new PacketBridge(builder -> builder.command().getFirst().equals("sudo") ? tuned : process,
-                     Map.of("021122", "Lab Vendor"));
+                     Map.of("021122", "Lab Vendor"), new DeviceProfiler(), 50);
              var ble = new BleBridge(bridge.getEventQueue(), bridge.getProfiler());
              var server = new PassiveRfServer(bridge, ble, true).start(0);
              var client = HttpClient.newHttpClient()) {
@@ -78,6 +104,11 @@ class ConsolidatedServerTest {
             assertEquals(200, channels.statusCode());
             var response = mapper.readTree(channels.body());
             Instant.parse(response.path("timestamp").asText());
+            assertEquals(50, response.path("tickMs").asInt());
+            assertEquals(13, response.at("/radio/dwellMs").size());
+            assertTrue(response.at("/radio/coverage").isArray());
+            assertTrue(response.at("/radio/coverage").isEmpty());
+            assertTrue(response.at("/radio/lastObservedChannel").isNull());
             int chosen = response.path("lastChosen").asInt();
             assertTrue(chosen >= 1 && chosen <= 13);
             assertEquals(2407 + chosen * 5, response.path("lastChosenFreqMhz").asInt());

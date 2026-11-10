@@ -130,8 +130,7 @@
   }
 
   function signalCell(value) {
-    const tone = !finite(value) ? '' : value > -60 ? 'green' : value >= -80 ? 'amber-text' : 'red';
-    return element('td', signal(value), 'mono nowrap ' + tone);
+    return element('td', signal(value), 'mono nowrap');
   }
 
   function wifiWithLabels() {
@@ -307,7 +306,7 @@
       const card = element('article', null, 'link-card');
       const title = element('div', null, 'link-card-title');
       title.append(element('strong', name), element('span', assoc ? 'Association observed' : 'Data evidence',
-        'evidence-tag ' + (assoc ? 'green' : 'blue')));
+        'evidence-tag'));
       card.append(title);
       const facts = element('dl', null, 'facts');
       const remaining = link.expiresAt == null ? null : Math.max(0, Math.ceil((link.expiresAt - now) / 1000));
@@ -336,8 +335,8 @@
     const facts = element('dl', null, 'facts');
     const values = [
       ...(item.label ? [['Enrolled name', item.label]] : []),
-      ['MAC / ID', item.id], [item.radio === 'WiFi' ? 'Vendor hint' : 'Vendor', item.vendor],
-      ['Role / class', item.type], [item.radio === 'WiFi' && item.details.id ? 'Median RSSI' : 'RSSI', signal(item.rssi)],
+      ['MAC / ID', item.id, 'mono'], [item.radio === 'WiFi' ? 'Vendor hint' : 'Vendor', item.vendor],
+      ['Role / class', item.type], [item.radio === 'WiFi' && item.details.id ? 'Median RSSI' : 'RSSI', signal(item.rssi), 'mono'],
       ['Distance', item.distance], ['First seen', clock(item.first)], ['Last seen', clock(item.last)], ['Packets / samples', number(item.count)]
     ];
     if (item.radio === 'BLE') {
@@ -356,7 +355,7 @@
       if (finite(wifi.directedProbeCount)) values.push(['Directed / wildcard', wifi.directedProbeCount + ' / ' + wifi.wildcardProbeCount],
         ['WPS UUID-E', wifi.wpsUuidESeen ? 'Observed' : unavailable]);
     }
-    for (const [label, value] of values) facts.append(element('dt', label), element('dd', value ?? unavailable));
+    for (const [label, value, style] of values) facts.append(element('dt', label), element('dd', value ?? unavailable, style));
     detail.replaceChildren(facts);
     if (item.radio === 'WiFi') {
       const advertised = advertisedWifi(item);
@@ -375,7 +374,7 @@
       detail.append(element('h2', label));
       const chips = element('div', null, 'chips');
       if (!tags?.length) chips.append(element('span', '—', 'caption'));
-      for (const value of tags || []) chips.append(element('span', value, 'chip blue'));
+      for (const value of tags || []) chips.append(element('span', value, 'chip'));
       detail.append(chips);
     }
     if (item.radio === 'WiFi' && state.status?.operationsEnabled) {
@@ -639,6 +638,57 @@
     });
   }
 
+  function renderCaptureReadiness(health, scanner, scannerError) {
+    const checks = $('capture-readiness-checks');
+    const row = (label, result, detail, tone = '') => {
+      const item = element('li');
+      item.append(element('strong', label), element('span', result, tone), element('p', detail, 'caption'));
+      return item;
+    };
+    if (health?.mode !== 'passive-rf' || !health.running) {
+      const status = health?.mode === 'replay' ? 'Offline replay' : 'Live passive capture needed';
+      checks.replaceChildren(row('Capture', status, 'Start a live passive Wi-Fi session to check the adapter and reception.'));
+      return;
+    }
+
+    const radio = health.radio;
+    const source = health.source || 'Selected adapter';
+    const mode = !radio || !finite(radio.sampledAt) || Date.now() - radio.sampledAt > 15000
+      ? row('Adapter mode', 'Awaiting a current radio check', source, 'amber-text')
+      : radio.interfaceType === 'monitor'
+        ? row('Adapter mode', 'Monitor mode', source, 'green')
+        : row('Adapter mode', radio.interfaceType || 'Unknown mode', source + ' needs monitor mode.', 'amber-text');
+
+    const age = health.sinceLastFrameMs;
+    const frames = age == null
+      ? row('Frame reception', 'Waiting for the first frame', 'Check the lab AP and receiver channel.', 'amber-text')
+      : row('Frame reception', age < 10000 ? 'Frames arriving' : 'Capture quiet',
+        'Last frame ' + (age / 1000).toFixed(1) + ' s ago · ' + number(health.decoded) + ' decoded',
+        age < 10000 ? 'green' : 'amber-text');
+
+    const telemetry = scanner?.radio;
+    const tuned = (telemetry?.coverage || []).filter(entry => entry.lastTuneAtMs != null);
+    const verified = tuned.filter(entry => entry.lastFrameWhileTunedAtMs != null).map(entry => entry.channel);
+    let afterTune;
+    if (scannerError) {
+      afterTune = row('Reception after tune', 'Status unavailable', scannerError, 'amber-text');
+    } else if (!scanner) {
+      afterTune = row('Reception after tune', 'Fixed-channel capture', 'Use passive adaptive capture to check reception after automatic tunes.');
+    } else if (!telemetry?.coverage?.length) {
+      afterTune = row('Reception after tune', 'Coverage unavailable', 'Open this view during a live passive adaptive run.');
+    } else if (!tuned.length) {
+      afterTune = row('Reception after tune', 'Waiting for a successful tune',
+        number(telemetry.failedRetunes) + ' failed tune commands in this session.', 'amber-text');
+    } else if (!verified.length) {
+      afterTune = row('Reception after tune', 'No reception verified yet',
+        tuned.length + ' channels tuned. Check Spectrum for frame activity on those channels.', 'amber-text');
+    } else {
+      afterTune = row('Reception after tune', 'Verified on ' + verified.length + ' of ' + tuned.length + ' tuned channels',
+        'Channels ' + verified.join(', ') + ' received frames after tuning during this session.', 'green');
+    }
+    checks.replaceChildren(mode, frames, afterTune);
+  }
+
   function renderCaptureHealth(health, error = '') {
     const metrics = $('health-metrics');
     const banner = $('health-error');
@@ -691,8 +741,20 @@
 
   async function refreshCaptureHealth() {
     return once('capture-health', async () => {
-      try { renderCaptureHealth(await api('/api/capture-health', undefined, 503)); }
-      catch (error) { renderCaptureHealth(null, error.message); }
+      let health;
+      try { health = await api('/api/capture-health', undefined, 503); }
+      catch (error) {
+        renderCaptureHealth(null, error.message);
+        renderCaptureReadiness(null);
+        return;
+      }
+      renderCaptureHealth(health);
+      let scanner, scannerError;
+      if (health?.mode === 'passive-rf' && health.running) {
+        try { scanner = await api('/api/channels', undefined, 503); }
+        catch (error) { scannerError = error.message; }
+      }
+      renderCaptureReadiness(health, scanner, scannerError);
     });
   }
 
@@ -727,7 +789,7 @@
     }
     values.forEach((value, index) => {
       const height = 118 * value / max;
-      const bar = make('rect', { x: 36 + index * 23, y: 143 - height, width: 16, height, rx: 2, fill: 'var(--accent-blue)' });
+      const bar = make('rect', { x: 36 + index * 23, y: 143 - height, width: 16, height, rx: 2, fill: 'var(--text-secondary)' });
       bar.append(make('title', {}, value + ' probes'));
       items.push(bar);
     });
@@ -747,7 +809,7 @@
     ].filter(Boolean).join('  ·  ') : '';
     $('probe-visibility').textContent = corpus.some(entry => entry.name) ? 'SSID names enabled' : 'Session-scoped SSID tokens';
     $('ssid-rows').replaceChildren(...corpus.map(entry => row([
-      element('td', display(entry), 'mono blue'), entry.deviceCount ?? unavailable,
+      element('td', display(entry), 'mono'), entry.deviceCount ?? unavailable,
       clock(entry.firstSeen), clock(entry.lastSeen), isp(entry.name)
     ], () => { state.ssid = state.ssid === entry.id ? null : entry.id; renderAudit(); }, entry.id === selected?.id)));
     blank('ssid-empty', !corpus.length, audit ? '⊞ No directed probes in the audit window' : '⊞ Wi-Fi probe audit unavailable');
@@ -797,8 +859,8 @@
   function renderTargetChips() {
     const client = $('client-target').value, ap = selectedAp();
     const chips = [];
-    if (ap) chips.push(element('span', ap.ssid || ap.bssid, 'chip blue'));
-    if (client) chips.push(element('span', client, 'chip green mono'));
+    if (ap) chips.push(element('span', ap.ssid || ap.bssid, 'chip'));
+    if (client) chips.push(element('span', client, 'chip mono'));
     $('target-chips').replaceChildren(...chips);
   }
 
@@ -1053,7 +1115,17 @@
       add.addEventListener('click', () => openNetwork(ap.token));
       const action = element('td');
       action.append(add);
-      return row([ap.caption, ap.channel || unavailable, signalCell(ap.rssi), clock(ap.lastSeen), action]);
+      const entry = row([ap.caption, ap.channel || unavailable, signalCell(ap.rssi), clock(ap.lastSeen), action]);
+      entry.setAttribute('role', 'row');
+      for (const cell of entry.cells) cell.setAttribute('role', 'cell');
+      const [name, channel, signalReading, seen] = entry.cells;
+      name.classList.add('nearby-name');
+      for (const [cell, label] of [[channel, 'Channel'], [signalReading, 'Signal'], [seen, 'Last seen']]) {
+        const caption = element('span', label, 'nearby-field caption');
+        caption.setAttribute('aria-hidden', 'true');
+        cell.prepend(caption);
+      }
+      return entry;
     }));
     blank('nearby-empty', !aps.length, '⌁ No nearby access points heard recently');
     const matches = state.summary?.registryMatches || [];
@@ -1236,7 +1308,7 @@
     if (name === 'nearby') { renderNearby(); refreshMyNetwork(); refreshInventory(); }
     if (name === 'map') { renderMap(); refreshTopology(); refreshInventory(); }
     if (name === 'health') refreshCaptureHealth();
-    if (name === 'spectrum') refreshSpectrum();
+    if (name === 'spectrum') { refreshSpectrum(); window.EwaveApWatch.refresh(); }
     if (name === 'probe') { refreshAudit(); refreshInventory(); }
     if (name === 'ops') refreshTargets();
   }
@@ -1275,6 +1347,7 @@
   setInterval(() => { if (['intel', 'map'].includes(state.view)) refreshTopology(); if (state.view === 'probe') refreshAudit(); }, 5000);
   setInterval(() => {
     if (state.view === 'health') refreshCaptureHealth();
+    if (state.view === 'spectrum') window.EwaveApWatch.refresh();
     if (state.view === 'spectrum' || state.status?.wifi?.captureMode === 'packets') refreshSpectrum();
   }, 2000);
   setInterval(tickUptime, 1000);

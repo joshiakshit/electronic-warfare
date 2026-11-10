@@ -56,8 +56,43 @@ class PassiveRfCaptureTest {
             assertEquals(1, mapper.readTree(get(client, server, "/api/inventory").body()).size());
             var channels = mapper.readTree(get(client, server, "/api/channels").body());
             assertEquals(13, channels.path("channels").size());
+            assertEquals(6, channels.at("/radio/lastObservedChannel").asInt());
+            var coverage = channels.at("/radio/coverage");
+            assertEquals(13, coverage.size());
+            assertEquals(6, coverage.at("/5/channel").asInt());
+            assertTrue(coverage.at("/5/lastFrameAtMs").isNumber());
+            assertTrue(coverage.at("/5/lastTuneAtMs").isNull());
+            assertTrue(coverage.at("/5/lastFrameWhileTunedAtMs").isNull());
+            assertTrue(coverage.at("/0/lastFrameAtMs").isNull());
             assertEquals(1, channels.path("counts").get(5).asInt());
             assertEquals(0, channels.path("counts").get(0).asInt());
+
+            tune.finish();
+            await(() -> wifi.getChannelSnapshot().radio().successfulRetunes() > 0);
+            var tuned = mapper.readTree(get(client, server, "/api/channels").body());
+            assertTrue(tuned.at("/radio/lastConfirmedChannel").isIntegralNumber());
+            assertTrue(tuned.at("/radio/meanRetuneMs").asDouble() >= 0);
+            int confirmed = tuned.at("/radio/lastConfirmedChannel").asInt();
+            var confirmedCoverage = tuned.at("/radio/coverage").get(confirmed - 1);
+            assertTrue(confirmedCoverage.path("lastTuneAtMs").isNumber());
+            if (confirmed != 6) assertTrue(confirmedCoverage.path("lastFrameAtMs").isNull());
+            assertEquals(coverage.at("/5/lastFrameAtMs"), tuned.at("/radio/coverage/5/lastFrameAtMs"));
+            assertTrue(confirmedCoverage.path("lastFrameWhileTunedAtMs").isNull());
+
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+            var radio = wifi.getChannelSnapshot().radio();
+            while (radio.coverage().stream().noneMatch(entry -> entry.lastFrameWhileTunedAtMs() != null)
+                    && System.nanoTime() < deadline) {
+                int listenChannel = radio.lastConfirmedChannel();
+                byte[] frame = ProbeFrames.radiotap(ProbeFrames.frame("Fixture"));
+                ByteBuffer.wrap(frame).order(ByteOrder.LITTLE_ENDIAN)
+                        .putShort(8, PacketBridge.channelFrequencyMhz(listenChannel).shortValue());
+                byte[] more = timedPcap(frame, true);
+                capture.write(java.util.Arrays.copyOfRange(more, 24, more.length));
+                Thread.sleep(20);
+                radio = wifi.getChannelSnapshot().radio();
+            }
+            assertTrue(radio.coverage().stream().anyMatch(entry -> entry.lastFrameWhileTunedAtMs() != null));
         }
     }
 
@@ -108,6 +143,59 @@ class PassiveRfCaptureTest {
             assertTrue(wifi.getProfiler().all().isEmpty());
             assertTrue(ble.getAdvertisements().isEmpty());
         }
+    }
+
+    @Test void watchesAnObservedAccessPointThroughThePassiveHttpApi() throws Exception {
+        var process = new StreamingCaptureProcess();
+        try (var wifi = new PacketBridge(builder -> process, Map.of());
+             var ble = new BleBridge(wifi.getEventQueue(), wifi.getProfiler());
+             var server = new PassiveRfServer(wifi, ble).start(0);
+             var client = HttpClient.newHttpClient()) {
+            String endpoint = "/api/channels/watch";
+            String bssid = "00:11:22:33:44:55";
+            String body = "{\"apId\":\"%s\"}";
+            assertEquals(409, post(client, server, endpoint, body.formatted("unknown")).statusCode());
+
+            wifi.startPassive("lab0mon");
+            byte[] channelSix = beacon("001122334455", "Fixture Lab");
+            byte[] channelOne = channelSix.clone();
+            ByteBuffer.wrap(channelOne).order(ByteOrder.LITTLE_ENDIAN).putShort(8, (short) 2412);
+            process.write(timedPcap(channelSix));
+            String token = wifi.getPassiveWifi().addressId(bssid);
+            await(() -> wifi.getPassiveWifi().observedBssid(token) != null);
+            assertEquals(400, post(client, server, endpoint, body.formatted("unknown")).statusCode());
+            var started = post(client, server, endpoint, body.formatted(token));
+            assertEquals(200, started.statusCode(), started.body());
+            assertFalse(started.body().contains(bssid));
+            assertEquals(409, post(client, server, endpoint, body.formatted(token)).statusCode());
+
+            byte[] initial = timedPcap(channelSix);
+            process.write(java.util.Arrays.copyOfRange(initial, 24, initial.length));
+            await(() -> wifi.apWatchState().run().lastHeard() != null);
+            Thread.sleep(5);
+            byte[] moved = timedPcap(channelOne);
+            process.write(java.util.Arrays.copyOfRange(moved, 24, moved.length));
+            await(() -> wifi.apWatchState().run().heardAgain() != null);
+
+            var response = get(client, server, endpoint);
+            var report = new ObjectMapper().readTree(response.body());
+            assertFalse(response.body().contains(bssid));
+            assertEquals(token, report.at("/run/apId").asText());
+            assertEquals(6, report.at("/run/lastHeard/channel").asInt());
+            assertEquals(1, report.at("/run/heardAgain/channel").asInt());
+            assertTrue(report.at("/run/tuned").isNull());
+            assertTrue(report.at("/run/endedAt").isNumber());
+        }
+    }
+
+    private static byte[] timedPcap(byte[] packet) { return timedPcap(packet, false); }
+
+    private static byte[] timedPcap(byte[] packet, boolean nanos) {
+        long now = System.currentTimeMillis();
+        byte[] pcap = ProbeFrames.pcap(ByteOrder.LITTLE_ENDIAN, nanos, 127, packet);
+        ByteBuffer.wrap(pcap).order(ByteOrder.LITTLE_ENDIAN)
+                .putInt(24, (int) (now / 1000)).putInt(28, (int) (now % 1000) * (nanos ? 1_000_000 : 1_000));
+        return pcap;
     }
 
     @Test void enrollsObservedApAndPinsDeviceWithoutExposingAddresses(@TempDir Path temp) throws Exception {

@@ -12,6 +12,7 @@ import ewave.active.LanScanner;
 import ewave.active.WifiAccessPoints;
 import ewave.capture.PacketBridge;
 import ewave.capture.BleBridge;
+import ewave.core.ScannerDemo;
 import ewave.model.EwaveEvent;
 import ewave.passive.TopologyBuilder;
 import ewave.passive.MyNetworkProfile;
@@ -45,6 +46,7 @@ import java.util.regex.Pattern;
 public final class PassiveRfServer implements AutoCloseable {
     public static final int PORT = 7070;
     private static final System.Logger LOG = System.getLogger(PassiveRfServer.class.getName());
+    private static final ScannerDemo.Comparison SCANNER_DEMO = ScannerDemo.compare();
     private static final Pattern MAC = Pattern.compile("(?i)(?:[0-9a-f]{2}:){5}[0-9a-f]{2}");
 
     private final ObjectMapper mapper = new ObjectMapper()
@@ -228,6 +230,27 @@ public final class PassiveRfServer implements AutoCloseable {
             var session = ble.getPassiveBle();
             if (session == null) unavailable(ctx, "BLE"); else ctx.json(session.snapshot());
         });
+        app.get("/api/channels/watch", ctx -> ctx.json(wifi.apWatchState()));
+        app.post("/api/channels/watch", ctx -> {
+            try {
+                var body = mapper.readTree(ctx.body());
+                var ap = body == null ? null : body.get("apId");
+                if (ap == null || !ap.isTextual()) throw new IllegalArgumentException("Choose an access point.");
+                ctx.json(wifi.startApWatch(ap.textValue()));
+            } catch (JsonProcessingException | IllegalArgumentException invalid) {
+                ctx.status(400).json(Map.of("error", Objects.toString(invalid.getMessage(), "Invalid watch request.")));
+            } catch (IllegalStateException unavailable) {
+                ctx.status(409).json(Map.of("error", unavailable.getMessage()));
+            }
+        });
+        app.delete("/api/channels/watch/{id}", ctx -> {
+            try {
+                ctx.json(wifi.stopApWatch(UUID.fromString(ctx.pathParam("id"))));
+            } catch (IllegalArgumentException invalid) {
+                ctx.status(400).json(Map.of("error", "The watch run has changed."));
+            }
+        });
+        app.get("/api/channels/demo", ctx -> ctx.json(SCANNER_DEMO));
         app.get("/api/channels", ctx -> {
             var state = wifi.getChannelSnapshot();
             if (state == null) {
@@ -273,6 +296,8 @@ public final class PassiveRfServer implements AutoCloseable {
 
         // Preserve the score arrays consumed by the bundled spectrum dashboard.
         ObjectNode response = mapper.valueToTree(snapshot);
+        response.put("tickMs", wifi.getTickMs());
+        response.set("radio", mapper.valueToTree(state.radio()));
         response.put("activeChannel", state.activeChannel());
         response.put("lastChosen", state.lastChosen());
         response.put("lastChosenFreqMhz", state.lastChosen() == null ? null

@@ -52,6 +52,7 @@ public final class CaptureHealth {
     }
 
     void updateRadio(RadioStatus.Settings value) { radio = value; }
+    int observedChannel() { return Dot11FrameDecoder.channel(observedFrequencyMhz); }
     boolean hasFrames() { return lastPacketAt != null; }
 
     boolean diagnostics(String line, long now) {
@@ -78,7 +79,7 @@ public final class CaptureHealth {
         }
         return new Report(mode, source, running, replayState, error, referenceTime, lastPacketAt,
                 lastReceivedAt == null || referenceTime != null ? null : Math.max(0, now - lastReceivedAt),
-                radio, observedFrequencyMhz, Dot11FrameDecoder.channel(observedFrequencyMhz), WINDOW_SECONDS,
+                radio, observedFrequencyMhz, observedChannel(), WINDOW_SECONDS,
                 Map.copyOf(counts), Map.copyOf(rates), decoded, rejected, unsupported, truncated, kernelDrops, dropStatsAt);
     }
 }

@@ -2,11 +2,18 @@ package ewave.core;
 
 import java.time.Instant;
 
-/** A binary occupancy baseline over the 60 preceding valid observations. */
+/** A binary occupancy baseline over the preceding valid observations. */
 final class AnomalyDetector {
-    private final boolean[] history = new boolean[60];
+    private final boolean[] history;
     private int cursor, size, hits;
     private AdaptiveScanner.AnomalyFlag active;
+
+    AnomalyDetector() { this(60); }
+
+    AnomalyDetector(int historySize) {
+        if (historySize < 10) throw new IllegalArgumentException("historySize must be >= 10");
+        history = new boolean[historySize];
+    }
 
     void observe(int channel, boolean detection, int previousPeriod, int period) {
         double mean = size == 0 ? 0 : hits / (double) size;

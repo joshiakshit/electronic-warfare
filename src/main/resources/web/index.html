@@ -7,19 +7,20 @@
   <link rel="stylesheet" href="/ewave.css">
   <script src="/graph.js" defer></script>
   <script src="/spectrum.js" defer></script>
+  <script src="/ap-watch.js" defer></script>
   <script src="/ewave.js" defer></script>
 </head>
 <body>
 <aside class="sidebar">
   <div class="brand">ewave</div>
   <nav aria-label="Console">
-    <button class="nav active" data-view="intel" aria-current="page"><span>◉</span> INTEL</button>
-    <button class="nav" data-view="nearby"><span>⌁</span> NEARBY</button>
-    <button class="nav" data-view="map"><span>◎</span> MAP</button>
-    <button class="nav" data-view="health"><span>◈</span> CAPTURE HEALTH</button>
-    <button class="nav" data-view="spectrum"><span>≋</span> SPECTRUM</button>
-    <button class="nav" data-view="probe"><span>⊞</span> PROBE LAB</button>
-    <button class="nav" data-view="ops"><span>⚡</span> OPS</button>
+    <button class="nav active" data-view="intel" aria-current="page"><span aria-hidden="true">◉</span> Intel</button>
+    <button class="nav" data-view="nearby"><span aria-hidden="true">⌁</span> Nearby</button>
+    <button class="nav" data-view="map"><span aria-hidden="true">◎</span> Map</button>
+    <button class="nav" data-view="health"><span aria-hidden="true">◈</span> Capture health</button>
+    <button class="nav" data-view="spectrum"><span aria-hidden="true">≋</span> Spectrum</button>
+    <button class="nav" data-view="probe"><span aria-hidden="true">⊞</span> Probe Lab</button>
+    <button class="nav" data-view="ops"><span aria-hidden="true">↯</span> Ops</button>
   </nav>
   <div class="sidebar-status">
     <div><b>WiFi</b><i id="wifi-dot" class="dot"></i><span id="wifi-status">Connecting</span></div>
@@ -57,7 +58,7 @@
           <input id="search" type="search" placeholder="Search devices" aria-label="Search devices">
         </div>
         <p id="feed-summary" class="feed-summary caption" hidden></p>
-        <div class="table-wrap feed">
+        <div class="table-wrap feed" tabindex="0" role="region" aria-label="Device feed">
           <table><thead><tr><th>Vendor</th><th>Type</th><th>MAC / ID</th><th>RSSI</th><th>Dist</th><th>First seen</th><th>Pkts</th></tr></thead>
           <tbody id="device-rows"></tbody></table>
           <p id="feed-empty" class="empty loading">◉ Loading inventory</p>
@@ -104,9 +105,11 @@
     <article class="panel">
       <header><h2>Observed access points outside My Network</h2><button id="all-observations">Browse retained addresses</button></header>
       <p class="feed-summary caption">Recent AP advertisements on the tuned channel. Capture scope controls which clients enter the inventory.</p>
-      <div class="table-wrap corpus">
-        <table><thead><tr><th>Access point</th><th>Channel</th><th>RSSI</th><th>Last seen</th><th></th></tr></thead>
-          <tbody id="nearby-rows"></tbody></table>
+      <div class="table-wrap corpus nearby-list">
+        <table role="table" aria-label="Nearby access points">
+          <thead role="rowgroup"><tr role="row"><th role="columnheader">Access point</th><th role="columnheader">Channel</th><th role="columnheader">RSSI</th><th role="columnheader">Last seen</th><th role="columnheader" aria-label="Action"></th></tr></thead>
+          <tbody id="nearby-rows" role="rowgroup"></tbody>
+        </table>
         <p id="nearby-empty" class="empty loading">⌁ Loading nearby access points</p>
       </div>
     </article>
@@ -139,13 +142,25 @@
       <button id="more-map-aps" class="map-more" hidden>Show more APs</button>
       <p id="map-selection" class="caption map-selection" aria-live="polite">Select a node to see its details.</p>
       <div id="map-evidence" class="map-evidence" hidden></div>
-      <div class="legend"><span class="blue">● AP</span><span class="green">● Phone</span><span class="amber-text">● Laptop</span><span>● Unknown / unassociated</span></div>
+      <div class="legend">
+        <span><b aria-hidden="true">■</b> Access point</span>
+        <span><b aria-hidden="true">◆</b> Phone / tablet</span>
+        <span><b aria-hidden="true">▲</b> Laptop / computer</span>
+        <span><b aria-hidden="true">✦</b> Bluetooth tag</span>
+        <span><b aria-hidden="true">●</b> Other Wi-Fi</span>
+      </div>
     </article>
   </section>
 
   <section id="health" class="view" hidden>
-    <div class="title-row"><h1>Capture Health</h1><span id="health-status" class="caption" role="status">Loading capture health</span></div>
+    <div class="title-row"><h1>Capture health</h1><span id="health-status" class="caption" role="status">Loading capture health</span></div>
     <p id="health-error" class="banner amber" role="status" hidden></p>
+    <article class="panel capture-readiness">
+      <header><h2>Capture readiness</h2><span class="caption">Live Wi-Fi</span></header>
+      <ul id="capture-readiness-checks" class="body readiness-checks">
+        <li class="caption">Waiting for capture status…</li>
+      </ul>
+    </article>
     <div id="health-metrics" hidden>
       <div class="stats" aria-label="Capture health totals">
         <div class="panel"><span>Frames received</span><strong id="health-total">—</strong></div>
@@ -160,8 +175,8 @@
         </article>
         <article class="panel">
           <header><h2>Frame breakdown</h2><span id="health-window" class="caption"></span></header>
-          <table><thead><tr><th>Frame type</th><th>Count</th><th>Frames / sec</th></tr></thead>
-            <tbody id="health-frames"></tbody></table>
+          <div class="table-wrap"><table><thead><tr><th>Frame type</th><th>Count</th><th>Frames / sec</th></tr></thead>
+            <tbody id="health-frames"></tbody></table></div>
           <div class="body"><dl id="health-decoder" class="facts"></dl>
             <p class="caption">Live capture filters for management and data. Replay counts every frame type present in the file.</p></div>
         </article>
@@ -178,10 +193,72 @@
 
   <section id="spectrum" class="view" hidden>
     <div class="title-row"><h1>Spectrum</h1><span id="spectrum-updated" class="caption"></span></div>
+    <article class="panel spectrum-demo">
+      <header><h2>Watch an access point</h2><span class="caption">Live passive capture · 2.4 GHz</span></header>
+      <div class="body stack">
+        <p id="ap-watch-status" class="caption" role="status">Checking live capture…</p>
+        <form id="ap-watch-find" class="controls">
+          <label>Exact Wi-Fi name <input type="search" id="ap-watch-name" placeholder="ewave-lab" required></label>
+          <button type="submit">Find access point</button>
+        </form>
+        <form id="ap-watch-start" class="controls">
+          <label>Observed AP <select id="ap-watch-choice" required><option value="">Select an access point</option></select></label>
+          <button type="submit" class="primary">Start watch</button>
+          <button type="button" id="ap-watch-stop" hidden>Stop watch</button>
+          <button type="button" id="ap-watch-save" hidden>Save run</button>
+        </form>
+        <ol id="ap-watch-timeline" class="watch-timeline" hidden></ol>
+        <p id="ap-watch-gap" class="caption" hidden></p>
+        <div id="ap-watch-saved" class="stack" hidden>
+          <h3>Saved runs on this browser</h3>
+          <div class="table-wrap" tabindex="0" role="region" aria-label="Saved access point watch runs">
+            <table><thead><tr><th scope="col">Access point</th><th scope="col">Mode</th><th scope="col">Observed move</th><th scope="col">Observation gap</th></tr></thead>
+              <tbody id="ap-watch-saved-rows"></tbody></table>
+          </div>
+        </div>
+      </div>
+    </article>
+    <article class="panel spectrum-demo">
+      <header><h2>Adaptive scanner demo</h2><button type="button" id="run-scanner-demo">Run comparison</button></header>
+      <div class="body stack">
+        <p id="scanner-demo-status" class="caption" role="status">Compare adaptive scanning with a fixed channel using the same scripted RF activity.</p>
+        <div id="scanner-demo-results" class="stack" hidden>
+          <div class="table-wrap" tabindex="0" role="region" aria-label="Comparison totals">
+            <table><thead><tr><th scope="col">Metric</th><th scope="col">Adaptive</th><th scope="col">Fixed</th></tr></thead><tbody id="scanner-demo-totals"></tbody></table>
+          </div>
+          <div class="table-wrap" tabindex="0" role="region" aria-label="Time to first captured frame">
+            <table><thead><tr><th scope="col">Scripted activity</th><th scope="col">Adaptive detection</th><th scope="col">Fixed detection</th></tr></thead><tbody id="scanner-demo-events"></tbody></table>
+          </div>
+          <h3>Listening time by channel</h3>
+          <div class="scanner-dwell" id="scanner-demo-dwell"></div>
+          <p class="caption">Detection is measured from burst onset to the first captured fixture frame. Misses are counted against every scripted frame, including frames sent while retuning.</p>
+        </div>
+      </div>
+    </article>
     <article class="panel spectrum-top">
       <header><h2>Channel scores</h2><span class="caption">2.4 GHz · channels 1–13</span></header>
       <p id="spectrum-empty" class="empty loading">≋ Loading scanner snapshot</p>
-      <div id="channel-chart" hidden><div id="coupled" class="coupled"></div><div id="channel-bars" class="channel-bars"></div></div>
+      <div id="scanner-radio" class="body stack" hidden>
+        <dl class="facts" id="scanner-radio-facts"></dl>
+        <div id="scanner-coverage" hidden>
+          <h3>Channel coverage</h3>
+          <p class="caption">Tune times record successful radio commands. Frame times use the reported receive frequency. Reception is confirmed when a frame arrives while tuned to that channel.</p>
+          <div class="table-wrap coverage-table" tabindex="0" role="region" aria-label="Live channel coverage">
+            <table><thead><tr><th scope="col">Channel</th><th scope="col">Listening time</th><th scope="col">Last confirmed tune</th><th scope="col">Last decoded frame</th><th scope="col">Reception since tune</th></tr></thead>
+              <tbody id="scanner-coverage-rows"></tbody></table>
+          </div>
+        </div>
+        <div id="scanner-radio-dwell-panel">
+          <h3>Command-confirmed listening time</h3>
+          <p class="caption">Excludes tuning time and intervals with no confirmed channel.</p>
+          <div class="scanner-dwell" id="scanner-radio-dwell"></div>
+        </div>
+        <div>
+          <h3>Current alerts</h3>
+          <ul class="scanner-alerts" id="scanner-alerts"></ul>
+        </div>
+      </div>
+      <div id="channel-chart" tabindex="0" role="region" aria-label="Channel scores" hidden><p class="caption channel-scroll-note">Scroll sideways to see all 13 channels.</p><div id="coupled" class="coupled"></div><div id="channel-bars" class="channel-bars"></div></div>
     </article>
     <div class="two-col">
       <article class="panel">
@@ -190,7 +267,7 @@
         <p id="period-empty" class="empty">≋ No fitted channels</p>
       </article>
       <article class="panel">
-        <header><h2>Phase Occupancy — last 60s</h2></header>
+        <header><h2>Phase occupancy</h2><span class="caption">Last 60 seconds</span></header>
         <div id="heatmap" aria-label="Phase occupancy by channel and two-second bucket"></div>
       </article>
     </div>
@@ -213,7 +290,9 @@
       </article>
       <article class="panel">
         <header><h2>Probe timeline</h2><span class="caption">Last 10 min · 30 s buckets</span></header>
-        <svg id="probe-timeline" viewBox="0 0 520 175" role="img" aria-label="Probe count over time"></svg>
+        <div class="table-wrap" tabindex="0" role="region" aria-label="Probe timeline">
+          <svg id="probe-timeline" viewBox="0 0 520 175" role="img" aria-label="Probe count over time"></svg>
+        </div>
       </article>
     </div>
   </section>

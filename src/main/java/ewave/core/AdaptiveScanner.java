@@ -60,10 +60,16 @@ public final class AdaptiveScanner {
     private long latestTick;
     private final long[] feedbackTicks;
     private final AnomalyDetector[] anomalyDetectors;
+    private final int anomalyHistorySize;
     private final PeriodFit.History[] fitEvidence;
     private final double[] fitConfidence;
     private final long[] observationsSinceConfidence;
     public AdaptiveScanner(Config config) {
+        this(config, 60);
+    }
+
+    public AdaptiveScanner(Config config, int anomalyHistorySize) {
+        this.anomalyHistorySize = anomalyHistorySize;
         this.config = Objects.requireNonNull(config);
         feedbackTicks = new long[config.bands()];
         anomalyDetectors = new AnomalyDetector[config.bands()];
@@ -76,7 +82,7 @@ public final class AdaptiveScanner {
     public void reset() {
         model = new PhaseModel(config); random = new Random(config.seed()); latestTick = -1;
         Arrays.fill(feedbackTicks,-1);
-        Arrays.setAll(anomalyDetectors, band -> new AnomalyDetector());
+        Arrays.setAll(anomalyDetectors, band -> new AnomalyDetector(anomalyHistorySize));
         Arrays.setAll(fitEvidence, band -> new PeriodFit.History(config.capacity()));
         Arrays.fill(fitConfidence, 0);
         Arrays.fill(observationsSinceConfidence, 0);

@@ -17,6 +17,7 @@ public final class Ewave {
         String iface = "wlo1";
         int port = 7070;
         int bands = 13;
+        int tickMs = PacketBridge.DEFAULT_TICK_MS;
         boolean probes = false;
         boolean ble = false;
         boolean passiveRf = false;
@@ -27,9 +28,10 @@ public final class Ewave {
         for (int i = 0; i < args.length; i++) {
             String option = args[i];
             if (option.equals("--help")) {
-                System.out.println("Usage: java -jar ewave-0.1.0-SNAPSHOT.jar [--iface INTERFACE] [--port PORT] [--bands BANDS] [--passive-rf] [--adaptive] [--ops] [--probes] [--ble] [--hci INDEX] [--replay FILE]");
+                System.out.println("Usage: java -jar ewave-0.1.0-SNAPSHOT.jar [--iface INTERFACE] [--port PORT] [--bands BANDS] [--tick-ms MS] [--passive-rf] [--adaptive] [--ops] [--probes] [--ble] [--hci INDEX] [--replay FILE]");
                 System.out.println("--passive-rf: privacy-filtered reports on loopback. Wi-Fi by default, --ble for BLE only, --probes --ble for both.");
                 System.out.println("--adaptive: combine channel hopping and Spectrum with --passive-rf on a prepared monitor interface.");
+                System.out.println("--tick-ms MS: scanner tick (default 100, range 10..2000). Anomaly history covers at least six seconds of valid observations.");
                 System.out.println("--ops: enable the local lab operations when using --passive-rf.");
                 System.out.println("--probes: passively decode Wi-Fi probe requests on a prepared monitor-mode interface.");
                 System.out.println("--ble: passive BLE advertisements (Python 3/Linux); --hci selects the adapter (default 0).");
@@ -45,7 +47,7 @@ public final class Ewave {
             if (option.equals("--adaptive")) { adaptive = true; continue; }
             if (option.equals("--ops")) { ops = true; continue; }
             if (option.equals("--ble")) { ble = true; continue; }
-            if (!option.equals("--iface") && !option.equals("--port") && !option.equals("--bands") && !option.equals("--hci") && !option.equals("--replay")) {
+            if (!option.equals("--iface") && !option.equals("--port") && !option.equals("--bands") && !option.equals("--hci") && !option.equals("--replay") && !option.equals("--tick-ms")) {
                 throw new IllegalArgumentException("Unknown option: " + option);
             }
             if (++i == args.length || args[i].startsWith("--")) {
@@ -54,6 +56,7 @@ public final class Ewave {
             switch (option) {
                 case "--iface" -> iface = args[i];
                 case "--port" -> port = Integer.parseInt(args[i]);
+                case "--tick-ms" -> tickMs = Integer.parseInt(args[i]);
                 case "--bands" -> bands = Integer.parseInt(args[i]);
                 case "--hci" -> hci = Integer.parseInt(args[i]);
                 case "--replay" -> replay = Path.of(args[i]);
@@ -71,7 +74,7 @@ public final class Ewave {
         if (adaptive && (!passiveRf || !monitor || replay != null || ops))
             throw new IllegalArgumentException("--adaptive requires passive Wi-Fi capture without --ops or --replay");
         var shutdown = new CountDownLatch(1);
-        try (var bridge = new PacketBridge(); var bluetooth = new BleBridge(bridge.getEventQueue(), bridge.getProfiler());
+        try (var bridge = new PacketBridge(tickMs); var bluetooth = new BleBridge(bridge.getEventQueue(), bridge.getProfiler());
              var server = new PassiveRfServer(bridge, bluetooth, operations)) {
             Thread hook = new Thread(() -> {
                 try {
@@ -82,10 +85,11 @@ public final class Ewave {
             }, "ewave-shutdown");
             Runtime.getRuntime().addShutdownHook(hook);
             try {
+                int anomalyHistory = Math.max(60, Math.ceilDiv(6000, tickMs));
                 if (replay != null) bridge.startReplay(replay);
                 else if (monitor) bridge.startPassive(iface, operations,
-                        adaptive ? new AdaptiveScanner(AdaptiveScanner.Config.defaults(bands, 2048, 42L)) : null);
-                else if (!ble) bridge.start(iface, new AdaptiveScanner(AdaptiveScanner.Config.defaults(bands, 2048, 42L)));
+                        adaptive ? new AdaptiveScanner(AdaptiveScanner.Config.defaults(bands, 2048, 42L), anomalyHistory) : null);
+                else if (!ble) bridge.start(iface, new AdaptiveScanner(AdaptiveScanner.Config.defaults(bands, 2048, 42L), anomalyHistory));
                 if (ble) bluetooth.startPassive(hci);
                 server.start(port);
                 System.out.println("ewave running on http://127.0.0.1:" + server.port());

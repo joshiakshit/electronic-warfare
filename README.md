@@ -28,6 +28,62 @@ java -jar target/ewave-0.1.0-SNAPSHOT.jar \
 Open the loopback URL printed at startup. Replay processes four probe requests
 and leaves the dashboard available for inspection. Press Ctrl+C to stop it.
 
+## Adaptive scanner demo
+
+Open **Spectrum** and select **Run comparison**. This works in offline replay
+with the bundled JAR. Both policies start on channel 6 and receive the same
+12-second scripted scenario, with frame bursts on channels 6, 11, and 1.
+The adaptive run uses the scanner's scoring model with a fixed seed and a
+simulated 25 ms channel-change delay. The fixed run stays on channel 6.
+Compare the first captured frame per burst, listening time, and missed frames.
+The missed-frame counts come from the fixture's known transmissions.
+
+### Repeat the comparison on a lab radio
+
+Before each run, check **Capture health → Capture readiness** for the adapter
+mode and recent frame reception. In adaptive mode it also shows which channels
+have received a frame while tuned there after a successful tune in this session.
+
+Use an isolated C20 and a prepared monitor interface. Manage the router over
+Ethernet so changing its 2.4 GHz channel does not disconnect the control
+session. Use a dedicated lab SSID and confirm you can identify the router's
+beacons. Keep the monitor and router in the same positions between trials.
+
+1. Start the fixed trial with the monitor tuned to channel 6. Run
+   `java -jar target/ewave-0.1.0-SNAPSHOT.jar --passive-rf --iface wlo1 --port 0`
+   and check the channel in **Capture health**. Change the C20 from 6 to 11
+   and then to 1, recording when its beacons start on each channel.
+2. Return the C20 to channel 6. Repeat the same sequence and dwell durations
+   with `--passive-rf --adaptive --iface wlo1 --port 0`. In **Spectrum**,
+   compare the requested channel, the successful tune command, and the
+   channel reported by the most recent received frame. Record successful
+   command times and listening time by channel. Repeat both trials to
+   account for channel-change timing variation.
+3. For per-burst detection latency, record the first C20 beacon observed
+   on each channel and compare it with a timestamped reference capture of
+   the burst onset. Use a separate receiver or transmitter-side ground truth
+   for absolute frame misses. ewave's receive counts alone cannot establish
+   how many frames went unheard.
+
+For a live comparison in the dashboard, open **Spectrum → Watch an access
+point**. Find the lab AP by its exact Wi-Fi name, start the watch, and wait for
+a fresh frame before changing the router's channel. The watch ends at the
+first observation on a different channel. Use **Stop watch** to record a fixed
+run that never observes the move. **Save run** keeps up to ten results in the
+browser for the dashboard address, so use the same port for both trials.
+The observation gap includes any time spent changing the AP's channel.
+In a live adaptive run, **Spectrum → Channel coverage** shows the last
+successful tune and the last decoded frame on each 2.4 GHz channel. It marks
+channels where the radio confirmed a tune and no newer frame was decoded.
+
+The router's channel changes are a hardware analogue of the scripted
+bursts. The fixture delay is a model input, while the live dashboard
+reports elapsed time for successful tune commands. Live passive adaptive mode
+also revisits channels 1–13 in order. A survey starts about once per second
+at the default tick rate and listens for at least 250 ms after a successful
+tune. The scores steer the receiver between surveys. Slower ticks and
+retune delays can lengthen the sweep. Stop each trial with Ctrl+C.
+
 ## Live capture
 
 Live Wi-Fi capture requires Linux, `tcpdump`, capture permissions, and a

@@ -48,11 +48,12 @@ window.EwaveGraph = (() => {
     return ap.channel ? name + ' · Ch ' + ap.channel : name;
   }
 
-  function color(node) {
-    if (node.kind === 'ap') return 'var(--accent-blue)';
-    if (node.kind === 'ble' || /phone|tablet/i.test(node.type)) return 'var(--accent-green)';
-    if (/laptop|computer/i.test(node.type)) return 'var(--accent-amber)';
-    return 'var(--text-secondary)';
+  function symbol(node) {
+    if (node.kind === 'ap') return '■';
+    if (node.kind === 'ble') return '✦';
+    if (/phone|tablet/i.test(node.type)) return '◆';
+    if (/laptop|computer/i.test(node.type)) return '▲';
+    return '●';
   }
 
   function description(node) {
@@ -150,7 +151,7 @@ window.EwaveGraph = (() => {
     renderItems(lines, edges, () => svgElement('line', lines), (line, edge) => {
       attributes(line, {
         x1: edge.x1, y1: edge.y1, x2: edge.x2, y2: edge.y2,
-        stroke: 'var(--accent-blue)', 'stroke-width': 1,
+        stroke: 'var(--text-secondary)', 'stroke-width': 1,
         'stroke-opacity': Number.isFinite(edge.rssi) ? Math.min(.8, Math.max(.22, (edge.rssi + 105) / 70)) : .35
       });
     });
@@ -171,9 +172,12 @@ window.EwaveGraph = (() => {
     }
     renderItems(dots, nodes, () => {
       const group = svgElement('g', dots, { tabindex: 0, role: 'button', class: 'map-node' });
-      svgElement('circle', group);
-      svgElement('rect', group, { x: -50, y: -12, width: 100, height: 24, rx: 6 });
+      svgElement('circle', group, { class: 'map-marker' });
+      svgElement('rect', group, { x: -50, y: -12, width: 100, height: 24, rx: 6, class: 'map-marker' });
       svgElement('text', group, { 'text-anchor': 'middle', class: 'map-node-label' });
+      svgElement('text', group, {
+        class: 'map-symbol', 'text-anchor': 'middle', 'dominant-baseline': 'central', 'aria-hidden': 'true'
+      });
       svgElement('title', group);
       return group;
     }, (group, node) => {
@@ -191,18 +195,13 @@ window.EwaveGraph = (() => {
           activate(node);
         }
       };
-      const [circle, rect, text, title] = group.children;
+      const [circle, rect, text, marker, title] = group.children;
       attributes(circle, {
         display: isMore ? 'none' : null,
-        r: node.kind === 'ap' ? 18 : node.kind === 'client' ? 10 : 8,
-        fill: color(node),
-        stroke: isSelected ? '#fff' : 'var(--border-bright)',
-        'stroke-width': isSelected ? 2 : 1
+        r: node.kind === 'ap' ? 18 : 10
       });
-      attributes(rect, {
-        display: isMore ? null : 'none',
-        fill: 'var(--bg-elevated)', stroke: 'var(--border-bright)'
-      });
+      attributes(rect, { display: isMore ? null : 'none' });
+      marker.textContent = isMore ? '' : symbol(node);
       text.setAttribute('y', isMore ? 4 : node.kind === 'ap' ? 33 : -16);
       if (node.kind === 'ap' || isMore) text.textContent = node.label;
       else text.textContent = isSelected ? (node.label || node.vendor || node.id.slice(-6)).slice(0, 16) : '';

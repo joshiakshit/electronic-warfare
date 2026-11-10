@@ -46,7 +46,7 @@ import java.util.stream.Stream;
 
 /**
  * Tcpdump capture: line-oriented packets or named probe requests.
- * Summary mode uses 100 ms, monotonic-clock observation windows.
+ * Summary mode uses configurable (default 100 ms), monotonic-clock observation windows.
  * Channels 1..13 map to scanner band indexes 0..12,
  * so the scanner must have at least 13 bands. Channel 14 packets are queued only.
  * Summary-mode feedback marks every channel valid, including quiet channels.
@@ -65,8 +65,9 @@ import java.util.stream.Stream;
  */
 public final class PacketBridge implements AutoCloseable {
     private static final System.Logger LOG = System.getLogger(PacketBridge.class.getName());
-    private static final int TICK_MILLIS = 100;
-    private static final long TICK_NANOS = TimeUnit.MILLISECONDS.toNanos(TICK_MILLIS);
+    public static final int DEFAULT_TICK_MS = 100;
+    private final int tickMs;
+    private final long tickNanos;
     private static final String MAC = "(?:[0-9a-f]{2}:){5}[0-9a-f]{2}";
     private static final Pattern TIMESTAMP = Pattern.compile("^\\s*(\\d+(?:\\.\\d+)?)\\s+");
     private static final Pattern ETHERNET = Pattern.compile("(" + MAC + ")\\s*>\\s*(" + MAC + ")", Pattern.CASE_INSENSITIVE);
@@ -106,16 +107,25 @@ public final class PacketBridge implements AutoCloseable {
     private String captureInterface;
     private String captureError;
     private PassiveWifiSession passiveWifi;
+    private PassiveApWatch apWatch;
     private CaptureHealth health;
     private Replay replay;
     private final MyNetworkStore myNetwork = new MyNetworkStore();
 
     public PacketBridge() {
-        this(new DeviceProfiler());
+        this(DEFAULT_TICK_MS);
+    }
+
+    public PacketBridge(int tickMs) {
+        this(tickMs, new DeviceProfiler());
     }
 
     public PacketBridge(DeviceProfiler profiler) {
-        this(ProcessBuilder::start, loadBundledVendors(), profiler);
+        this(DEFAULT_TICK_MS, profiler);
+    }
+
+    public PacketBridge(int tickMs, DeviceProfiler profiler) {
+        this(ProcessBuilder::start, loadBundledVendors(), profiler, tickMs);
     }
 
     @FunctionalInterface
@@ -129,10 +139,19 @@ public final class PacketBridge implements AutoCloseable {
     }
 
     PacketBridge(ProcessStarter processStarter, Map<String, String> vendors, DeviceProfiler profiler) {
+        this(processStarter, vendors, profiler, DEFAULT_TICK_MS);
+    }
+
+    PacketBridge(ProcessStarter processStarter, Map<String, String> vendors, DeviceProfiler profiler, int tickMs) {
+        if (tickMs < 10 || tickMs > 2000) throw new IllegalArgumentException("--tick-ms must be 10..2000");
+        this.tickMs = tickMs;
+        tickNanos = TimeUnit.MILLISECONDS.toNanos(tickMs);
         this.processStarter = Objects.requireNonNull(processStarter);
         this.vendors = Map.copyOf(vendors);
         this.profiler = Objects.requireNonNull(profiler);
     }
+
+    public int getTickMs() { return tickMs; }
 
     public DeviceProfiler getProfiler() { return profiler; }
 
@@ -288,7 +307,8 @@ public final class PacketBridge implements AutoCloseable {
         PassiveWifiSession reports = monitor ? new PassiveWifiSession(profiler, myNetwork.get()) : null;
         PassiveCommandGuard.requireWifi(builder.command(), iface);
         Process process = processStarter.start(builder);
-        Session started = new Session(process, scanner, monitor ? new CaptureHealth() : null);
+        Session started = new Session(process, scanner, monitor ? new CaptureHealth() : null,
+                monitor && !collectLabTargets);
         replay = null;
         health = started.health;
         session = started;
@@ -304,7 +324,7 @@ public final class PacketBridge implements AutoCloseable {
             }, "ewave-packet-reader");
             started.reader.setDaemon(true);
             if (scanner != null) started.timer.scheduleAtFixedRate(() -> onTimer(started, iface),
-                    TICK_MILLIS, TICK_MILLIS, TimeUnit.MILLISECONDS);
+                    tickMs, tickMs, TimeUnit.MILLISECONDS);
             if (reports != null) {
                 started.timer.scheduleAtFixedRate(reports::purge, 1, 1, TimeUnit.MINUTES);
                 started.timer.scheduleWithFixedDelay(() -> sampleMonitor(started, iface), 0, 5, TimeUnit.SECONDS);
@@ -355,15 +375,58 @@ public final class PacketBridge implements AutoCloseable {
         return Map.copyOf(status);
     }
 
+    public record ApWatchEvent(int channel, long timestamp) {}
+    public record ApWatchRun(UUID id, String apId, boolean adaptive, long startedAt, Long endedAt,
+                             ApWatchEvent lastHeard, ApWatchEvent tuned, ApWatchEvent heardAgain) {}
+    public record ApWatchState(boolean available, ApWatchRun run) {}
+
+    public synchronized ApWatchState apWatchState() {
+        return new ApWatchState(session != null && session.watchAllowed, apWatch == null ? null : apWatch.snapshot());
+    }
+
+    public synchronized ApWatchState startApWatch(String apId) {
+        if (session == null || !session.watchAllowed)
+            throw new IllegalStateException("Start live passive Wi-Fi capture to watch an access point.");
+        if (apWatch != null && apWatch.active()) throw new IllegalStateException("Stop the current watch first.");
+        String bssid = passiveWifi.observedBssid(apId);
+        if (bssid == null) throw new IllegalArgumentException("Choose an access point from the current capture.");
+        apWatch = new PassiveApWatch(apId, bssid, session.scanner != null, System.currentTimeMillis());
+        return apWatchState();
+    }
+
+    public synchronized ApWatchState stopApWatch(UUID id) {
+        if (apWatch == null || !apWatch.id().equals(id)) throw new IllegalArgumentException("Watch run has changed.");
+        apWatch.stop(System.currentTimeMillis());
+        return apWatchState();
+    }
+
+    public record ChannelCoverage(int channel, Long lastTuneAtMs, Long lastFrameAtMs,
+                                  Long lastFrameWhileTunedAtMs) {}
+
+    public record RadioTelemetry(Integer lastConfirmedChannel, Integer lastObservedChannel, boolean retuning, long successfulRetunes,
+                                 long failedRetunes, Double meanRetuneMs, List<Long> dwellMs,
+                                 List<ChannelCoverage> coverage) {
+        public RadioTelemetry(Integer lastConfirmedChannel, Integer lastObservedChannel, boolean retuning,
+                              long successfulRetunes, long failedRetunes, Double meanRetuneMs, List<Long> dwellMs) {
+            this(lastConfirmedChannel, lastObservedChannel, retuning, successfulRetunes, failedRetunes, meanRetuneMs,
+                    dwellMs, List.of());
+        }
+    }
+
     public record ChannelSnapshot(AdaptiveScanner.Snapshot scanner, Integer activeChannel, Integer lastChosen,
-                                  Instant timestamp) {}
+                                  Instant timestamp, RadioTelemetry radio) {
+        public ChannelSnapshot(AdaptiveScanner.Snapshot scanner, Integer activeChannel, Integer lastChosen,
+                               Instant timestamp) {
+            this(scanner, activeChannel, lastChosen, timestamp, null);
+        }
+    }
 
     /** Summary scanner and radio state at the next capture tick, or null without a running scanner. */
     public synchronized ChannelSnapshot getChannelSnapshot() {
         if (session == null || session.scanner == null) return null;
         synchronized (session.scanner) {
-            return new ChannelSnapshot(session.scanner.snapshot(tick, TICK_MILLIS),
-                    channel == 0 ? null : channel, session.lastChosen, Instant.now());
+            return new ChannelSnapshot(session.scanner.snapshot(tick, tickMs),
+                    channel == 0 ? null : channel, session.lastChosen, Instant.now(), session.radioTelemetry());
         }
     }
 
@@ -381,6 +444,7 @@ public final class PacketBridge implements AutoCloseable {
             stopped = session;
             if (stopped != null) {
                 session = null;
+                if (apWatch != null) apWatch.stop(System.currentTimeMillis());
                 publishPending(stopped);
             }
             if (replay != null && replay.running()) {
@@ -436,8 +500,20 @@ public final class PacketBridge implements AutoCloseable {
                     if (current.scanner != null) {
                         advanceTicks(current, System.nanoTime());
                         int observedChannel = Dot11FrameDecoder.channel(frame.frequencyMhz());
-                        if (observedChannel >= 1 && observedChannel <= 13) current.counts[observedChannel]++;
+                        if (observedChannel >= 1 && observedChannel <= 13) {
+                            current.counts[observedChannel]++;
+                            if (current.survey != null && frame.frequencyMhz() == channelFrequencyMhz(observedChannel)) {
+                                int band = observedChannel - 1;
+                                current.lastFrameAtMs[band] = Math.max(current.lastFrameAtMs[band], frame.timestamp());
+                                if (!current.tuning && current.tunedChannel == observedChannel
+                                        && current.lastTuneAtMs[band] != 0 && frame.timestamp() >= current.lastTuneAtMs[band]) {
+                                    current.lastFrameWhileTunedAtMs[band] = Math.max(
+                                            current.lastFrameWhileTunedAtMs[band], frame.timestamp());
+                                }
+                            }
+                        }
                     }
+                    if (current.watchAllowed && apWatch != null) apWatch.observe(frame);
                     var observed = recordMonitorFrame(frame, reports, collectLabTargets);
                     if (observed.inventory() && now >= current.nextDeviceEvent) {
                         current.nextDeviceEvent = now + 1000;
@@ -601,18 +677,26 @@ public final class PacketBridge implements AutoCloseable {
         try {
             synchronized (this) {
                 if (session != current) return;
-                advanceTicks(current, System.nanoTime());
+                long now = System.nanoTime();
+                advanceTicks(current, now);
                 if (tick == current.lastDecisionTick) return;
                 // The packet reader can also close windows, so check the tick even
                 // when advanceTicks did not close a window in this callback.
-                int chosen;
-                synchronized (current.scanner) {
-                    chosen = current.scanner.choose(tick, 1).bands()[0] + 1;
-                }
                 current.lastDecisionTick = tick;
+                var survey = current.survey;
+                if (survey != null && current.retunePending) return;
+                int chosen = survey == null ? 0 : survey.channel(now);
+                if (chosen == 0) {
+                    synchronized (current.scanner) {
+                        chosen = current.scanner.choose(tick, 1).bands()[0] + 1;
+                    }
+                }
                 current.lastChosen = chosen;
                 Integer frequency = channelFrequencyMhz(chosen);
-                if (frequency != null) current.retuner.execute(() -> retune(current, iface, chosen, frequency));
+                if (frequency == null || survey != null && current.tunedChannel == chosen) return;
+                int requested = chosen;
+                if (survey != null) current.retunePending = true;
+                current.retuner.execute(() -> retune(current, iface, requested, frequency));
             }
         } catch (RuntimeException failure) {
             LOG.log(System.Logger.Level.WARNING, "Capture tick failed", failure);
@@ -625,22 +709,20 @@ public final class PacketBridge implements AutoCloseable {
         synchronized (this) {
             if (session != current) return;
             if (current.health != null && current.tunedChannel == chosen) return;
+            current.recordDwell(System.nanoTime());
             current.tuning = true;
         }
+        long started = System.nanoTime();
         var builder = new ProcessBuilder("sudo", "iw", "dev", iface, "set", "freq", Integer.toString(frequency))
                 .redirectOutput(ProcessBuilder.Redirect.DISCARD)
                 .redirectError(ProcessBuilder.Redirect.DISCARD);
         LOG.log(System.Logger.Level.INFO, "[AdaptiveScanner] chose channel " + chosen + " → " + frequency + "MHz");
         Process tuning = null;
+        boolean succeeded = false;
         try {
             tuning = processStarter.start(builder);
             if (tuning.waitFor(2, TimeUnit.SECONDS) && tuning.exitValue() == 0) {
-                synchronized (this) {
-                    if (session == current) {
-                        channel = chosen;
-                        current.tunedChannel = chosen;
-                    }
-                }
+                succeeded = true;
             }
         } catch (IOException failure) {
             LOG.log(System.Logger.Level.DEBUG, "Could not launch radio retune", failure);
@@ -649,6 +731,26 @@ public final class PacketBridge implements AutoCloseable {
         } finally {
             if (tuning != null && tuning.isAlive()) tuning.destroyForcibly();
             synchronized (this) {
+                if (session == current) {
+                    long completed = System.nanoTime();
+                    current.dwellStarted = completed;
+                    if (succeeded) {
+                        current.successfulRetunes++;
+                        current.retuneNanos += completed - started;
+                        channel = chosen;
+                        current.tunedChannel = chosen;
+                        if (current.survey != null) {
+                            long confirmedAt = System.currentTimeMillis();
+                            current.lastTuneAtMs[chosen - 1] = confirmedAt;
+                            if (apWatch != null) apWatch.tuneConfirmed(chosen, confirmedAt);
+                        }
+                    } else {
+                        current.failedRetunes++;
+                        current.tunedChannel = 0;
+                    }
+                    if (current.survey != null) current.survey.tuneFinished(completed, chosen, succeeded);
+                }
+                current.retunePending = false;
                 current.tuning = false;
             }
         }
@@ -667,7 +769,7 @@ public final class PacketBridge implements AutoCloseable {
             Arrays.fill(current.counts, 0);
             publishPending(current);
             tick++;
-            current.nextBoundary += TICK_NANOS;
+            current.nextBoundary += tickNanos;
         }
     }
 
@@ -696,6 +798,7 @@ public final class PacketBridge implements AutoCloseable {
         synchronized (this) {
             if (session != current) return; // A stopped reader cannot tear down a newer capture.
             session = null;
+            if (apWatch != null) apWatch.stop(System.currentTimeMillis());
             publishPending(current);
         }
         terminate(current);
@@ -852,6 +955,8 @@ public final class PacketBridge implements AutoCloseable {
         final Process process;
         final AdaptiveScanner scanner;
         final CaptureHealth health;
+        final boolean watchAllowed;
+        final PassiveChannelSurvey survey;
         final ThreadPoolExecutor retuner;
         final long[] counts = new long[14];
         final List<PacketEvent> pending = new ArrayList<>();
@@ -859,19 +964,53 @@ public final class PacketBridge implements AutoCloseable {
         long lastDecisionTick = tick;
         Integer lastChosen;
         int tunedChannel;
-        boolean tuning;
+        boolean tuning, retunePending;
+        long successfulRetunes, failedRetunes, retuneNanos, dwellStarted;
+        final long[] dwellNanos = new long[13];
+        final long[] lastTuneAtMs = new long[dwellNanos.length];
+        final long[] lastFrameAtMs = new long[dwellNanos.length];
+        final long[] lastFrameWhileTunedAtMs = new long[dwellNanos.length];
+
+        void recordDwell(long now) {
+            if (!tuning && tunedChannel != 0) dwellNanos[tunedChannel - 1] += now - dwellStarted;
+            dwellStarted = now;
+        }
+
+        RadioTelemetry radioTelemetry() {
+            long[] dwell = dwellNanos.clone();
+            if (!tuning && tunedChannel != 0) dwell[tunedChannel - 1] += System.nanoTime() - dwellStarted;
+            int observed = health == null ? 0 : health.observedChannel();
+            return new RadioTelemetry(tunedChannel == 0 ? null : tunedChannel, observed == 0 ? null : observed,
+                    tuning, successfulRetunes,
+                    failedRetunes, successfulRetunes == 0 ? null : retuneNanos / (successfulRetunes * 1_000_000.0),
+                    Arrays.stream(dwell).map(TimeUnit.NANOSECONDS::toMillis).boxed().toList(), channelCoverage());
+        }
+
+        private List<ChannelCoverage> channelCoverage() {
+            if (survey == null) return List.of();
+            var coverage = new ArrayList<ChannelCoverage>(lastTuneAtMs.length);
+            for (int band = 0; band < lastTuneAtMs.length; band++) {
+                coverage.add(new ChannelCoverage(band + 1, lastTuneAtMs[band] == 0 ? null : lastTuneAtMs[band],
+                        lastFrameAtMs[band] == 0 ? null : lastFrameAtMs[band],
+                        lastFrameWhileTunedAtMs[band] == 0 ? null : lastFrameWhileTunedAtMs[band]));
+            }
+            return List.copyOf(coverage);
+        }
+
         final ScheduledExecutorService timer = Executors.newSingleThreadScheduledExecutor(task -> {
             Thread thread = new Thread(task, "ewave-capture-ticks");
             thread.setDaemon(true);
             return thread;
         });
-        long nextBoundary = System.nanoTime() + TICK_NANOS;
+        long nextBoundary = System.nanoTime() + tickNanos;
         Thread reader;
 
-        Session(Process process, AdaptiveScanner scanner, CaptureHealth health) {
+        Session(Process process, AdaptiveScanner scanner, CaptureHealth health, boolean watchAllowed) {
             this.process = process;
             this.scanner = scanner;
             this.health = health;
+            this.watchAllowed = watchAllowed;
+            survey = watchAllowed && scanner != null ? new PassiveChannelSurvey(System.nanoTime(), tickNanos) : null;
             // Serialize commands and keep only the latest pending choice if iw is slow.
             retuner = scanner == null ? null : new ThreadPoolExecutor(1, 1, 0, TimeUnit.MILLISECONDS,
                     new ArrayBlockingQueue<>(1),
