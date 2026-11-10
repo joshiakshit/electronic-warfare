@@ -5,7 +5,6 @@ import ewave.active.FrameInjector;
 import ewave.active.HandshakeAnalyzer;
 import ewave.active.LanScanner;
 import ewave.active.WifiAccessPoints;
-import ewave.capture.BleBridge;
 import ewave.capture.PacketBridge;
 import ewave.fixtures.CompletedProcess;
 import ewave.fixtures.StreamingCaptureProcess;
@@ -35,10 +34,10 @@ class HandshakeRoutesTest {
     private final ObjectMapper mapper = new ObjectMapper();
     @TempDir Path directory;
 
-    private PassiveRfServer server(PacketBridge bridge, BleBridge ble,
+    private PassiveRfServer server(PacketBridge bridge,
                                  Function<PassiveRfServer.HandshakeSettings, HandshakeAnalyzer> factory) throws Exception {
         Path aps = Files.writeString(directory.resolve("aps.txt"), "Lab AP:02\\:11\\:22\\:33\\:44\\:55:6:2437 MHz\n");
-        return new PassiveRfServer(bridge, ble, true, FrameInjector::new, new LanScanner(),
+        return new PassiveRfServer(bridge, true, FrameInjector::new, new LanScanner(),
                 new WifiAccessPoints(aps), factory).start(0);
     }
 
@@ -50,8 +49,8 @@ class HandshakeRoutesTest {
 
     @Test void returnsCaptureAndVerificationRecordsWithIsoTimestampsAndFullOutput() throws Exception {
         var verificationOutput = new AtomicReference<>("KEY FOUND! [ lab password ]\n");
-        try (var bridge = new PacketBridge(); var ble = new BleBridge(bridge.getEventQueue(), bridge.getProfiler());
-             var server = server(bridge, ble, settings -> analyzer(settings, builder -> {
+        try (var bridge = new PacketBridge();
+             var server = server(bridge, settings -> analyzer(settings, builder -> {
                  if (builder.command().getFirst().equals("tshark")) {
                      Files.writeString(Path.of(builder.command().get(builder.command().indexOf("-w") + 1)),
                              "synthetic capture header and payload");
@@ -90,8 +89,8 @@ class HandshakeRoutesTest {
     }
 
     @Test void rejectsInvalidJsonAndFilesWithoutLaunchingAndReturnsExactWordlistHint() throws Exception {
-        try (var bridge = new PacketBridge(); var ble = new BleBridge(bridge.getEventQueue(), bridge.getProfiler());
-             var server = server(bridge, ble, settings -> analyzer(settings, builder -> {
+        try (var bridge = new PacketBridge();
+             var server = server(bridge, settings -> analyzer(settings, builder -> {
                  fail("invalid request must not launch"); return null;
              })); var client = HttpClient.newHttpClient()) {
             for (String body : new String[]{"{", "[]", "null", "{}", CAPTURE + " {}", CAPTURE.replace(AP, "--help"),
@@ -115,8 +114,8 @@ class HandshakeRoutesTest {
 
     @Test void passesTargetNameAndDefaultsMissingNullAndNonpositiveChannelsBeforeCapture() throws Exception {
         var selected = new AtomicReference<PassiveRfServer.HandshakeSettings>();
-        try (var bridge = new PacketBridge(); var ble = new BleBridge(bridge.getEventQueue(), bridge.getProfiler());
-             var server = server(bridge, ble, settings -> {
+        try (var bridge = new PacketBridge();
+             var server = server(bridge, settings -> {
                  selected.set(settings);
                  return analyzer(settings, builder -> { throw new java.io.IOException("capture fixture unavailable"); });
              }); var client = HttpClient.newHttpClient()) {
@@ -142,8 +141,8 @@ class HandshakeRoutesTest {
             var dump = new StreamingCaptureProcess();
             var decoder = new StreamingCaptureProcess();
             var launched = new CountDownLatch(1);
-            try (var bridge = new PacketBridge(); var ble = new BleBridge(bridge.getEventQueue(), bridge.getProfiler());
-                 var server = server(bridge, ble, settings -> analyzer(settings, builder -> {
+            try (var bridge = new PacketBridge();
+                 var server = server(bridge, settings -> analyzer(settings, builder -> {
                      if (builder.command().getFirst().equals("tshark")) return decoder;
                      launched.countDown();
                      return dump;
@@ -169,8 +168,8 @@ class HandshakeRoutesTest {
     }
 
     @Test void reportsToolErrorsAsJsonInsteadOfSuccessfulDictionaryMisses() throws Exception {
-        try (var bridge = new PacketBridge(); var ble = new BleBridge(bridge.getEventQueue(), bridge.getProfiler());
-             var server = server(bridge, ble, settings -> analyzer(settings, builder -> {
+        try (var bridge = new PacketBridge();
+             var server = server(bridge, settings -> analyzer(settings, builder -> {
                  if (builder.command().getFirst().equals("tshark")) throw new java.io.IOException("tshark missing");
                  return new CompletedProcess("No valid WPA handshakes found.", 1);
              })); var client = HttpClient.newHttpClient()) {

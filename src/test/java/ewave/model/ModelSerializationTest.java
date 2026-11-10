@@ -10,8 +10,6 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import ewave.fixtures.BleFrames;
-import ewave.decoder.BleHciDecoder;
 import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -33,12 +31,8 @@ class ModelSerializationTest {
                 device.lastSeen(), Map.of("targetMac", device.mac()));
         var probe = new ProbeRequest(device.mac(), "ff:ff:ff:ff:ff:ff", "ff:ff:ff:ff:ff:ff", "Lab",
                 "4c6162", false, true, 6, 2437, -47, device.lastSeen(), 43, List.of(1.0), List.of("00:11:22"));
-        var ble = BleHciDecoder.decode(BleFrames.legacy(BleFrames.data()),device.lastSeen()).getFirst();
-        var bleDevice = new BleDevice(ble.deviceId(),ble.address(),ble.addressType(),ble.payload().localName(),
-                ble.timestamp(),ble.timestamp(),1,ble);
-
         for (Object value : List.of(device, packet,
-                result, event, probe, ble, ble.payload(), bleDevice, EwaveEvent.bleAdvertisement(ble),
+                result, event, probe,
                 EwaveEvent.probeRequest(probe), EwaveEvent.deviceAppeared(device))) {
             String json = mapper.writeValueAsString(value);
             Object decoded = mapper.readValue(json, value.getClass());

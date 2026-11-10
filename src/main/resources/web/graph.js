@@ -50,7 +50,6 @@ window.EwaveGraph = (() => {
 
   function symbol(node) {
     if (node.kind === 'ap') return '■';
-    if (node.kind === 'ble') return '✦';
     if (/phone|tablet/i.test(node.type)) return '◆';
     if (/laptop|computer/i.test(node.type)) return '▲';
     return '●';
@@ -65,8 +64,7 @@ window.EwaveGraph = (() => {
 
   function draw() {
     if (!data || !wrap.clientWidth) return;
-    const { topology, wifi, ble, focus, selected } = data;
-    const showBle = document.querySelector('#show-ble').checked;
+    const { topology, wifi, focus, selected } = data;
     const showOther = document.querySelector('#show-unassociated').checked;
     const width = wrap.clientWidth;
     const aps = topology.accessPoints || [];
@@ -144,7 +142,6 @@ window.EwaveGraph = (() => {
     const apIds = new Set(aps.map(ap => ap.bssid));
     if (showOther) extraRows(wifi.filter(row => !apIds.has(row.id) && !linked.has(row.id) && row.details?.role !== 'AP')
       .sort((a, b) => a.id.localeCompare(b.id)), 'unassociated', 'Unassociated Wi-Fi');
-    if (showBle) extraRows([...ble].sort((a, b) => a.id.localeCompare(b.id)), 'ble', 'Enrolled BLE tags');
 
     const height = Math.max(280, top);
     attributes(svg, { viewBox: `0 0 ${width} ${height}`, height });
@@ -222,12 +219,12 @@ window.EwaveGraph = (() => {
   moreAps.addEventListener('click', () => { apLimit += accessPointsPerPage; draw(); });
   new ResizeObserver(draw).observe(wrap);
 
-  function update(topology, wifi, ble, focus, selected) {
+  function update(topology, wifi, focus, selected) {
     if (data?.focus !== focus) {
       apLimit = accessPointsPerPage;
       expanded.clear();
     }
-    data = { topology, wifi, ble, focus, selected };
+    data = { topology, wifi, focus, selected };
     draw();
   }
 

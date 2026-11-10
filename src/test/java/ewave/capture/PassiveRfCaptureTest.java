@@ -2,7 +2,6 @@ package ewave.capture;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import ewave.core.AdaptiveScanner;
-import ewave.fixtures.BleFrames;
 import ewave.fixtures.ProbeFrames;
 import ewave.fixtures.StreamingCaptureProcess;
 import ewave.ui.PassiveRfServer;
@@ -40,8 +39,7 @@ class PassiveRfCaptureTest {
             retunes.add(List.copyOf(builder.command()));
             return tune;
         }, Map.of());
-             var ble = new BleBridge(wifi.getEventQueue(), wifi.getProfiler());
-             var server = new PassiveRfServer(wifi, ble);
+             var server = new PassiveRfServer(wifi);
              var client = HttpClient.newHttpClient()) {
             var scanner = new AdaptiveScanner(AdaptiveScanner.Config.defaults(13, 128, 71));
             wifi.startPassive("lab0mon", false, scanner);
@@ -98,58 +96,45 @@ class PassiveRfCaptureTest {
 
     @Test void streamsBinaryCapturesToReadOnlyReportsWithoutLegacyEventsOrRawIdentifiers() throws Exception {
         var wifiProcess = new StreamingCaptureProcess();
-        var bleProcess = new StreamingCaptureProcess();
         try (var wifi = new PacketBridge(builder -> {
             assertEquals(List.of("tcpdump", "-i", "lab0mon", "-y", "IEEE802_11_RADIO", "-U", "-s",
                     "0", "-n", "-w", "-", "type mgt or type data"), builder.command());
             return wifiProcess;
         }, Map.of());
-             var ble = new BleBridge(wifi.getEventQueue(), builder -> bleProcess, wifi.getProfiler());
-             var server = new PassiveRfServer(wifi, ble);
+             var server = new PassiveRfServer(wifi);
              var client = HttpClient.newHttpClient()) {
             wifi.startPassive("lab0mon");
-            ble.startPassive(0);
             server.start(0);
             long now = System.currentTimeMillis();
             byte[] packet = ProbeFrames.radiotap(ProbeFrames.frame("PrivateLabSSID"));
             byte[] pcap = ProbeFrames.pcap(ByteOrder.LITTLE_ENDIAN, true, 127, packet);
             ByteBuffer.wrap(pcap).order(ByteOrder.LITTLE_ENDIAN).putInt(24, (int) (now / 1000));
             wifiProcess.write(pcap);
-            byte[] snoop = BleFrames.snoop(1002, 0, BleFrames.legacy(BleFrames.data()));
-            ByteBuffer.wrap(snoop).putLong(32, 0x00dcddb30f2f8000L + now * 1000L);
-            bleProcess.write(snoop);
-            await(() -> wifi.getCaptureStatus().get("probeRequests").equals(1L)
-                    && ble.getStatus().get("advertisements").equals(1L));
+            await(() -> wifi.getCaptureStatus().get("probeRequests").equals(1L));
 
             var mapper = new ObjectMapper();
             var inventory = get(client, server, "/api/inventory");
             var audit = get(client, server, "/api/probe-audit");
-            var summary = get(client, server, "/api/ble/summary");
-            for (var response : List.of(inventory, audit, summary)) {
+            for (var response : List.of(inventory, audit)) {
                 assertEquals(200, response.statusCode());
                 assertEquals("no-store", response.headers().firstValue("Cache-Control").orElseThrow());
-                for (String privateData : List.of("PrivateLabSSID", "02:11:22:33:44:55", "c2:11:22:33:44:55", "Lab Tag", "4c00010203"))
+                for (String privateData : List.of("PrivateLabSSID", "02:11:22:33:44:55"))
                     assertFalse(response.body().contains(privateData));
             }
             assertEquals(1, mapper.readTree(inventory.body()).size());
             assertEquals(1, mapper.readTree(audit.body()).path("distinctDirectedSsids").asInt());
-            assertEquals(1, mapper.readTree(summary.body()).path("advertisements").asInt());
-            assertEquals(0, mapper.readTree(summary.body()).path("enrolledAssets").size());
             assertEquals(200, get(client, server, "/").statusCode());
             assertEquals(404, get(client, server, "/api/attack/scan-lan").statusCode());
-            assertEquals(404, get(client, server, "/api/ble/advertisements").statusCode());
             assertEquals(404, get(client, server, "/api/probes").statusCode());
             assertTrue(wifi.getEventQueue().isEmpty());
             assertTrue(wifi.getProfiler().all().isEmpty());
-            assertTrue(ble.getAdvertisements().isEmpty());
         }
     }
 
     @Test void watchesAnObservedAccessPointThroughThePassiveHttpApi() throws Exception {
         var process = new StreamingCaptureProcess();
         try (var wifi = new PacketBridge(builder -> process, Map.of());
-             var ble = new BleBridge(wifi.getEventQueue(), wifi.getProfiler());
-             var server = new PassiveRfServer(wifi, ble).start(0);
+             var server = new PassiveRfServer(wifi).start(0);
              var client = HttpClient.newHttpClient()) {
             String endpoint = "/api/channels/watch";
             String bssid = "00:11:22:33:44:55";
@@ -205,8 +190,7 @@ class PassiveRfCaptureTest {
         try {
             var process = new StreamingCaptureProcess();
             try (var wifi = new PacketBridge(builder -> process, Map.of());
-                 var ble = new BleBridge(wifi.getEventQueue(), wifi.getProfiler());
-                 var server = new PassiveRfServer(wifi, ble).start(0);
+                 var server = new PassiveRfServer(wifi).start(0);
                  var client = HttpClient.newHttpClient()) {
                 wifi.startPassive("lab0mon");
                 byte[] home = beacon("001122334455", "Fixture Home");
@@ -265,8 +249,7 @@ class PassiveRfCaptureTest {
             var process = new StreamingCaptureProcess();
             var mapper = new ObjectMapper();
             try (var wifi = new PacketBridge(builder -> process, Map.of());
-                 var ble = new BleBridge(wifi.getEventQueue(), wifi.getProfiler());
-                 var server = new PassiveRfServer(wifi, ble).start(0);
+                 var server = new PassiveRfServer(wifi).start(0);
                  var client = HttpClient.newHttpClient()) {
                 wifi.startPassive("lab0mon");
                 byte[] packet = ProbeFrames.radiotap(ProbeFrames.frame("PrivateFixture"));
@@ -377,7 +360,7 @@ class PassiveRfCaptureTest {
         command.set(command.indexOf("-w") + 1, "capture.pcap");
         assertThrows(IllegalArgumentException.class, () -> PassiveCommandGuard.requireWifi(command, "lab0mon"));
         assertThrows(IllegalArgumentException.class, () -> PassiveCommandGuard.requireWifi(
-                List.of("hcitool", "lescan"), "lab0mon"));
+                List.of("other-capture", "lab0mon"), "lab0mon"));
         assertThrows(IllegalArgumentException.class, () -> PassiveCommandGuard.requireWifi(
                 PassiveCommandGuard.monitor("-bad"), "-bad"));
     }

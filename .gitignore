@@ -29,7 +29,6 @@ logs/
 *.cap
 *.pcap
 *.pcapng
-*.btsnoop
 
 # Local credentials and environment overrides
 .env
@@ -38,7 +37,6 @@ logs/
 
 # Synthetic capture fixtures used by tests and offline replay
 !/src/test/resources/probes/probe-requests.pcap
-!/src/test/resources/ble/advertisements.btsnoop
 
 # Frozen numerical reference fixtures
 !src/test/resources/reference/*.csv
@@ -46,13 +44,8 @@ logs/
 
 # Bundled RF settings and test fixtures
 !src/main/resources/fingerprints.csv
-!src/main/resources/ble/rules.json
-!src/test/resources/ble/*.csv
 
 # Optional RF catalogs generated locally
-/src/main/resources/ble/company-identifiers.csv
-/src/main/resources/ble/gatt-services.csv
-/src/main/resources/ble/member-services.csv
 /src/main/resources/oui.txt
 /src/main/resources/oui-specific.txt
 

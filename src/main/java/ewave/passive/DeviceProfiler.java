@@ -6,7 +6,6 @@ import com.fasterxml.jackson.databind.JsonSerializer;
 import com.fasterxml.jackson.databind.SerializerProvider;
 import com.fasterxml.jackson.databind.annotation.JsonSerialize;
 import com.fasterxml.jackson.databind.ser.std.ToStringSerializer;
-import ewave.model.BleAdvertisement;
 import ewave.model.PacketEvent;
 import ewave.model.ProbeRequest;
 
@@ -14,7 +13,6 @@ import java.io.IOException;
 import java.time.Instant;
 import java.util.Collection;
 import java.util.Comparator;
-import java.util.HexFormat;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -29,12 +27,11 @@ public final class DeviceProfiler {
     public static final int DEFAULT_TX_POWER = -59;
     private final ConcurrentHashMap<String, DeviceProfile> profiles = new ConcurrentHashMap<>();
     private final OuiLookup oui;
-    private final BleDecoder ble;
 
     public void clear() { profiles.clear(); }
 
     public record DeviceProfile(String mac, String vendor, String guessedType,
-                                List<String> probedSsids, List<String> services,
+                                List<String> probedSsids,
                                 int lastRssi,
                                 @JsonSerialize(using = DistanceSerializer.class) double estimatedMeters,
                                 @JsonSerialize(using = ToStringSerializer.class) Instant firstSeen,
@@ -43,7 +40,6 @@ public final class DeviceProfiler {
                                 @JsonProperty("isRandomMac") boolean isRandomMac) {
         public DeviceProfile {
             probedSsids = List.copyOf(probedSsids);
-            services = List.copyOf(services);
         }
     }
 
@@ -55,20 +51,18 @@ public final class DeviceProfiler {
         }
     }
 
-    public DeviceProfiler() { this(new OuiLookup(), new BleDecoder()); }
+    public DeviceProfiler() { this(new OuiLookup()); }
 
     OuiLookup ouiLookup() { return oui; }
 
-    public DeviceProfiler(OuiLookup oui, BleDecoder ble) {
+    public DeviceProfiler(OuiLookup oui) {
         this.oui = Objects.requireNonNull(oui);
-        this.ble = Objects.requireNonNull(ble);
     }
 
     public void observe(PacketEvent event) {
         Objects.requireNonNull(event);
         if (!isUnicast(event.srcMac())) return;
-        update(event.srcMac(), event.timestamp(), event.rssi(), DEFAULT_TX_POWER,
-                "Unknown", List.of(), List.of());
+        update(event.srcMac(), event.timestamp(), event.rssi(), List.of(), false);
     }
 
     /** Typed probe fields are unavailable in a generic PacketEvent summary. */
@@ -77,48 +71,13 @@ public final class DeviceProfiler {
         if (!isUnicast(event.sourceMac())) return;
         List<String> ssids = event.wildcard() || event.ssid() == null || event.ssid().isEmpty()
                 ? List.of() : List.of(event.ssid());
-        update(event.sourceMac(), event.timestamp(), event.rssi(), DEFAULT_TX_POWER,
-                "Unknown", ssids, List.of());
+        update(event.sourceMac(), event.timestamp(), event.rssi(), ssids, false);
     }
 
     /** A named probe from tcpdump text, which supplies no reliable signal measurement. */
     public void observeProbe(String mac, String ssid) {
         if (ssid == null || ssid.isBlank() || !isUnicast(mac)) return;
-        update(mac, System.currentTimeMillis(), Double.NaN, DEFAULT_TX_POWER,
-                "Unknown", List.of(ssid), List.of(), true);
-    }
-
-    /** Each advertising report contributes once, including scan responses. */
-    public void observe(BleAdvertisement event) {
-        Objects.requireNonNull(event);
-        var payload = event.payload();
-        var services = new LinkedHashSet<String>();
-        String guessedType = "Unknown";
-        int bestRank = -1;
-        if (payload != null) {
-            for (var data : payload.manufacturerData()) {
-                byte[] bytes;
-                try { bytes = HexFormat.of().parseHex(data.dataHex()); }
-                catch (IllegalArgumentException | NullPointerException malformed) { bytes = new byte[0]; }
-                var finding = ble.decode(data.companyId(), bytes);
-                int rank = finding.notable() ? 2 : finding.deviceType().startsWith("Unknown") ? 0 : 1;
-                if (rank > bestRank) { guessedType = finding.deviceType(); bestRank = rank; }
-            }
-            var rawUuids = new LinkedHashSet<>(payload.serviceUuids());
-            for (var data : payload.serviceData()) rawUuids.add(data.uuid());
-            for (String uuid : rawUuids) {
-                String service = BleDecoder.decodeServiceUuid(uuid);
-                services.add(service);
-                if (bestRank < 1 && !service.equals("Battery Service")
-                        && ble.decodeService(BleDecoder.extract16BitUuid(uuid)) != null) {
-                    guessedType = service;
-                    bestRank = 1;
-                }
-            }
-        }
-        Integer power = payload != null && validPower(payload.txPower()) ? payload.txPower() : event.txPower();
-        update(event.address(), event.timestamp(), event.rssi() == null ? Double.NaN : event.rssi(),
-                validPower(power) ? power : DEFAULT_TX_POWER, guessedType, List.of(), List.copyOf(services));
+        update(mac, System.currentTimeMillis(), Double.NaN, List.of(ssid), true);
     }
 
     public Collection<DeviceProfile> all() {
@@ -130,35 +89,21 @@ public final class DeviceProfiler {
         return key == null ? null : profiles.get(key);
     }
 
-    /** Follows the requested profile filter; distinct from BleFindings.notable(). */
-    public List<DeviceProfile> notable() {
-        return all().stream().filter(profile -> !profile.guessedType().equals("Unknown")).toList();
-    }
-
-    private void update(String mac, long timestamp, double signal, int txPower, String type,
-                        List<String> ssids, List<String> services) {
-        update(mac, timestamp, signal, txPower, type, ssids, services, false);
-    }
-
-    private void update(String mac, long timestamp, double signal, int txPower, String type,
-                        List<String> ssids, List<String> services, boolean retainSignal) {
+    private void update(String mac, long timestamp, double signal, List<String> ssids, boolean retainSignal) {
         String key = normalize(mac);
         if (key == null) return;
         int rssi = Double.isFinite(signal) && signal >= -127 && signal <= 126
                 ? (int) Math.round(signal) : UNKNOWN_RSSI;
         double meters = rssi == UNKNOWN_RSSI ? Double.NaN
-                : Math.clamp(Math.pow(10.0, (txPower - rssi) / 20.0), 0.5, 50.0);
+                : Math.clamp(Math.pow(10.0, (DEFAULT_TX_POWER - rssi) / 20.0), 0.5, 50.0);
         Instant seen = Instant.ofEpochMilli(timestamp);
         boolean randomMac = (Integer.parseInt(key.substring(0, 2), 16) & 0x02) != 0;
         profiles.compute(key, (address, previous) -> {
-            if (previous == null) return new DeviceProfile(address, oui.lookup(address), type,
-                    ssids, services, rssi, meters, seen, seen, 1, randomMac);
+            if (previous == null) return new DeviceProfile(address, oui.lookup(address), "Unknown",
+                    ssids, rssi, meters, seen, seen, 1, randomMac);
             boolean newest = !seen.isBefore(previous.lastSeen());
-            String guess = previous.guessedType();
-            if (!type.startsWith("Unknown") && (newest || guess.startsWith("Unknown"))) guess = type;
-            else if (guess.equals("Unknown")) guess = type;
-            return new DeviceProfile(address, previous.vendor(), guess,
-                    merge(previous.probedSsids(), ssids), merge(previous.services(), services),
+            return new DeviceProfile(address, previous.vendor(), previous.guessedType(),
+                    merge(previous.probedSsids(), ssids),
                     newest && !retainSignal ? rssi : previous.lastRssi(),
                     newest && !retainSignal ? meters : previous.estimatedMeters(),
                     seen.isBefore(previous.firstSeen()) ? seen : previous.firstSeen(),
@@ -167,8 +112,6 @@ public final class DeviceProfiler {
                     randomMac);
         });
     }
-
-    private static boolean validPower(Integer power) { return power != null && power >= -127 && power <= 126; }
 
     private static String normalize(String mac) {
         if (mac == null || !mac.matches("(?i)[0-9a-f]{2}(:[0-9a-f]{2}){5}")) return null;

@@ -24,7 +24,6 @@
   </nav>
   <div class="sidebar-status">
     <div><b>WiFi</b><i id="wifi-dot" class="dot"></i><span id="wifi-status">Connecting</span></div>
-    <div><b>BLE</b><i id="ble-dot" class="dot"></i><span id="ble-status">Connecting</span></div>
     <div><b>Uptime</b><span id="uptime" class="mono">00:00:00</span></div>
   </div>
 </aside>
@@ -35,7 +34,6 @@
     <div class="title-row"><h1>Intel</h1><button data-network-setup>My Network setup</button></div>
     <div class="stats" aria-label="Inventory totals">
       <div class="panel"><span>Observed WiFi addresses</span><strong id="wifi-total">—</strong></div>
-      <div class="panel"><span>Observed BLE addresses</span><strong id="ble-total">—</strong></div>
       <div class="panel"><span>Probes</span><strong id="probe-total">—</strong></div>
       <div class="panel"><span>Unique vendors</span><strong id="vendor-total">—</strong></div>
     </div>
@@ -51,9 +49,6 @@
             <select id="intel-scope"><option value="network">My Network · Last 5 minutes</option><option value="all">All observed</option></select>
           </label>
           <label id="intel-ap-control" class="scope-control">AP <select id="intel-ap" aria-label="Intel access point"></select></label>
-          <div class="segmented" aria-label="Radio filter">
-            <button class="chosen" data-radio="all" aria-pressed="true">All</button><button data-radio="wifi" aria-pressed="false">WiFi</button><button data-radio="ble" aria-pressed="false">BLE</button>
-          </div>
           <label class="range">RSSI <input id="rssi" type="range" min="-100" max="0" value="-100"><output id="rssi-value">Any</output></label>
           <input id="search" type="search" placeholder="Search devices" aria-label="Search devices">
         </div>
@@ -66,7 +61,7 @@
         </div>
       </article>
       <article class="panel">
-        <header><h2>Device detail</h2><span id="detail-radio" class="caption"></span></header>
+        <header><h2>Device detail</h2></header>
         <div id="device-detail"><p class="empty">◉ Select a device to inspect it</p></div>
         <section id="signal-history" class="detail-section" hidden>
           <h2>RSSI history</h2>
@@ -113,15 +108,6 @@
         <p id="nearby-empty" class="empty loading">⌁ Loading nearby access points</p>
       </div>
     </article>
-    <article class="panel registry-panel">
-      <header><h2>Bluetooth SIG matches</h2><span class="caption">Advertisement counts</span></header>
-      <p class="feed-summary caption">Company IDs and service UUID assignments identify registry entries.</p>
-      <div class="table-wrap corpus">
-        <table><thead><tr><th>Code</th><th>Assignment</th><th>Type</th><th>Advertisements</th></tr></thead>
-          <tbody id="ble-registry-rows"></tbody></table>
-        <p id="ble-registry-empty" class="empty">⌁ No Bluetooth matches yet</p>
-      </div>
-    </article>
   </section>
 
   <section id="map" class="view" hidden>
@@ -130,7 +116,6 @@
       <header class="controls">
         <label>Focus <select id="map-ap" aria-label="Map access point"></select></label>
         <button id="reset-graph">Reset focus</button>
-        <label><input id="show-ble" type="checkbox"> Show BLE</label>
         <label><input id="show-unassociated" type="checkbox"> Show unassociated</label>
         <a href="/api/topology.dot" download="topology.dot">Export DOT</a>
         <span id="node-count" class="caption push">— nodes</span>
@@ -146,7 +131,6 @@
         <span><b aria-hidden="true">■</b> Access point</span>
         <span><b aria-hidden="true">◆</b> Phone / tablet</span>
         <span><b aria-hidden="true">▲</b> Laptop / computer</span>
-        <span><b aria-hidden="true">✦</b> Bluetooth tag</span>
         <span><b aria-hidden="true">●</b> Other Wi-Fi</span>
       </div>
     </article>

@@ -11,7 +11,6 @@ import ewave.active.HandshakeAnalyzer;
 import ewave.active.LanScanner;
 import ewave.active.WifiAccessPoints;
 import ewave.capture.PacketBridge;
-import ewave.capture.BleBridge;
 import ewave.core.ScannerDemo;
 import ewave.model.EwaveEvent;
 import ewave.passive.TopologyBuilder;
@@ -35,7 +34,6 @@ import java.util.UUID;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Callable;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -57,7 +55,6 @@ public final class PassiveRfServer implements AutoCloseable {
     private final BlockingQueue<EwaveEvent> events;
     private static final Pattern LOOPBACK_HOST = Pattern.compile("(?i)(?:127\\.0\\.0\\.1|localhost)(?::[0-9]{1,5})?");
     private final PacketBridge wifi;
-    private final BleBridge ble;
     private final boolean operations;
     private final Function<String, FrameInjector> injectorFactory;
     private final LanScanner lanScanner;
@@ -80,28 +77,27 @@ public final class PassiveRfServer implements AutoCloseable {
         }
     }
 
-    public PassiveRfServer(PacketBridge bridge, BleBridge ble) {
-        this(bridge, ble, false);
+    public PassiveRfServer(PacketBridge bridge) {
+        this(bridge, false);
     }
 
-    public PassiveRfServer(PacketBridge bridge, BleBridge ble, boolean operations) {
-        this(bridge, ble, operations, FrameInjector::new, new LanScanner(), new WifiAccessPoints());
+    public PassiveRfServer(PacketBridge bridge, boolean operations) {
+        this(bridge, operations, FrameInjector::new, new LanScanner(), new WifiAccessPoints());
     }
 
     /** Injectable boundaries for tests using fixture streams and cached neighbors. */
-    public PassiveRfServer(PacketBridge bridge, BleBridge ble, boolean operations,
+    public PassiveRfServer(PacketBridge bridge, boolean operations,
                            Function<String, FrameInjector> injectorFactory, LanScanner lanScanner,
                            WifiAccessPoints accessPoints) {
-        this(bridge, ble, operations, injectorFactory, lanScanner, accessPoints,
+        this(bridge, operations, injectorFactory, lanScanner, accessPoints,
                 settings -> new HandshakeAnalyzer(settings.monitorInterface(), settings.apBssid(), settings.clientMac(),
                         settings.channel(), settings.frequencyMhz()));
     }
 
-    public PassiveRfServer(PacketBridge bridge, BleBridge ble, boolean operations,
+    public PassiveRfServer(PacketBridge bridge, boolean operations,
                            Function<String, FrameInjector> injectorFactory, LanScanner lanScanner,
                            WifiAccessPoints accessPoints, Function<HandshakeSettings, HandshakeAnalyzer> handshakeFactory) {
         wifi = Objects.requireNonNull(bridge);
-        this.ble = Objects.requireNonNull(ble);
         this.operations = operations;
         this.injectorFactory = Objects.requireNonNull(injectorFactory);
         this.lanScanner = Objects.requireNonNull(lanScanner);
@@ -137,7 +133,7 @@ public final class PassiveRfServer implements AutoCloseable {
     }
 
     private void registerReports() {
-        app.get("/api/status", ctx -> ctx.json(Map.of("wifi", wifi.getCaptureStatus(), "ble", ble.getStatus(),
+        app.get("/api/status", ctx -> ctx.json(Map.of("wifi", wifi.getCaptureStatus(),
                 "startedAt", startedAt, "operationsEnabled", operations)));
         app.get("/api/capture-health", ctx -> {
             var health = wifi.getCaptureHealth();
@@ -226,10 +222,6 @@ public final class PassiveRfServer implements AutoCloseable {
             if (session == null) unavailable(ctx, "Wi-Fi"); else ctx.contentType("text/vnd.graphviz").result(
                     TopologyBuilder.dot(session.topology()));
         });
-        app.get("/api/ble/summary", ctx -> {
-            var session = ble.getPassiveBle();
-            if (session == null) unavailable(ctx, "BLE"); else ctx.json(session.snapshot());
-        });
         app.get("/api/channels/watch", ctx -> ctx.json(wifi.apWatchState()));
         app.post("/api/channels/watch", ctx -> {
             try {
@@ -263,9 +255,6 @@ public final class PassiveRfServer implements AutoCloseable {
             app.get("/api/devices", ctx -> ctx.json(wifi.getDevices()));
             app.get("/api/profiles", ctx -> ctx.json(wifi.getProfiler().all()));
             app.get("/api/probes", ctx -> ctx.json(wifi.getProbeRequests()));
-            app.get("/api/ble/status", ctx -> ctx.json(ble.getStatus()));
-            app.get("/api/ble/devices", ctx -> ctx.json(ble.getDevices()));
-            app.get("/api/ble/advertisements", ctx -> ctx.json(ble.getAdvertisements()));
         }
     }
 
@@ -537,7 +526,7 @@ public final class PassiveRfServer implements AutoCloseable {
     public void broadcast(EwaveEvent event) {
         Objects.requireNonNull(event, "event");
         if (!operations && (event.payload() != null || !switch (event.type()) {
-            case "WIFI_DEVICE_SEEN", "BLE_DEVICE_SEEN", "PROBE_RECEIVED" -> true;
+            case "WIFI_DEVICE_SEEN", "PROBE_RECEIVED" -> true;
             default -> false;
         })) return;
         final String json;
@@ -562,12 +551,7 @@ public final class PassiveRfServer implements AutoCloseable {
     private void consumeEvents() {
         while (!Thread.currentThread().isInterrupted()) {
             try {
-                EwaveEvent event = events.poll(1, TimeUnit.MINUTES);
-                if (event != null) broadcast(event);
-                else {
-                    var session = ble.getPassiveBle();
-                    if (session != null) session.purge();
-                }
+                broadcast(events.take());
             } catch (InterruptedException interrupted) {
                 Thread.currentThread().interrupt();
             } catch (RuntimeException failure) {

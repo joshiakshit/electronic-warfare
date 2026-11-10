@@ -21,9 +21,6 @@ public record EwaveEvent(
     public static final String DEVICE_UPDATED = "DEVICE_UPDATED";
     public static final String PACKET_SEEN = "PACKET_SEEN";
     public static final String PROBE_REQUEST = "PROBE_REQUEST";
-    public static final String BLE_ADVERTISEMENT = "BLE_ADVERTISEMENT";
-    public static final String BLE_DEVICE_UPDATED = "BLE_DEVICE_UPDATED";
-    public static final String BLE_DEVICE_REMOVED = "BLE_DEVICE_REMOVED";
     public static final String ATTACK_STARTED = "ATTACK_STARTED";
     public static final String ATTACK_RESULT = "ATTACK_RESULT";
     public static final String CHANNEL_SCORED = "CHANNEL_SCORED";
@@ -43,12 +40,6 @@ public record EwaveEvent(
     public static EwaveEvent probeRequest(ProbeRequest probe) {
         return now(PROBE_REQUEST, probe);
     }
-
-    public static EwaveEvent bleAdvertisement(BleAdvertisement advertisement) {
-        return now(BLE_ADVERTISEMENT, advertisement);
-    }
-    public static EwaveEvent bleDeviceUpdated(BleDevice device) { return now(BLE_DEVICE_UPDATED, device); }
-    public static EwaveEvent bleDeviceRemoved(String id) { return now(BLE_DEVICE_REMOVED, id); }
 
     public static EwaveEvent attackStarted(Object payload) {
         return now(ATTACK_STARTED, payload);

@@ -64,7 +64,8 @@ input[type=checkbox], input[type=range] { accent-color: var(--accent-green); }
 ::-webkit-scrollbar { width: 4px; height: 4px; }
 ::-webkit-scrollbar-track { background: var(--bg-panel); }
 ::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 4px; }
-.stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--section-gap); margin-bottom: var(--section-gap); }
+.stats { display: grid; grid-template-columns: repeat(var(--stats-columns, 4), minmax(0, 1fr)); gap: var(--section-gap); margin-bottom: var(--section-gap); }
+#intel .stats { --stats-columns: 3; }
 .stats .panel { display: grid; align-content: start; gap: 8px; padding: var(--panel-padding); }
 .stats span { color: var(--text-secondary); font-size: 12px; }
 .stats strong { font: 650 26px var(--mono); overflow-wrap: anywhere; }

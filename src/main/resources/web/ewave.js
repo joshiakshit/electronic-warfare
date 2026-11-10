@@ -13,7 +13,7 @@
   const intelPageSize = 100;
   const timestamp = value => finite(value) ? value : Date.parse(value);
   const state = {
-    view: 'intel', radio: 'all', wifi: [], ble: [], topology: {}, summary: null, status: null,
+    view: 'intel', wifi: [], topology: {}, status: null,
     profile: null, captureRevision: 0, profileRevision: 0, profileSaving: false,
     scope: 'network', apChoice: null, autoAp: null, intelLimit: intelPageSize,
     audit: null, ssid: null, selected: null, known: new Set(), flashed: new Map(),
@@ -73,27 +73,12 @@
       device.capabilities?.wifiGeneration].filter(value => value && value !== 'Unknown').join(' · ');
     const hint = device.fingerprintHint?.family || (device.guessedType === 'Unknown' ? null : device.guessedType);
     return {
-      id: device.id || device.mac, radio: 'WiFi', vendor: device.vendor || 'Unknown',
+      id: device.id || device.mac, vendor: device.vendor || 'Unknown',
       type: observed || (hint ? hint + ' (hint)' : 'Unknown'),
       rssi: device.rssiMedian ?? legacySignal, distance: finite(device.estimatedMeters) ? device.estimatedMeters.toFixed(1) + ' m' : unavailable,
       first: device.firstSeen, last: device.lastSeen, count: device.packetCount, random: device.locallyAdministered ?? device.isRandomMac,
       names: device.probedSsids || [], details: device
     };
-  }
-
-  function normalizeBle(asset) {
-    const history = asset.history || [];
-    const last = history.at(-1);
-    return {
-      id: asset.id, radio: 'BLE', label: asset.label, vendor: asset.companies?.join(', ') || 'Unknown',
-      type: asset.deviceClass?.replaceAll('_', ' ') || 'Enrolled tag', rssi: last?.rssi,
-      distance: last?.proximityZone || unavailable, first: history[0]?.timestamp, last: last?.timestamp,
-      count: history.length, random: asset.addressType?.startsWith('random'), details: asset
-    };
-  }
-
-  function bleCount() {
-    return state.summary ? Object.values(state.summary.observedAddressesByClass || {}).reduce((sum, count) => sum + count, 0) : null;
   }
 
   function tickUptime() {
@@ -104,22 +89,16 @@
   }
 
   function updateStatus() {
-    const wifi = state.status?.wifi, ble = state.status?.ble;
+    const wifi = state.status?.wifi;
     $('wifi-status').textContent = wifi?.captureMode === 'replay' ? 'Replay · ' + (wifi.replayState || '').toLowerCase()
       : wifi?.captureRunning ? [wifi.captureMode, wifi.captureInterface].filter(Boolean).join(' · ')
       : wifi?.captureError ? 'Capture ended' : 'Idle';
     $('wifi-status').title = wifi?.captureError || (wifi?.scopedBssidCount ? 'Scoped to ' + wifi.scopedBssidCount + ' BSSIDs' : '');
-    $('ble-status').textContent = ble?.captureRunning ? (bleCount() ?? '—') + ' addresses'
-      : ble?.captureError ? 'Capture ended' : 'Idle';
-    $('ble-status').title = ble?.captureError || '';
-    for (const [name, radio] of [['wifi', wifi], ['ble', ble]]) {
-      $(name + '-dot').classList.toggle('live', !!radio?.captureRunning);
-      $(name + '-dot').classList.toggle('error', !!radio?.captureError);
-    }
+    $('wifi-dot').classList.toggle('live', !!wifi?.captureRunning);
+    $('wifi-dot').classList.toggle('error', !!wifi?.captureError);
     $('wifi-total').textContent = number(state.wifi.length);
-    $('ble-total').textContent = number(bleCount());
     $('probe-total').textContent = number(wifi?.probeRequests);
-    const vendors = new Set([...state.wifi.map(item => item.vendor), ...Object.keys(state.summary?.companyCounts || {})]);
+    const vendors = new Set(state.wifi.map(item => item.vendor));
     vendors.delete('Unknown');
     vendors.delete('Locally administered');
     $('vendor-total').textContent = number(vendors.size);
@@ -214,7 +193,7 @@
     const wifi = wifiWithLabels();
     const outside = new Set((state.topology.edges || []).map(edge => edge.clientId));
     for (const edge of topology.edges || []) outside.delete(edge.clientId);
-    window.EwaveGraph.update(topology, wifi.filter(device => !outside.has(device.id)), state.ble, focus, state.selected);
+    window.EwaveGraph.update(topology, wifi.filter(device => !outside.has(device.id)), focus, state.selected);
     const evidence = $('map-evidence');
     const item = wifi.find(device => device.id === state.selected);
     const linked = (topology.edges || []).some(edge => edge.clientId === state.selected);
@@ -233,7 +212,6 @@
     $('intel-ap-control').hidden = state.scope !== 'network';
     const wifi = wifiWithLabels();
     renderPinned(wifi);
-    const all = [...wifi, ...state.ble];
     const topology = networkTopology();
     const edges = topology.edges || [];
     const recent = edges.filter(edge => timestamp(edge.lastSeen) >= now - recentMs);
@@ -241,9 +219,8 @@
     for (const ap of topology.accessPoints || []) {
       if ((focus === 'all' || ap.bssid === focus) && timestamp(ap.lastSeen) >= now - recentMs) network.add(ap.bssid);
     }
-    const devices = state.scope === 'network' ? wifi.filter(item => network.has(item.id)) : all;
-    const visible = devices.filter(item => (state.radio === 'all' || item.radio.toLowerCase() === state.radio)
-      && (minimum === -100 || !finite(item.rssi) || item.rssi >= minimum)
+    const devices = state.scope === 'network' ? wifi.filter(item => network.has(item.id)) : wifi;
+    const visible = devices.filter(item => (minimum === -100 || !finite(item.rssi) || item.rssi >= minimum)
       && [item.id, item.vendor, item.type, item.label, item.details.fingerprintHint?.family]
         .some(value => String(value || '').toLowerCase().includes(query)))
       .sort((a, b) => (timestamp(b.last) || 0) - (timestamp(a.last) || 0) || a.id.localeCompare(b.id));
@@ -272,8 +249,7 @@
     $('feed-count').textContent = shown.length + (shown.length < visible.length ? ' of ' + visible.length : '') + ' shown';
     $('more-intel').hidden = shown.length >= visible.length;
     blank('feed-empty', visible.length === 0,
-      state.radio === 'ble' && !state.ble.length ? '◉ BLE addresses are counted in aggregate. Enrolled tags appear here.'
-        : state.scope === 'network' && !devices.length ? '◉ No recent AP or client evidence in this scope. Try All observed.'
+      state.scope === 'network' && !devices.length ? '◉ No recent AP or client evidence in this scope. Try All observed.'
           : devices.length ? '◉ No devices match these filters' : '◉ No device observations yet');
     renderDetail(selected);
   }
@@ -329,55 +305,39 @@
 
   function renderDetail(item) {
     const detail = $('device-detail');
-    $('detail-radio').textContent = item?.radio || '';
     inspectSignalAndFingerprints(item);
     if (!item) { detail.replaceChildren(element('p', '◉ Select a device to inspect it', 'empty')); return; }
     const facts = element('dl', null, 'facts');
     const values = [
       ...(item.label ? [['Enrolled name', item.label]] : []),
-      ['MAC / ID', item.id, 'mono'], [item.radio === 'WiFi' ? 'Vendor hint' : 'Vendor', item.vendor],
-      ['Role / class', item.type], [item.radio === 'WiFi' && item.details.id ? 'Median RSSI' : 'RSSI', signal(item.rssi), 'mono'],
-      ['Distance', item.distance], ['First seen', clock(item.first)], ['Last seen', clock(item.last)], ['Packets / samples', number(item.count)]
+      ['MAC / ID', item.id, 'mono'], ['Vendor hint', item.vendor],
+      ['Role / class', item.type], [item.details.id ? 'Median RSSI' : 'RSSI', signal(item.rssi), 'mono'],
+      ['Distance', item.distance], ['First seen', clock(item.first)], ['Last seen', clock(item.last)], ['Packets', number(item.count)]
     ];
-    if (item.radio === 'BLE') {
-      const ble = item.details;
-      values.push(['Tag', item.label], ['PDU', ble.pduType], ['Address type', ble.addressType],
-        ['Connectable', ble.connectable ? 'Yes' : 'No'], ['Appearance', ble.appearance], ['TX power', ble.txPower],
-        ['Median interval', finite(ble.intervalMsMedian) ? ble.intervalMsMedian + ' ms' : unavailable]);
-    } else {
-      const wifi = item.details;
-      if (wifi.fingerprintHint) {
-        const { family, osHint, confidence } = wifi.fingerprintHint;
-        values.push(['Fingerprint class hint', [family, osHint].filter(Boolean).join(' · ')
-          + (finite(confidence) ? ' · score ' + confidence : '')]);
-      }
-      if (wifi.bands?.length) values.push(['Bands observed', wifi.bands.join(', ')]);
-      if (finite(wifi.directedProbeCount)) values.push(['Directed / wildcard', wifi.directedProbeCount + ' / ' + wifi.wildcardProbeCount],
-        ['WPS UUID-E', wifi.wpsUuidESeen ? 'Observed' : unavailable]);
+    const wifi = item.details;
+    if (wifi.fingerprintHint) {
+      const { family, osHint, confidence } = wifi.fingerprintHint;
+      values.push(['Fingerprint class hint', [family, osHint].filter(Boolean).join(' · ')
+        + (finite(confidence) ? ' · score ' + confidence : '')]);
     }
+    if (wifi.bands?.length) values.push(['Bands observed', wifi.bands.join(', ')]);
+    if (finite(wifi.directedProbeCount)) values.push(['Directed / wildcard', wifi.directedProbeCount + ' / ' + wifi.wildcardProbeCount],
+      ['WPS UUID-E', wifi.wpsUuidESeen ? 'Observed' : unavailable]);
     for (const [label, value, style] of values) facts.append(element('dt', label), element('dd', value ?? unavailable, style));
     detail.replaceChildren(facts);
-    if (item.radio === 'WiFi') {
-      const advertised = advertisedWifi(item);
-      if (advertised) detail.append(advertised);
-      const evidence = linkEvidence(item.id, item);
-      if (evidence) detail.append(evidence);
-    }
+    const advertised = advertisedWifi(item);
+    if (advertised) detail.append(advertised);
+    const evidence = linkEvidence(item.id, item);
+    if (evidence) detail.append(evidence);
     const related = state.audit?.corpus?.filter(entry => entry.devices?.some(device => device.id === item.id))
       .map(entry => entry.name || entry.id) || [];
-    const groups = item.radio === 'WiFi' ? [['Probed SSIDs', [...new Set([...item.names, ...related])]]]
-      : [['BLE services', item.details.services], ['Decoded protocols', [...(item.details.continuityTypes || []),
-        ...(item.details.eddystoneTypes || []).map(type => 'Eddystone ' + type),
-        ...(item.details.fastPairModelId ? ['Fast Pair ' + item.details.fastPairModelId] : []),
-        ...(item.details.fastPairNonDiscoverable ? ['Fast Pair non-discoverable'] : [])]]];
-    for (const [label, tags] of groups) {
-      detail.append(element('h2', label));
-      const chips = element('div', null, 'chips');
-      if (!tags?.length) chips.append(element('span', '—', 'caption'));
-      for (const value of tags || []) chips.append(element('span', value, 'chip'));
-      detail.append(chips);
-    }
-    if (item.radio === 'WiFi' && state.status?.operationsEnabled) {
+    const tags = [...new Set([...item.names, ...related])];
+    detail.append(element('h2', 'Probed SSIDs'));
+    const chips = element('div', null, 'chips');
+    if (!tags.length) chips.append(element('span', '—', 'caption'));
+    for (const value of tags) chips.append(element('span', value, 'chip'));
+    detail.append(chips);
+    if (state.status?.operationsEnabled) {
       const target = element('button', 'Target →');
       target.addEventListener('click', async () => {
         switchView('ops');
@@ -437,13 +397,12 @@
   let inspection;
   function inspectSignalAndFingerprints(item) {
     $('signal-history').hidden = !item;
-    const wifi = item?.radio === 'WiFi' && item.details.id;
-    const id = wifi ? item.id : null;
+    const id = item?.details.id ? item.id : null;
     const enrolled = !!(id && item.label);
     $('fingerprint-form').hidden = !enrolled;
     if (!id) {
       inspection = null;
-      if (item) renderSignal(item.details.history || []);
+      if (item) renderSignal([]);
       return;
     }
     if (inspection?.id === id && inspection.revision === state.captureRevision && inspection.enrolled === enrolled) return;
@@ -589,16 +548,12 @@
   async function refreshInventory() {
     return once('inventory', async () => {
       const revision = state.captureRevision;
-      const replies = await Promise.allSettled([
-        api('/api/inventory', undefined, 404), api('/api/ble/summary', undefined, 404)
-      ]);
-      if (revision === state.captureRevision && replies[0].status === 'fulfilled') state.wifi = (replies[0].value || []).map(normalizeWifi);
-      if (replies[1].status === 'fulfilled') {
-        state.summary = replies[1].value;
-        state.ble = (state.summary?.enrolledAssets || []).map(normalizeBle);
+      const inventory = await api('/api/inventory', undefined, 404).catch(() => undefined);
+      if (revision === state.captureRevision && inventory !== undefined) {
+        state.wifi = (inventory || []).map(normalizeWifi);
       }
       const now = Date.now();
-      const ids = new Set([...state.wifi, ...state.ble].map(item => item.id));
+      const ids = new Set(state.wifi.map(item => item.id));
       for (const id of ids) if (!state.known.has(id)) state.flashed.set(id, now);
       state.known = ids;
       for (const [id, timestamp] of state.flashed) if (now - timestamp > 1400) state.flashed.delete(id);
@@ -618,7 +573,6 @@
         if (state.view === 'intel' && state.status.wifi?.captureMode === 'replay') renderIntel();
       } catch (error) {
         $('wifi-status').textContent = 'Status unavailable';
-        $('ble-status').textContent = 'Status unavailable';
       }
     });
   }
@@ -835,8 +789,7 @@
         if (revision !== state.captureRevision) return;
         state.audit = audit;
         if (state.view === 'probe') renderAudit();
-        if (state.view === 'intel' && state.selected) renderDetail(wifiWithLabels().find(item => item.id === state.selected)
-          || state.ble.find(item => item.id === state.selected));
+        if (state.view === 'intel' && state.selected) renderDetail(wifiWithLabels().find(item => item.id === state.selected));
       } catch (error) { if (state.view === 'probe') blank('ssid-empty', true, '⊞ ' + error.message); }
     });
   }
@@ -1050,15 +1003,6 @@
     renderIntel();
   }
 
-  function setRadio(radio) {
-    state.radio = radio;
-    for (const filter of by('[data-radio]')) {
-      const active = filter.dataset.radio === radio;
-      filter.classList.toggle('chosen', active);
-      filter.setAttribute('aria-pressed', String(active));
-    }
-  }
-
   $('search').addEventListener('input', resetIntelPage);
   $('rssi').addEventListener('input', () => {
     $('rssi-value').textContent = $('rssi').value === '-100' ? 'Any' : $('rssi').value + ' dBm';
@@ -1067,12 +1011,6 @@
   $('more-intel').addEventListener('click', () => { state.intelLimit += intelPageSize; renderIntel(); });
   $('intel-scope').addEventListener('change', () => {
     state.scope = $('intel-scope').value;
-    if (state.scope === 'network' && state.radio === 'ble') setRadio('all');
-    resetIntelPage();
-  });
-  for (const button of by('[data-radio]')) button.addEventListener('click', () => {
-    setRadio(button.dataset.radio);
-    if (state.radio === 'ble') state.scope = 'all';
     resetIntelPage();
   });
   $('intel-ap').addEventListener('change', () => {
@@ -1089,7 +1027,7 @@
     window.EwaveGraph.reset();
     renderMap();
   });
-  for (const id of ['show-ble', 'show-unassociated']) $(id).addEventListener('change', renderMap);
+  $('show-unassociated').addEventListener('change', renderMap);
   $('graph-wrap').addEventListener('ewave:select', event => {
     state.selected = event.detail;
     renderMap();
@@ -1128,12 +1066,6 @@
       return entry;
     }));
     blank('nearby-empty', !aps.length, '⌁ No nearby access points heard recently');
-    const matches = state.summary?.registryMatches || [];
-    const kinds = { COMPANY_ID: 'Company ID', GATT_SERVICE: 'Adopted GATT service', MEMBER_UUID: 'Member UUID' };
-    $('ble-registry-rows').replaceChildren(...matches.map(match =>
-      row([element('td', match.code, 'mono'), match.name, kinds[match.kind] || match.kind, number(match.advertisements)])));
-    blank('ble-registry-empty', !matches.length, state.status?.ble?.enabled
-      ? '⌁ No Bluetooth SIG matches yet' : '⌁ BLE capture is disabled');
   }
 
   function renderProfileView() {
@@ -1325,7 +1257,7 @@
     socket.onmessage = event => {
       let type;
       try { ({ type } = JSON.parse(event.data)); } catch { return; }
-      if (['WIFI_DEVICE_SEEN', 'BLE_DEVICE_SEEN', 'DEVICE_APPEARED', 'DEVICE_UPDATED', 'BLE_DEVICE_UPDATED'].includes(type)) {
+      if (['WIFI_DEVICE_SEEN', 'DEVICE_APPEARED', 'DEVICE_UPDATED'].includes(type)) {
         inventoryTimer ||= setTimeout(() => { inventoryTimer = null; refreshInventory(); }, 1000);
       }
       if (['PROBE_RECEIVED', 'PROBE_REQUEST'].includes(type)) {

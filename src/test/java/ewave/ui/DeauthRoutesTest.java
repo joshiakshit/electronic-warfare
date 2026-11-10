@@ -5,7 +5,6 @@ import ewave.active.FrameInjector;
 import ewave.active.LanScanner;
 import ewave.active.WifiAccessPoints;
 import ewave.fixtures.CompletedProcess;
-import ewave.capture.BleBridge;
 import ewave.capture.PacketBridge;
 import ewave.fixtures.StreamingCaptureProcess;
 import ewave.model.PacketEvent;
@@ -37,8 +36,7 @@ class DeauthRoutesTest {
 
     @Test void missingApCacheReturnsAnActionableErrorAndPreventsInjection() throws Exception {
         try (var bridge = new PacketBridge();
-             var ble = new BleBridge(bridge.getEventQueue(), bridge.getProfiler());
-             var server = new PassiveRfServer(bridge, ble, true, monitor -> new FrameInjector(monitor,
+             var server = new PassiveRfServer(bridge, true, monitor -> new FrameInjector(monitor,
                      builder -> { fail("must not start without a cached AP"); return null; }), new LanScanner(),
                      new WifiAccessPoints(temporary.resolve("missing-aps"))).start(0);
              var client = HttpClient.newHttpClient()) {
@@ -59,8 +57,7 @@ class DeauthRoutesTest {
         for (boolean fails : new boolean[]{false, true}) {
             var scanner = new LanScanner(fails ? temporary.resolve("missing-arp") : table);
             try (var bridge = new PacketBridge();
-                 var ble = new BleBridge(bridge.getEventQueue(), bridge.getProfiler());
-                 var server = new PassiveRfServer(bridge, ble, true, FrameInjector::new, scanner, cachedAps()).start(0);
+                 var server = new PassiveRfServer(bridge, true, FrameInjector::new, scanner, cachedAps()).start(0);
                  var client = HttpClient.newHttpClient()) {
                 var response = get(client, server, "/api/attack/scan-lan");
                 if (fails) {
@@ -81,8 +78,7 @@ class DeauthRoutesTest {
         var launched = new CountDownLatch(1);
         var command = new AtomicReference<List<String>>();
         try (var bridge = new PacketBridge();
-             var ble = new BleBridge(bridge.getEventQueue(), bridge.getProfiler());
-             var server = new PassiveRfServer(bridge, ble, true, monitor -> new FrameInjector(monitor, builder -> {
+             var server = new PassiveRfServer(bridge, true, monitor -> new FrameInjector(monitor, builder -> {
                  if (builder.command().get(1).equals("iw")) return new CompletedProcess("", 0);
                 command.set(builder.command()); launched.countDown(); return process;
              }), new LanScanner(), cachedAps()).start(0);
@@ -135,8 +131,7 @@ class DeauthRoutesTest {
 
     @Test void validatesJsonTypesAndArgumentsAndReturnsLaunchErrorsAsResults() throws Exception {
         try (var bridge = new PacketBridge();
-             var ble = new BleBridge(bridge.getEventQueue(), bridge.getProfiler());
-             var server = new PassiveRfServer(bridge, ble, true, monitor -> new FrameInjector(monitor,
+             var server = new PassiveRfServer(bridge, true, monitor -> new FrameInjector(monitor,
                      builder -> {
                          if (builder.command().get(1).equals("iw")) return new CompletedProcess("", 0);
                          throw new IOException("aireplay-ng missing");
@@ -163,8 +158,7 @@ class DeauthRoutesTest {
             var process = new StreamingCaptureProcess();
             var launched = new CountDownLatch(1);
             try (var bridge = new PacketBridge();
-                 var ble = new BleBridge(bridge.getEventQueue(), bridge.getProfiler());
-                 var server = new PassiveRfServer(bridge, ble, true, monitor -> new FrameInjector(monitor, builder -> {
+                 var server = new PassiveRfServer(bridge, true, monitor -> new FrameInjector(monitor, builder -> {
                      if (builder.command().get(1).equals("iw")) return new CompletedProcess("", 0);
                  launched.countDown(); return process;
                  }), new LanScanner(), cachedAps()).start(0);

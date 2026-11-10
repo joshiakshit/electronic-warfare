@@ -3,7 +3,6 @@ package ewave.capture;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import ewave.core.AdaptiveScanner;
-import ewave.fixtures.BleFrames;
 import ewave.fixtures.StreamingCaptureProcess;
 import ewave.model.DeviceRecord;
 import ewave.model.EwaveEvent;
@@ -40,8 +39,7 @@ class ConsolidatedServerTest {
 
     @Test void servesNewUiAndRejectsCrossOriginOperations() throws Exception {
         try (var bridge = new PacketBridge();
-             var ble = new BleBridge(bridge.getEventQueue(), bridge.getProfiler());
-             var server = new PassiveRfServer(bridge, ble, true).start(0);
+             var server = new PassiveRfServer(bridge, true).start(0);
              var client = HttpClient.newHttpClient()) {
             assertEquals(200, get(client, server, "/").statusCode());
             for (String asset : List.of("/ewave.js", "/ewave.css", "/graph.js", "/spectrum.js"))
@@ -61,8 +59,7 @@ class ConsolidatedServerTest {
 
     @Test void comparesBothPoliciesOnTheSameFixtureWithoutACapture() throws Exception {
         try (var bridge = new PacketBridge();
-             var ble = new BleBridge(bridge.getEventQueue(), bridge.getProfiler());
-             var server = new PassiveRfServer(bridge, ble, false).start(0);
+             var server = new PassiveRfServer(bridge, false).start(0);
              var client = HttpClient.newHttpClient()) {
             var response = get(client, server, "/api/channels/demo");
             assertEquals(200, response.statusCode());
@@ -93,8 +90,7 @@ class ConsolidatedServerTest {
         tuned.finish();
         try (var bridge = new PacketBridge(builder -> builder.command().getFirst().equals("sudo") ? tuned : process,
                      Map.of("021122", "Lab Vendor"), new DeviceProfiler(), 50);
-             var ble = new BleBridge(bridge.getEventQueue(), bridge.getProfiler());
-             var server = new PassiveRfServer(bridge, ble, true).start(0);
+             var server = new PassiveRfServer(bridge, true).start(0);
              var client = HttpClient.newHttpClient()) {
             bridge.start("lab0", scanner);
             process.write((packet + "\n").getBytes(StandardCharsets.UTF_8));
@@ -141,8 +137,7 @@ class ConsolidatedServerTest {
 
     @Test void broadcastsQueueAndDirectEventsToMultipleClientsAndStopsTheConsumer() throws Exception {
         try (var bridge = new PacketBridge();
-             var ble = new BleBridge(bridge.getEventQueue(), bridge.getProfiler());
-             var server = new PassiveRfServer(bridge, ble, true).start(0);
+             var server = new PassiveRfServer(bridge, true).start(0);
              var client = HttpClient.newHttpClient()) {
             var first = new Events();
             var second = new Events();
@@ -196,8 +191,7 @@ class ConsolidatedServerTest {
             @Override public void destroy() { }
         };
         try (var bridge = new PacketBridge(builder -> process, Map.of());
-             var ble = new BleBridge(bridge.getEventQueue(), bridge.getProfiler());
-             var server = new PassiveRfServer(bridge, ble, true).start(0);
+             var server = new PassiveRfServer(bridge, true).start(0);
              var client = HttpClient.newHttpClient()) {
             var events = new Events();
             var socket = connect(client, server, events);
@@ -222,78 +216,6 @@ class ConsolidatedServerTest {
             } finally {
                 socket.abort();
             }
-        }
-    }
-
-    @Test void servesBleDevicesReportsAndLiveEventsWithoutMergingWifiRecords() throws Exception {
-        var process = new StreamingCaptureProcess();
-        try (var bridge = new PacketBridge();
-             var ble = new BleBridge(bridge.getEventQueue(), builder -> process, bridge.getProfiler());
-             var server = new PassiveRfServer(bridge, ble, true).start(0);
-             var client = HttpClient.newHttpClient()) {
-            var events = new Events();
-            var socket = connect(client, server, events);
-            try {
-                ble.start(0);
-                process.write(BleFrames.snoop(1002,0,BleFrames.legacy(BleFrames.data())));
-                var deviceEvent = events.next(mapper);
-                assertEquals(EwaveEvent.BLE_DEVICE_UPDATED,deviceEvent.path("type").asText());
-                assertEquals("Lab Tag",deviceEvent.at("/payload/lastAdvertisedName").asText());
-                var advertisement = events.next(mapper);
-                assertEquals(EwaveEvent.BLE_ADVERTISEMENT,advertisement.path("type").asText());
-                var history = get(client,server,"/api/ble/advertisements");
-                assertEquals(200,history.statusCode());
-                assertEquals(advertisement.path("payload"),mapper.readTree(history.body()).get(0));
-                var devices = mapper.readTree(get(client,server,"/api/ble/devices").body());
-                assertEquals(1,devices.size());
-                assertEquals(mapper.readTree("{}"),mapper.readTree(get(client,server,"/api/devices").body()));
-                var status = mapper.readTree(get(client,server,"/api/ble/status").body());
-                assertTrue(status.path("captureRunning").asBoolean());
-                assertEquals("passive",status.path("scanMode").asText());
-            } finally { socket.abort(); }
-        }
-    }
-
-    @Test void exposesSharedWifiAndBleProfilesOncePerCapturedFrame() throws Exception {
-        var wifiProcess = new StreamingCaptureProcess();
-        var bleProcess = new StreamingCaptureProcess();
-        try (var bridge = new PacketBridge(builder -> wifiProcess, Map.of());
-             var ble = new BleBridge(bridge.getEventQueue(), builder -> bleProcess, bridge.getProfiler());
-             var server = new PassiveRfServer(bridge, ble, true).start(0);
-             var client = HttpClient.newHttpClient()) {
-            bridge.startProbes("lab0mon");
-            ble.start(0);
-            wifiProcess.write((MAC + " > Broadcast, Probe Request (Research lab)\n").getBytes(StandardCharsets.UTF_8));
-            bleProcess.write(BleFrames.snoop(1002, 0, BleFrames.legacy(BleFrames.concat(
-                    BleFrames.ad(0xff, new byte[]{0x4c, 0, 0x02}),
-                    BleFrames.ad(3, new byte[]{0x0d, 0x18, (byte) 0xf1, (byte) 0xfc}),
-                    BleFrames.ad(0x16, new byte[]{0x69, (byte) 0xfd})))));
-            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-            while (bridge.getProfiler().all().size() < 2 && System.nanoTime() < deadline) Thread.sleep(5);
-            assertEquals(2, bridge.getProfiler().all().size());
-            assertSame(bridge.getProfiler(), ble.getProfiler());
-            var response = get(client, server, "/api/profiles");
-            assertEquals(200, response.statusCode());
-            var profiles = mapper.readTree(response.body());
-            assertTrue(profiles.isArray());
-            assertEquals(2, profiles.size());
-            assertEquals("Research lab", profiles.get(0).path("probedSsids").get(0).asText());
-            assertEquals("iBeacon", profiles.get(1).path("guessedType").asText());
-            assertEquals("Heart Rate Monitor", profiles.get(1).path("services").get(0).asText());
-            assertEquals("Google Nearby Share (Android phone)", profiles.get(1).path("services").get(1).asText());
-            assertEquals("Google Find My Device", profiles.get(1).path("services").get(2).asText());
-            assertTrue(Instant.parse(profiles.get(0).path("firstSeen").asText()).isAfter(Instant.now().minusSeconds(30)));
-            assertEquals("2023-11-14T22:13:20Z", profiles.get(1).path("firstSeen").asText());
-            assertTrue(profiles.get(0).path("estimatedMeters").isNull());
-            assertTrue(profiles.get(1).path("estimatedMeters").isNumber());
-            for (var profile : profiles) {
-                assertEquals(1, profile.path("packetCount").asInt());
-                assertTrue(profile.path("isRandomMac").isBoolean());
-                assertTrue(profile.path("isRandomMac").asBoolean());
-            }
-            bridge.stop();
-            ble.stop();
-            assertEquals(profiles, mapper.readTree(get(client, server, "/api/profiles").body()));
         }
     }
 
