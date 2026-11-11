@@ -57,7 +57,7 @@ class ConsolidatedServerTest {
         }
     }
 
-    @Test void comparesBothPoliciesOnTheSameFixtureWithoutACapture() throws Exception {
+    @Test void comparesThreePoliciesOnTheSameFixtureWithoutACapture() throws Exception {
         try (var bridge = new PacketBridge();
              var server = new PassiveRfServer(bridge, false).start(0);
              var client = HttpClient.newHttpClient()) {
@@ -70,7 +70,11 @@ class ConsolidatedServerTest {
             assertTrue(demo.at("/fixed/detections/1/delayMs").isNull());
             assertEquals(1350, demo.at("/adaptive/detections/1/delayMs").asInt());
             assertEquals(950, demo.at("/adaptive/detections/2/delayMs").asInt());
-            for (String name : List.of("fixed", "adaptive")) {
+            assertEquals(450, demo.at("/roundRobin/detections/1/delayMs").asInt());
+            assertEquals(1150, demo.at("/roundRobin/detections/2/delayMs").asInt());
+            assertEquals(13, demo.at("/roundRobin/channelsVisited").asInt());
+            assertEquals(119, demo.at("/roundRobin/retunes").asInt());
+            for (String name : List.of("fixed", "roundRobin", "adaptive")) {
                 var run = demo.path(name);
                 long dwell = 0;
                 for (var channel : run.path("dwellMs")) dwell += channel.asLong();
@@ -78,6 +82,23 @@ class ConsolidatedServerTest {
                         dwell + run.path("retunes").asLong() * demo.path("simulatedRetuneMs").asLong());
                 assertEquals(140, run.path("capturedFrames").asInt() + run.path("missedFrames").asInt());
             }
+        }
+    }
+
+    @Test void decodesSyntheticProbeDemoWithoutEnablingCaptureOrDisclosingLiveNames() throws Exception {
+        try (var bridge = new PacketBridge();
+             var server = new PassiveRfServer(bridge).start(0);
+             var client = HttpClient.newHttpClient()) {
+            assertEquals(404, get(client, server, "/api/probe-audit").statusCode());
+            var response = get(client, server, "/api/probe-audit/demo");
+            assertEquals(200, response.statusCode());
+            var samples = mapper.readTree(response.body());
+            assertEquals(2, samples.size());
+            assertEquals("Lab (guest)", samples.get(0).path("networkName").asText());
+            assertEquals(6, samples.get(0).path("channel").asInt());
+            assertTrue(samples.get(1).path("networkName").isNull());
+            assertEquals(1000, samples.get(1).path("elapsedMs").asInt());
+            assertEquals(404, get(client, server, "/api/probe-audit").statusCode());
         }
     }
 

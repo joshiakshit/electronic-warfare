@@ -37,6 +37,7 @@ logs/
 
 # Synthetic capture fixtures used by tests and offline replay
 !/src/test/resources/probes/probe-requests.pcap
+!/src/test/resources/probes/hidden-network.pcap
 
 # Frozen numerical reference fixtures
 !src/test/resources/reference/*.csv

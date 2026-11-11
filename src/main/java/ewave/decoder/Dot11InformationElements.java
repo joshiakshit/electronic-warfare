@@ -1,5 +1,6 @@
 package ewave.decoder;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HexFormat;
@@ -47,6 +48,12 @@ public record Dot11InformationElements(List<Element> elements) {
     public static boolean hidden(byte[] ssid) {
         for (byte octet : ssid) if (octet != 0) return false;
         return true;
+    }
+
+    public static String ssidLabel(byte[] ssid) {
+        String name = new String(ssid, StandardCharsets.UTF_8);
+        return Arrays.equals(ssid, name.getBytes(StandardCharsets.UTF_8))
+                ? name : "SSID bytes " + HexFormat.ofDelimiter(" ").formatHex(ssid);
     }
 
     /** WPS UUID-E presence only. Never reads or returns the identifier itself. */

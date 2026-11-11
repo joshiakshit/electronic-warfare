@@ -2,6 +2,7 @@ package ewave.passive;
 
 import ewave.decoder.Dot11Frame;
 import ewave.decoder.Dot11FrameDecoder;
+import ewave.decoder.Dot11InformationElements;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -26,7 +27,8 @@ public final class TopologyBuilder {
                               Integer stationCount, Integer channelUtilization, Integer availableAdmissionCapacity,
                               String country, String radioGroupId, String essId, Double rssiMedian,
                               String rssiBand, long lastSeen, List<String> clients,
-                              List<AdvertisedSecurity> advertisedSecurity) { }
+                              List<AdvertisedSecurity> advertisedSecurity, HiddenSsidEvidence hiddenSsidEvidence) { }
+    public record HiddenSsidEvidence(String name, String source, Long observedAt, long beaconObservedAt) { }
     public record AdvertisedSecurity(String protocol, String groupCipher, List<String> pairwiseCiphers,
                                      List<String> authentication, String managementFrameProtection) { }
     public record AssociationEdge(String clientId, String bssid, long firstSeen, long lastSeen, long evidenceCount,
@@ -44,6 +46,7 @@ public final class TopologyBuilder {
 
     private final SessionIdentifiers ids;
     private final Predicate<String> allowsBssid;
+    private final boolean revealNames;
     private final int minimum = RfSettings.integer("topology.minEvidence", 3, 1, 100);
     private final long edgeTtl = TimeUnit.MINUTES.toMillis(RfSettings.integer("topology.edgeTtlMin", 10, 1, 1440));
     private final long roamWindow = TimeUnit.SECONDS.toMillis(RfSettings.integer("topology.roamWindowSec", 5, 1, 300));
@@ -53,11 +56,12 @@ public final class TopologyBuilder {
     private final LinkedHashMap<String, LastLink> memberships = new LinkedHashMap<>(16, 0.75f, true);
     private final ArrayDeque<RoamEvent> roams = new ArrayDeque<>();
 
-    TopologyBuilder(SessionIdentifiers ids) { this(ids, bssid -> true); }
+    TopologyBuilder(SessionIdentifiers ids) { this(ids, bssid -> true, false); }
 
-    TopologyBuilder(SessionIdentifiers ids, Predicate<String> allowsBssid) {
+    TopologyBuilder(SessionIdentifiers ids, Predicate<String> allowsBssid, boolean revealNames) {
         this.ids = ids;
         this.allowsBssid = allowsBssid;
+        this.revealNames = revealNames;
     }
 
     /** Returns the frame-local client address when this frame establishes observed membership. */
@@ -96,7 +100,7 @@ public final class TopologyBuilder {
         long time = frame.timestamp();
         Ap ap = ap(apId, time);
         if (up && !data && (frame.subtype() == 0 || frame.subtype() == 2))
-            name(ap, frame.ies().first(0), "ASSOC_REQ");
+            name(ap, frame.ies().first(0), frame.subtype() == 2 ? "REASSOC_REQ" : "ASSOC_REQ", time);
         if (!up) ap.signal(frame.rssi());
 
         if (!data && frame.subtype() == 2 && unicast(frame.currentAp())
@@ -177,8 +181,11 @@ public final class TopologyBuilder {
         ap.signal(frame.rssi());
         var ies = frame.ies();
         byte[] ssid = ies.first(0);
-        if (frame.subtype() == 8 && ies.has(0)) ap.hidden = hidden(ssid);
-        name(ap, ssid, frame.subtype() == 5 ? "PROBE_RESP" : "BEACON");
+        if (frame.subtype() == 8 && ies.has(0) && frame.timestamp() >= ap.beaconNameObservedAt) {
+            ap.hidden = hidden(ssid);
+            ap.beaconNameObservedAt = frame.timestamp();
+        }
+        name(ap, ssid, frame.subtype() == 5 ? "PROBE_RESP" : "BEACON", frame.timestamp());
         byte[] ds = ies.first(3), ht = ies.first(61), md = ies.first(54), load = ies.first(11), country = ies.first(7);
         int mhz = frame.frequencyMhz();
         int channel = Dot11FrameDecoder.channel(mhz);
@@ -285,12 +292,14 @@ public final class TopologyBuilder {
         return suite.startsWith("000fac") || (suite.startsWith("0050f2") && type <= legacyMax) ? type : -1;
     }
 
-    private void name(Ap ap, byte[] ssid, String source) {
-        if (hidden(ssid)) return;
+    private void name(Ap ap, byte[] ssid, String source, long observedAt) {
+        if (hidden(ssid) || observedAt < ap.nameObservedAt) return;
         // Association requests can supply a name only when the AP has not supplied one.
-        if (source.equals("ASSOC_REQ") && (ap.ssid != null || !ap.hidden)) return;
+        if ((source.equals("ASSOC_REQ") || source.equals("REASSOC_REQ")) && (ap.ssid != null || !ap.hidden)) return;
         ap.ssid = ids.id("topology-ssid", ssid);
         ap.nameSource = source.equals("BEACON") ? "NONE" : source;
+        ap.nameObservedAt = observedAt;
+        ap.observedName = revealNames && !source.equals("BEACON") ? Dot11InformationElements.ssidLabel(ssid) : null;
     }
 
     void purge(long now, long retention) {
@@ -343,10 +352,14 @@ public final class TopologyBuilder {
                     : ids.id("ess", ap.ssid + ":" + ap.security + ":" + Objects.toString(ap.domain, ""));
             if (group != null) ess.computeIfAbsent(group, id -> new ArrayList<>()).add(key);
             Double median = ap.rssi.isEmpty() ? null : WifiInventory.median(ap.rssi.stream().sorted().toList());
-            output.add(new AccessPoint(key, ap.ssid, ap.hidden, ap.hidden ? ap.nameSource : "NONE", ap.channel, WifiInventory.band(ap.frequency),
+            String hiddenNameSource = ap.hidden ? ap.nameSource : "NONE";
+            var hiddenEvidence = ap.hidden ? new HiddenSsidEvidence(ap.observedName, hiddenNameSource,
+                    hiddenNameSource.equals("NONE") ? null : ap.nameObservedAt, ap.beaconNameObservedAt) : null;
+            String legacyNameSource = hiddenNameSource.equals("REASSOC_REQ") ? "ASSOC_REQ" : hiddenNameSource;
+            output.add(new AccessPoint(key, ap.ssid, ap.hidden, legacyNameSource, ap.channel, WifiInventory.band(ap.frequency),
                     ap.security, ap.interval, ap.domain, ap.stations, ap.utilization, ap.admissionCapacity, ap.country,
                     radio.get(key), group, median, median == null ? null : median > -55 ? "STRONG" : median < -75 ? "WEAK" : "MEDIUM",
-                    ap.last, clients.getOrDefault(key, List.of()).stream().sorted().toList(), ap.advertisedSecurity));
+                    ap.last, clients.getOrDefault(key, List.of()).stream().sorted().toList(), ap.advertisedSecurity, hiddenEvidence));
         }
         ess.replaceAll((key, values) -> List.copyOf(values));
         return new Snapshot(List.copyOf(output), Map.copyOf(ess), List.copyOf(links), List.copyOf(roams));
@@ -400,12 +413,12 @@ public final class TopologyBuilder {
     private static final class Ap {
         final ArrayDeque<Double> rssi = new ArrayDeque<>();
         final ArrayDeque<ClockSample> clocks = new ArrayDeque<>();
-        String ssid, security, domain, country, nameSource = "NONE";
+        String ssid, observedName, security, domain, country, nameSource = "NONE";
         List<AdvertisedSecurity> advertisedSecurity = List.of();
         Integer stations, utilization, admissionCapacity;
         int frequency, channel, interval;
         boolean hidden;
-        long last;
+        long last, nameObservedAt = -1, beaconNameObservedAt = -1;
 
         void signal(double value) {
             if (!Double.isFinite(value)) return;

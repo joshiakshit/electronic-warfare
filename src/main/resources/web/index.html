@@ -8,6 +8,7 @@
   <script src="/graph.js" defer></script>
   <script src="/spectrum.js" defer></script>
   <script src="/ap-watch.js" defer></script>
+  <script src="/probe-demo.js" defer></script>
   <script src="/ewave.js" defer></script>
 </head>
 <body>
@@ -134,6 +135,14 @@
         <span><b aria-hidden="true">●</b> Other Wi-Fi</span>
       </div>
     </article>
+    <article class="panel map-hidden">
+      <header><h2>Hidden network names</h2><span id="map-hidden-count" class="caption"></span></header>
+      <div id="map-hidden-table" class="table-wrap corpus" tabindex="0" role="region" aria-label="Hidden network evidence" hidden>
+        <table><thead><tr><th scope="col">Access point</th><th scope="col">Network name</th><th scope="col">Evidence</th><th scope="col">Observed at</th></tr></thead>
+          <tbody id="map-hidden-rows"></tbody></table>
+      </div>
+      <p id="map-hidden-empty" class="empty">No access points with hidden beacons in this view</p>
+    </article>
   </section>
 
   <section id="health" class="view" hidden>
@@ -205,13 +214,13 @@
     <article class="panel spectrum-demo">
       <header><h2>Adaptive scanner demo</h2><button type="button" id="run-scanner-demo">Run comparison</button></header>
       <div class="body stack">
-        <p id="scanner-demo-status" class="caption" role="status">Compare adaptive scanning with a fixed channel using the same scripted RF activity.</p>
+        <p id="scanner-demo-status" class="caption" role="status">Compare adaptive, round-robin, and fixed-channel listening using the same scripted RF activity.</p>
         <div id="scanner-demo-results" class="stack" hidden>
           <div class="table-wrap" tabindex="0" role="region" aria-label="Comparison totals">
-            <table><thead><tr><th scope="col">Metric</th><th scope="col">Adaptive</th><th scope="col">Fixed</th></tr></thead><tbody id="scanner-demo-totals"></tbody></table>
+            <table><thead><tr><th scope="col">Metric</th><th scope="col">Adaptive</th><th scope="col">Round-robin</th><th scope="col">Fixed</th></tr></thead><tbody id="scanner-demo-totals"></tbody></table>
           </div>
           <div class="table-wrap" tabindex="0" role="region" aria-label="Time to first captured frame">
-            <table><thead><tr><th scope="col">Scripted activity</th><th scope="col">Adaptive detection</th><th scope="col">Fixed detection</th></tr></thead><tbody id="scanner-demo-events"></tbody></table>
+            <table><thead><tr><th scope="col">Scripted activity</th><th scope="col">Adaptive detection</th><th scope="col">Round-robin detection</th><th scope="col">Fixed detection</th></tr></thead><tbody id="scanner-demo-events"></tbody></table>
           </div>
           <h3>Listening time by channel</h3>
           <div class="scanner-dwell" id="scanner-demo-dwell"></div>
@@ -259,25 +268,60 @@
 
   <section id="probe" class="view" hidden>
     <h1>Probe Lab</h1>
-    <p class="banner amber">⚠ These SSIDs were broadcast by nearby devices without joining any network. Each reveals a previously trusted connection.</p>
-    <div id="audit-summary" class="audit-summary caption" aria-live="polite"></div>
-    <article class="panel">
-      <header><h2>SSID corpus</h2><span id="probe-visibility" class="caption"></span></header>
-      <div class="table-wrap corpus"><table><thead><tr><th>SSID</th><th>Devices</th><th>First seen</th><th>Last seen</th><th>ISP guess</th></tr></thead><tbody id="ssid-rows"></tbody></table>
-        <p id="ssid-empty" class="empty loading">⊞ Loading probe audit</p></div>
-    </article>
-    <div class="two-col">
-      <article class="panel">
-        <header><h2 id="ssid-device-title">Devices that probed this SSID</h2></header>
-        <div class="table-wrap corpus"><table><thead><tr><th>MAC / ID</th><th>Vendor</th><th>RSSI</th><th>Last seen</th></tr></thead><tbody id="ssid-devices"></tbody></table>
-          <p id="ssid-device-empty" class="empty">⊞ Select an SSID to inspect it</p></div>
-      </article>
-      <article class="panel">
-        <header><h2>Probe timeline</h2><span class="caption">Last 10 min · 30 s buckets</span></header>
-        <div class="table-wrap" tabindex="0" role="region" aria-label="Probe timeline">
-          <svg id="probe-timeline" viewBox="0 0 520 175" role="img" aria-label="Probe count over time"></svg>
+    <article class="panel probe-demo">
+      <header><h2>What can a Wi-Fi request reveal?</h2><button type="button" id="probe-compare">Compare listening policies</button></header>
+      <div class="body stack">
+        <p>A named probe asks for a network by name. A general probe asks what networks are nearby. A request alone does not establish a previous connection or identify its owner.</p>
+        <div class="segmented" role="group" aria-label="Probe evidence source">
+          <button type="button" id="probe-capture-source" class="chosen" aria-pressed="true" aria-controls="probe-capture">Current capture</button>
+          <button type="button" id="probe-demo-source" aria-pressed="false" aria-controls="probe-demo">Built-in example</button>
         </div>
-      </article>
+        <div id="probe-demo" class="stack" hidden>
+          <p id="probe-demo-status" class="caption" role="status"></p>
+          <div id="probe-demo-finding" class="probe-finding" hidden>
+            <h3 id="probe-demo-headline"></h3>
+            <p id="probe-demo-explanation"></p>
+          </div>
+          <details id="probe-demo-evidence" class="probe-details" hidden>
+            <summary>See the two decoded requests</summary>
+            <div class="table-wrap" tabindex="0" role="region" aria-label="Synthetic probe evidence">
+              <table><thead><tr><th scope="col">Replay time</th><th scope="col">Receive channel</th><th scope="col">Request type</th><th scope="col">Network name in frame</th></tr></thead><tbody id="probe-demo-rows"></tbody></table>
+            </div>
+          </details>
+        </div>
+      </div>
+    </article>
+    <div id="probe-capture">
+      <div class="panel probe-finding probe-capture-finding">
+        <p id="probe-source-label" class="caption">Current capture</p>
+        <div role="status">
+          <h3 id="probe-capture-headline">Checking for Wi-Fi requests…</h3>
+          <p id="probe-capture-explanation">The finding will appear here when the capture report is ready.</p>
+        </div>
+        <ul id="probe-capture-names" class="probe-names" aria-label="Network names read from Wi-Fi requests" hidden></ul>
+      </div>
+      <details id="probe-capture-details" class="probe-details">
+        <summary>See capture details</summary>
+        <div id="audit-summary" class="audit-summary caption" aria-live="polite"></div>
+        <article class="panel">
+          <header><h2>SSID corpus</h2><span id="probe-visibility" class="caption"></span></header>
+          <div class="table-wrap corpus"><table><thead><tr><th>SSID</th><th>Observed addresses</th><th>First seen</th><th>Last seen</th><th>ISP guess</th></tr></thead><tbody id="ssid-rows"></tbody></table>
+            <p id="ssid-empty" class="empty loading">⊞ Loading probe audit</p></div>
+        </article>
+        <div class="two-col">
+          <article class="panel">
+            <header><h2 id="ssid-device-title">Addresses that probed this SSID</h2></header>
+            <div class="table-wrap corpus"><table><thead><tr><th>MAC / ID</th><th>Vendor</th><th>RSSI</th><th>Last seen</th></tr></thead><tbody id="ssid-devices"></tbody></table>
+              <p id="ssid-device-empty" class="empty">⊞ Select an SSID to inspect it</p></div>
+          </article>
+          <article class="panel">
+            <header><h2>Probe timeline</h2><span class="caption">Last 10 min · 30 s buckets</span></header>
+            <div class="table-wrap" tabindex="0" role="region" aria-label="Probe timeline">
+              <svg id="probe-timeline" viewBox="0 0 520 175" role="img" aria-label="Probe count over time"></svg>
+            </div>
+          </article>
+        </div>
+      </details>
     </div>
   </section>
 
@@ -306,6 +350,7 @@
           <button data-operation="verify" aria-pressed="false">Verify PSK</button>
         </header>
         <form id="deauth-form" class="body stack">
+          <p id="ops-channel-badge" class="channel-badge mono caption" role="status" hidden></p>
           <label>Frame count<input id="deauth-count" type="number" min="1" step="1" value="10" required></label>
           <label>Monitor interface<input id="deauth-interface" value="wlo1" required></label>
           <div class="controls"><button class="danger" type="submit">Fire deauth</button><button type="button" data-stop>Stop</button></div>

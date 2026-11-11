@@ -75,6 +75,7 @@ class CaptureHealthTest {
             assertEquals(1, bridge.getPassiveWifi().inventory().size());
             assertEquals(1_700_000_000_123L, bridge.getPassiveWifi().inventory().getFirst().firstSeen());
             assertEquals(1, bridge.getPassiveWifi().audit().totalProbes());
+            assertEquals("Replay only", bridge.getPassiveWifi().audit().corpus().getFirst().name());
 
             Path broken = directory.resolve("broken.pcap");
             Files.write(broken, new byte[]{0, 0, 0});

@@ -193,7 +193,7 @@ public final class PacketBridge implements AutoCloseable {
         if (isRunning()) throw new IllegalStateException("Capture is already running");
         if (!Files.isRegularFile(file)) throw new IOException("Replay requires a regular PCAP file");
         var started = new Replay(file.getFileName().toString());
-        var reports = new PassiveWifiSession(profiler, myNetwork.get(), started::now);
+        var reports = PassiveWifiSession.forReplay(profiler, myNetwork.get(), started::now);
         started.input = Files.newInputStream(file);
         replay = started;
         health = started.health;

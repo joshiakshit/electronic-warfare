@@ -27,15 +27,43 @@ java -jar target/ewave-0.1.0-SNAPSHOT.jar \
 Open the loopback URL printed at startup. Replay processes four probe requests
 and leaves the dashboard available for inspection. Press Ctrl+C to stop it.
 
+## Probe Lab demo
+
+Open **Probe Lab** and select **Built-in example**, or append `#probe-demo`
+to the printed URL, to see a finding from a sample Wi-Fi request.
+Expand **See the two decoded requests** to compare a named request with
+one that asks about nearby networks in general.
+ewave decodes both synthetic frames with the monitor-capture parser and shows
+the receive channel and the name carried in the frame, if any. The replay
+leaves the current capture and its privacy settings alone.
+
+Use **Current capture** for a prepared lab receiver and a pretested lab phone.
+The finding shows how many observed requests carried names. Names are visible
+by default in files opened with `--replay` and masked by default in live
+capture. Use `-Daudit.revealSsids=false` before `-jar` to mask replay names for
+sharing, or `-Daudit.revealSsids=true` to show names in a controlled live lab.
+Append `#probe` to the URL to open the current capture's findings directly.
+
+**Map → Hidden network names** lists access points whose beacons omit the
+network name. When a received probe response, association request, or
+reassociation request supplies a name for that access point, ewave shows
+the frame type and timestamp. The same replay and live name visibility
+settings apply here. To try it offline, replay
+`src/test/resources/probes/hidden-network.pcap` and choose **All access
+points** in the **Map** focus menu. The fixture contains two hidden
+beacons and a named response from one of those access points.
+
 ## Adaptive scanner demo
 
 Open **Spectrum** and select **Run comparison**. This works in offline replay
-with the bundled JAR. Both policies start on channel 6 and receive the same
+with the bundled JAR. All three policies start on channel 6 and receive the same
 12-second scripted scenario, with frame bursts on channels 6, 11, and 1.
 The adaptive run uses the scanner's scoring model with a fixed seed and a
-simulated 25 ms channel-change delay. The fixed run stays on channel 6.
+simulated 25 ms channel-change delay. Round-robin advances one channel per
+100 ms tick with the same retune cost. The fixed run stays on channel 6.
 Compare the first captured frame per burst, listening time, and missed frames.
 The missed-frame counts come from the fixture's known transmissions.
+**Compare listening policies** in Probe Lab opens this separate benchmark.
 
 ### Repeat the comparison on a lab radio
 

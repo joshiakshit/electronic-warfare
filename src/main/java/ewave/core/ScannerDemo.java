@@ -24,14 +24,18 @@ public final class ScannerDemo {
     public record Run(List<Long> dwellMs, int channelsVisited, int retunes, Integer meanRetuneMs,
                       int capturedFrames, int missedFrames, List<Detection> detections) {}
     public record Comparison(int durationMs, int tickMs, int fixedChannel, int simulatedRetuneMs,
-                             int frameIntervalMs, List<Burst> bursts, Run adaptive, Run fixed) {}
+                             int frameIntervalMs, List<Burst> bursts, Run adaptive, Run fixed, Run roundRobin) {}
 
     public static Comparison compare() {
         return new Comparison(DURATION_MS, TICK_MS, FIXED_CHANNEL, RETUNE_MS, FRAME_INTERVAL_MS,
-                BURSTS, run(new AdaptiveScanner(AdaptiveScanner.Config.defaults(CHANNELS, 2048, 42))), run(null));
+                BURSTS, run(Policy.ADAPTIVE), run(Policy.FIXED), run(Policy.ROUND_ROBIN));
     }
 
-    private static Run run(AdaptiveScanner scanner) {
+    private enum Policy { ADAPTIVE, FIXED, ROUND_ROBIN }
+
+    private static Run run(Policy policy) {
+        var scanner = policy == Policy.ADAPTIVE
+                ? new AdaptiveScanner(AdaptiveScanner.Config.defaults(CHANNELS, 2048, 42)) : null;
         long[] dwell = new long[CHANNELS];
         Integer[] delays = new Integer[BURSTS.size()];
         int[] captured = new int[BURSTS.size()];
@@ -40,7 +44,11 @@ public final class ScannerDemo {
         int retunes = 0;
         for (int start = 0; start < DURATION_MS; start += TICK_MS) {
             int tick = start / TICK_MS;
-            int chosen = scanner == null || tick == 0 ? FIXED_CHANNEL : scanner.choose(tick, 1).bands()[0] + 1;
+            int chosen = switch (policy) {
+                case FIXED -> FIXED_CHANNEL;
+                case ROUND_ROBIN -> (FIXED_CHANNEL - 1 + tick) % CHANNELS + 1;
+                case ADAPTIVE -> tick == 0 ? FIXED_CHANNEL : scanner.choose(tick, 1).bands()[0] + 1;
+            };
             boolean changed = chosen != tuned;
             if (changed) retunes++;
             tuned = chosen;

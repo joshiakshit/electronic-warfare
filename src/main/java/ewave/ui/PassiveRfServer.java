@@ -11,6 +11,7 @@ import ewave.active.HandshakeAnalyzer;
 import ewave.active.LanScanner;
 import ewave.active.WifiAccessPoints;
 import ewave.capture.PacketBridge;
+import ewave.capture.ProbeDemo;
 import ewave.core.ScannerDemo;
 import ewave.model.EwaveEvent;
 import ewave.passive.TopologyBuilder;
@@ -26,7 +27,9 @@ import io.javalin.websocket.WsContext;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -34,6 +37,9 @@ import java.util.UUID;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Callable;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -69,6 +75,8 @@ public final class PassiveRfServer implements AutoCloseable {
     private volatile FrameInjector latestInjector;
     private boolean closing;
     private Thread eventThread;
+    private ScheduledExecutorService scannerEvents;
+    private final Map<Integer, Instant> reconnectWatches = new ConcurrentHashMap<>();
 
     public record HandshakeSettings(String monitorInterface, String apBssid, String clientMac, int channel, String ssid,
                                     int frequencyMhz) {
@@ -213,6 +221,7 @@ public final class PassiveRfServer implements AutoCloseable {
             var session = wifi.getPassiveWifi();
             if (session == null) unavailable(ctx, "Wi-Fi"); else ctx.json(session.audit());
         });
+        app.get("/api/probe-audit/demo", ctx -> ctx.json(ProbeDemo.replay()));
         app.get("/api/topology", ctx -> {
             var session = wifi.getPassiveWifi();
             if (session == null) unavailable(ctx, "Wi-Fi"); else ctx.json(session.topology());
@@ -337,7 +346,7 @@ public final class PassiveRfServer implements AutoCloseable {
         app.post("/api/attack/deauth", ctx -> {
             final String ap, client, monitor;
             final int count;
-            final int frequencyMhz;
+            final WifiAccessPoints.AccessPoint target;
             final FrameInjector injector;
             try {
                 var body = mapper.readTree(ctx.body());
@@ -364,16 +373,20 @@ public final class PassiveRfServer implements AutoCloseable {
                 return;
             }
             try {
-                var target = accessPoints.all().stream().filter(point -> point.bssid().equalsIgnoreCase(ap)).findFirst();
-                if (target.isEmpty()) {
+                target = accessPoints.all().stream().filter(point -> point.bssid().equalsIgnoreCase(ap))
+                        .findFirst().orElse(null);
+                if (target == null) {
                     ctx.status(400).json(Map.of("error", "Select an actual Wi-Fi BSSID from the cached AP list"));
                     return;
                 }
-                frequencyMhz = target.get().frequencyMhz();
             } catch (java.io.IOException failure) {
                 ctx.status(400).json(Map.of("error", "Wi-Fi AP cache unavailable. Restore Wi-Fi, reconnect, then restart with ./scripts/start-ewave.sh."));
                 return;
             }
+            int channel = target.channel();
+            var snapshot = Objects.equals(PacketBridge.channelFrequencyMhz(channel), target.frequencyMhz())
+                    ? wifi.getChannelSnapshot() : null;
+            String warning = channelWarning(snapshot, channel);
             synchronized (injectionLock) {
                 if (closing || activeInjector != null || activeHandshake != null) {
                     ctx.status(409).json(Map.of("error", "An injection is already running or the server is stopping"));
@@ -383,7 +396,17 @@ public final class PassiveRfServer implements AutoCloseable {
                 latestInjector = injector;
             }
             try {
-                ctx.json(injector.sendDeauthFrames(ap, client, count, frequencyMhz));
+                var result = injector.sendDeauthFrames(ap, client, count, target.frequencyMhz());
+                if (result.success() && snapshot != null) {
+                    synchronized (injectionLock) {
+                        if (!closing) reconnectWatches.put(channel, Instant.now());
+                    }
+                }
+                if (warning == null) ctx.json(result);
+                else {
+                    ObjectNode response = mapper.valueToTree(result);
+                    ctx.json(response.put("channelWarning", warning));
+                }
             } finally {
                 synchronized (injectionLock) { activeInjector = null; }
             }
@@ -517,6 +540,14 @@ public final class PassiveRfServer implements AutoCloseable {
         eventThread = new Thread(this::consumeEvents, "ewave-ui-events");
         eventThread.setDaemon(true);
         eventThread.start();
+        if (operations) {
+            scannerEvents = Executors.newSingleThreadScheduledExecutor(
+                    Thread.ofPlatform().daemon().name("ewave-ui-scanner").factory());
+            Map<Integer, Instant> suggestedAt = new HashMap<>();
+            Map<Integer, Instant> suggestedFlags = new HashMap<>();
+            scannerEvents.scheduleWithFixedDelay(() -> pollScannerEvents(suggestedAt, suggestedFlags), 0,
+                    Math.min(100, wifi.getTickMs()), TimeUnit.MILLISECONDS);
+        }
         return this;
     }
 
@@ -529,11 +560,15 @@ public final class PassiveRfServer implements AutoCloseable {
             case "WIFI_DEVICE_SEEN", "PROBE_RECEIVED" -> true;
             default -> false;
         })) return;
+        sendEvent(event);
+    }
+
+    private void sendEvent(Object event) {
         final String json;
         try {
             json = mapper.writeValueAsString(event);
         } catch (JsonProcessingException failure) {
-            throw new IllegalArgumentException("Cannot serialize EwaveEvent", failure);
+            throw new IllegalArgumentException("Cannot serialize WebSocket event", failure);
         }
         for (WsContext client : clients) {
             try {
@@ -545,6 +580,50 @@ public final class PassiveRfServer implements AutoCloseable {
                 clients.remove(client);
                 LOG.log(System.Logger.Level.DEBUG, "Removing failed WebSocket client", failure);
             }
+        }
+    }
+
+    private static String channelWarning(PacketBridge.ChannelSnapshot snapshot, int channel) {
+        if (snapshot == null) return null;
+        var scores = snapshot.scanner().scores();
+        if (channel < 1 || channel > scores.length || !(scores[channel - 1] < 0.10)) return null;
+        return String.format(Locale.ROOT, "Channel %d score %.2f is low. The scanner measures channel activity, so check the cached AP channel.",
+                channel, scores[channel - 1]);
+    }
+
+    private void pollScannerEvents(Map<Integer, Instant> suggestedAt, Map<Integer, Instant> suggestedFlags) {
+        try {
+            if (clients.isEmpty() && reconnectWatches.isEmpty()) return;
+            var snapshot = wifi.getChannelSnapshot();
+            Instant now = Instant.now();
+            reconnectWatches.forEach((channel, started) -> {
+                if (!now.isBefore(started.plusSeconds(30))) {
+                    reconnectWatches.remove(channel, started);
+                    return;
+                }
+                var flag = snapshot == null ? null : snapshot.scanner().anomalies().get(channel);
+                if (flag != null && !flag.detectedAt().isBefore(started)
+                        && (flag.reason().equals("NEW_ACTIVITY") || flag.reason().equals("UNUSUAL_BURST"))
+                        && reconnectWatches.remove(channel, started)) {
+                    sendEvent(Map.of("type", "eapol_window", "channel", channel,
+                            "reason", flag.reason(), "deviation", flag.deviation()));
+                }
+            });
+            if (snapshot == null) return;
+            snapshot.scanner().anomalies().forEach((channel, flag) -> {
+                if (PacketBridge.channelFrequencyMhz(channel) == null || !flag.reason().equals("NEW_ACTIVITY")
+                        || flag.detectedAt().equals(suggestedFlags.get(channel))) return;
+                Instant last = suggestedAt.get(channel);
+                if (last != null && now.isBefore(last.plusSeconds(60))) return;
+                suggestedAt.put(channel, now);
+                suggestedFlags.put(channel, flag.detectedAt());
+                var fingerprint = snapshot.scanner().fingerprints().get(channel - 1);
+                sendEvent(Map.of("type", "anomaly_target", "channel", channel, "deviation", flag.deviation(),
+                        "deviceHint", Objects.toString(fingerprint.deviceHint(), "Unknown device"),
+                        "detectedAt", flag.detectedAt().toString()));
+            });
+        } catch (RuntimeException failure) {
+            LOG.log(System.Logger.Level.WARNING, "Could not broadcast scanner event", failure);
         }
     }
 
@@ -568,6 +647,11 @@ public final class PassiveRfServer implements AutoCloseable {
         }
         if (eventThread == null) return;
         eventThread.interrupt();
+        if (scannerEvents != null) {
+            scannerEvents.shutdownNow();
+            scannerEvents = null;
+        }
+        reconnectWatches.clear();
         try {
             app.stop();
             eventThread.join(2_000);

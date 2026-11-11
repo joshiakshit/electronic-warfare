@@ -1,5 +1,7 @@
 package ewave.passive;
 
+import ewave.decoder.Dot11InformationElements;
+
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
@@ -27,7 +29,7 @@ public final class ProbeAuditAggregator {
     public record ProbeDevice(String id, long lastSeen) { }
     public record Ssid(String id, String name, String exposure, Integer deviceCount, long firstSeen, long lastSeen,
                        List<ProbeDevice> devices, List<Integer> timeline) { }
-    public record Report(int windowMinutes, int totalObservedAddresses, int totalProbes,
+    public record Report(int windowMinutes, int totalObservedAddresses, int totalProbes, int directedProbes,
                          double locallyAdministeredPct, double directedPct,
                          int distinctDirectedSsids, Map<String, Integer> directedPerAddress,
                          double wpsUuidEPct, int distinctSignaturesAmongLocalAddresses,
@@ -37,7 +39,7 @@ public final class ProbeAuditAggregator {
 
     private final int minutes = RfSettings.integer("audit.windowMinutes", 15, 1, 1440);
     private final boolean deviceDetails = Boolean.getBoolean("audit.deviceDetails");
-    private final boolean reveal = Boolean.getBoolean("audit.revealSsids");
+    private final boolean reveal;
     private final Set<String> corporate = Stream.of(System.getProperty("audit.corporateSsids", "").split(","))
             .map(String::strip).filter(s -> !s.isEmpty()).collect(Collectors.toUnmodifiableSet());
     private final Pattern personal;
@@ -46,7 +48,8 @@ public final class ProbeAuditAggregator {
     private final ArrayDeque<Name> names = new ArrayDeque<>();
     private long overflow = -1;
 
-    ProbeAuditAggregator() throws IOException {
+    ProbeAuditAggregator(boolean reveal) throws IOException {
+        this.reveal = reveal;
         var rules = new Properties();
         try (var source = new InputStreamReader(getClass().getResourceAsStream("/ssid-patterns.properties"),
                 StandardCharsets.UTF_8)) { rules.load(source); }
@@ -70,7 +73,8 @@ public final class ProbeAuditAggregator {
         Exposure kind = corporate.contains(name) ? Exposure.CORPORATE
                 : personal.matcher(name).matches() ? Exposure.PERSONAL_NAME_PATTERN
                 : router.matcher(name).matches() ? Exposure.ROUTER_DEFAULT_PATTERN : Exposure.OTHER;
-        names.addLast(new Name(time, identifiers.id("ssid", ssid), kind, reveal ? name : null, deviceDetails ? id : null));
+        String label = reveal ? Dot11InformationElements.ssidLabel(ssid) : null;
+        names.addLast(new Name(time, identifiers.id("ssid", ssid), kind, label, deviceDetails ? id : null));
     }
 
     private long cutoff(long now, long retention) { return now - Math.min(retention, TimeUnit.MINUTES.toMillis(minutes)); }
@@ -86,9 +90,10 @@ public final class ProbeAuditAggregator {
         var local = new HashSet<String>();
         var signatures = new HashSet<String>();
         var directed = new HashMap<String, Integer>();
-        int wps = 0;
+        int wps = 0, directedProbes = 0;
         for (Probe probe : probes) {
             directed.merge(probe.id, probe.directed ? 1 : 0, Integer::sum);
+            if (probe.directed) directedProbes++;
             if (probe.local) {
                 local.add(probe.id);
                 signatures.add(probe.signature);
@@ -113,7 +118,7 @@ public final class ProbeAuditAggregator {
         for (Probe probe : probes) count(timeline, timelineStart, probe.time);
         List<Ssid> corpus = corpus(timelineStart);
         int total = directed.size();
-        return new Report(minutes, total, probes.size(), percent(local.size(), total),
+        return new Report(minutes, total, probes.size(), directedProbes, percent(local.size(), total),
                 percent(total - histogram.get("0"), total), distinct.size(), Map.copyOf(histogram),
                 percent(wps, probes.size()), signatures.size(), Map.copyOf(counts), Map.copyOf(tokens),
                 overflow >= 0 && overflow >= cutoff(now, retention), deviceDetails, corpus, timelineStart, boxed(timeline));

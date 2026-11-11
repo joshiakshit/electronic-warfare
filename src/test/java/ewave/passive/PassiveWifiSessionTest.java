@@ -257,10 +257,14 @@ class PassiveWifiSessionTest {
         observe(topology, ids, hidden);
         assertTrue(topology.snapshot().accessPoints().getFirst().ssidHidden());
         assertNull(topology.snapshot().accessPoints().getFirst().ssidToken());
+        assertEquals(new TopologyBuilder.HiddenSsidEvidence(null, "NONE", null, time),
+                topology.snapshot().accessPoints().getFirst().hiddenSsidEvidence());
         observe(topology, ids, decode(beacon(5, AP, "SecretSSID".getBytes(StandardCharsets.US_ASCII), 2), ++time));
         var named = topology.snapshot().accessPoints().getFirst();
         assertEquals("PROBE_RESP", named.ssidRevealedVia());
         assertNotEquals("SecretSSID", named.ssidToken());
+        assertEquals(new TopologyBuilder.HiddenSsidEvidence(null, "PROBE_RESP", time, time - 1),
+                named.hiddenSsidEvidence());
 
         byte[] payload = "private-payload".getBytes(StandardCharsets.US_ASCII);
         observe(topology, ids, decode(join(header(8, 1, AP, CLIENT, AP2, 1), payload), ++time));
@@ -305,6 +309,35 @@ class PassiveWifiSessionTest {
         assertEquals(3, aps.size());
         assertEquals(2, aps.stream().filter(ap -> ap.radioGroupId() != null).count());
         assertEquals(1, aps.stream().map(TopologyBuilder.AccessPoint::radioGroupId).filter(java.util.Objects::nonNull).distinct().count());
+    }
+
+    @Test void replayShowsNamesOnlyForHiddenAccessPointsWithMatchingFrameEvidence() throws Exception {
+        var session = PassiveWifiSession.forReplay(new DeviceProfiler(), MyNetworkProfile.EMPTY, () -> 1_000L);
+        String apId = session.addressId(AP);
+        String secondId = session.addressId(AP2);
+        byte[] name = "Lab hidden".getBytes(StandardCharsets.UTF_8);
+
+        session.observe(decode(beacon(8, AP, new byte[0], 1), 1_000));
+        session.observe(decode(beacon(8, AP2, new byte[0], 2), 1_001));
+        session.observe(decode(ProbeFrames.frame("Unrelated network"), 1_002));
+        assertTrue(session.topology().accessPoints().stream().allMatch(ap -> ap.hiddenSsidEvidence().observedAt() == null));
+
+        session.observe(decode(beacon(5, AP, name, 3), 1_003));
+        session.observe(decode(beacon(5, AP, "Older".getBytes(StandardCharsets.UTF_8), 4), 1_002));
+        var first = session.topology().accessPoints().stream().filter(ap -> ap.bssid().equals(apId)).findFirst().orElseThrow();
+        assertEquals(new TopologyBuilder.HiddenSsidEvidence("Lab hidden", "PROBE_RESP", 1_003L, 1_000L),
+                first.hiddenSsidEvidence());
+
+        byte[] request = join(header(0x20, 0, AP2, CLIENT, AP2, 7), new byte[4], mac(AP), ie(0, name));
+        session.observe(decode(request, 1_004));
+        var second = session.topology().accessPoints().stream().filter(ap -> ap.bssid().equals(secondId)).findFirst().orElseThrow();
+        assertEquals("ASSOC_REQ", second.ssidRevealedVia());
+        assertEquals(new TopologyBuilder.HiddenSsidEvidence("Lab hidden", "REASSOC_REQ", 1_004L, 1_001L),
+                second.hiddenSsidEvidence());
+
+        session.observe(decode(beacon(8, AP, name, 5), 1_005));
+        assertNull(session.topology().accessPoints().stream().filter(ap -> ap.bssid().equals(apId))
+                .findFirst().orElseThrow().hiddenSsidEvidence());
     }
 
     private static Dot11Frame clockBeacon(String source, long time, long receiver, long tsf) {

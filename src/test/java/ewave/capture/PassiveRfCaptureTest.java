@@ -107,10 +107,12 @@ class PassiveRfCaptureTest {
             server.start(0);
             long now = System.currentTimeMillis();
             byte[] packet = ProbeFrames.radiotap(ProbeFrames.frame("PrivateLabSSID"));
-            byte[] pcap = ProbeFrames.pcap(ByteOrder.LITTLE_ENDIAN, true, 127, packet);
-            ByteBuffer.wrap(pcap).order(ByteOrder.LITTLE_ENDIAN).putInt(24, (int) (now / 1000));
+            byte[] general = ProbeFrames.radiotap(ProbeFrames.frame(""));
+            byte[] pcap = ProbeFrames.pcap(ByteOrder.LITTLE_ENDIAN, true, 127, packet, general);
+            ByteBuffer.wrap(pcap).order(ByteOrder.LITTLE_ENDIAN)
+                    .putInt(24, (int) (now / 1000)).putInt(40 + packet.length, (int) (now / 1000));
             wifiProcess.write(pcap);
-            await(() -> wifi.getCaptureStatus().get("probeRequests").equals(1L));
+            await(() -> wifi.getCaptureStatus().get("probeRequests").equals(2L));
 
             var mapper = new ObjectMapper();
             var inventory = get(client, server, "/api/inventory");
@@ -122,7 +124,10 @@ class PassiveRfCaptureTest {
                     assertFalse(response.body().contains(privateData));
             }
             assertEquals(1, mapper.readTree(inventory.body()).size());
-            assertEquals(1, mapper.readTree(audit.body()).path("distinctDirectedSsids").asInt());
+            var report = mapper.readTree(audit.body());
+            assertEquals(2, report.path("totalProbes").asInt());
+            assertEquals(1, report.path("directedProbes").asInt());
+            assertEquals(1, report.path("distinctDirectedSsids").asInt());
             assertEquals(200, get(client, server, "/").statusCode());
             assertEquals(404, get(client, server, "/api/attack/scan-lan").statusCode());
             assertEquals(404, get(client, server, "/api/probes").statusCode());

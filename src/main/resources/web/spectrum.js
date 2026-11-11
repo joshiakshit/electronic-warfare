@@ -33,12 +33,13 @@ window.EwaveSpectrum = (() => {
     return row;
   }
 
-  function dwellItems(adaptive, fixed) {
+  function dwellItems(adaptive, fixed, roundRobin) {
     return adaptive.flatMap((duration, index) => {
-      if (!duration && !fixed?.[index]) return [];
+      if (!duration && !fixed?.[index] && !roundRobin?.[index]) return [];
       const item = node('div', '', 'scanner-dwell-item');
       item.append(node('strong', 'Ch ' + (index + 1)));
       item.append(node('span', fixed ? 'Adaptive ' + seconds(duration) : seconds(duration), 'caption mono'));
+      if (roundRobin) item.append(node('span', 'Round-robin ' + seconds(roundRobin[index]), 'caption mono'));
       if (fixed) item.append(node('span', 'Fixed ' + seconds(fixed[index]), 'caption mono'));
       return [item];
     });
@@ -51,23 +52,25 @@ window.EwaveSpectrum = (() => {
     try {
       const response = await fetch('/api/channels/demo');
       if (!response.ok) throw new Error('HTTP ' + response.status);
-      const { durationMs, tickMs, fixedChannel, simulatedRetuneMs, frameIntervalMs, bursts, adaptive, fixed } =
+      const { durationMs, tickMs, fixedChannel, simulatedRetuneMs, frameIntervalMs, bursts, adaptive, fixed, roundRobin } =
         await response.json();
       demoStatus.textContent = 'Simulated RF · ' + seconds(durationMs) + ' · ' + tickMs + ' ms ticks · fixed channel '
-        + fixedChannel + ' · ' + simulatedRetuneMs + ' ms per channel change · frames every ' + frameIntervalMs + ' ms during each burst';
+        + fixedChannel + ' · round-robin advances every tick · ' + simulatedRetuneMs + ' ms per channel change · frames every '
+        + frameIntervalMs + ' ms during each burst';
+      const runs = [adaptive, roundRobin, fixed];
       const retune = run => run.meanRetuneMs == null ? '—' : run.meanRetuneMs + ' ms';
       document.querySelector('#scanner-demo-totals').replaceChildren(
-        tableRow('Channels visited', adaptive.channelsVisited, fixed.channelsVisited),
-        tableRow('Channel changes', adaptive.retunes, fixed.retunes),
-        tableRow('Mean simulated retune', retune(adaptive), retune(fixed)),
-        tableRow('Frames captured', adaptive.capturedFrames, fixed.capturedFrames),
-        tableRow('Frames missed', adaptive.missedFrames, fixed.missedFrames));
+        tableRow('Channels visited', ...runs.map(run => run.channelsVisited)),
+        tableRow('Channel changes', ...runs.map(run => run.retunes)),
+        tableRow('Mean simulated retune', ...runs.map(retune)),
+        tableRow('Frames captured', ...runs.map(run => run.capturedFrames)),
+        tableRow('Frames missed', ...runs.map(run => run.missedFrames)));
       const detection = event => (event.delayMs == null ? 'Missed burst' : event.delayMs + ' ms')
         + ' · ' + event.capturedFrames + '/' + (event.capturedFrames + event.missedFrames) + ' frames';
       document.querySelector('#scanner-demo-events').replaceChildren(...bursts.map((burst, index) =>
         tableRow('Ch ' + burst.channel + ' · ' + seconds(burst.startMs) + '–' + seconds(burst.endMs),
-          detection(adaptive.detections[index]), detection(fixed.detections[index]))));
-      document.querySelector('#scanner-demo-dwell').replaceChildren(...dwellItems(adaptive.dwellMs, fixed.dwellMs));
+          ...runs.map(run => detection(run.detections[index])))));
+      document.querySelector('#scanner-demo-dwell').replaceChildren(...dwellItems(adaptive.dwellMs, fixed.dwellMs, roundRobin.dwellMs));
       demoResults.hidden = false;
     } catch {
       demoStatus.textContent = 'Comparison unavailable. Try again.';

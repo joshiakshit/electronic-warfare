@@ -186,10 +186,29 @@
     }
   }
 
+  function renderHiddenNetworks(accessPoints, focus) {
+    const sources = { PROBE_RESP: 'Probe response', ASSOC_REQ: 'Association request', REASSOC_REQ: 'Reassociation request' };
+    const hidden = accessPoints.filter(ap => ap.ssidHidden && (focus === 'all' || ap.bssid === focus));
+    $('map-hidden-count').textContent = hidden.length ? number(hidden.length) + ' observed' : '';
+    $('map-hidden-table').hidden = hidden.length === 0;
+    $('map-hidden-empty').hidden = hidden.length > 0;
+    $('map-hidden-rows').replaceChildren(...hidden.map(ap => {
+      const evidence = ap.hiddenSsidEvidence;
+      const nameObserved = evidence?.observedAt != null;
+      return row([
+        window.EwaveGraph.apLabel(ap),
+        element('td', evidence?.name ?? (nameObserved ? 'Name masked' : 'Name not observed'), 'mono'),
+        nameObserved ? sources[evidence.source] || 'Named management frame' : 'Hidden beacon',
+        clock(evidence?.observedAt ?? evidence?.beaconObservedAt)
+      ]);
+    }));
+  }
+
   function renderMap() {
     const focus = focusAp();
     renderApChoices(focus);
     const topology = networkTopology();
+    renderHiddenNetworks(topology.accessPoints || [], focus);
     const wifi = wifiWithLabels();
     const outside = new Set((state.topology.edges || []).map(edge => edge.clientId));
     for (const edge of topology.edges || []) outside.delete(edge.clientId);
@@ -352,6 +371,7 @@
           if (ap) {
             $('ap-target').value = ap.bssid;
             $('handshake-channel').value = ap.channel;
+            refreshChannelBadge();
           } else $('target-message').textContent = 'This access point is absent from the startup cache.';
         } else $('client-target').value = found.mac.toLowerCase();
         renderTargetChips();
@@ -571,6 +591,7 @@
         if (state.view === 'ops' && state.status.operationsEnabled && !hadOperations) refreshTargets();
         if (state.view === 'map') renderMap();
         if (state.view === 'intel' && state.status.wifi?.captureMode === 'replay') renderIntel();
+        if (state.view === 'probe') renderProbeSource();
       } catch (error) {
         $('wifi-status').textContent = 'Status unavailable';
       }
@@ -750,8 +771,43 @@
     svg.replaceChildren(...items);
   }
 
+  function renderProbeSource() {
+    const wifi = state.status?.wifi;
+    const label = wifi?.captureMode === 'replay'
+      ? 'File replay' + (wifi.replayState ? ' · ' + wifi.replayState.toLowerCase() : '')
+      : wifi?.captureRunning ? 'Live radio capture' : 'Current capture';
+    $('probe-source-label').textContent = label;
+  }
+
+  function renderProbeFinding(audit) {
+    const names = (audit?.corpus || []).flatMap(entry => entry.name ? [entry.name] : []).slice(0, 6);
+    let headline, explanation;
+    if (!audit) {
+      headline = 'Probe data is unavailable';
+      explanation = 'Open the built-in example or check Capture health for the status of your receiver.';
+    } else if (audit.totalProbes === 0) {
+      headline = 'No Wi-Fi requests were decoded';
+      explanation = 'Open the built-in example to see what a request containing a network name looks like.';
+    } else if (audit.directedProbes === 0) {
+      headline = 'The requests carried no network names';
+      explanation = 'ewave decoded ' + audit.totalProbes + ' general Wi-Fi '
+        + (audit.totalProbes === 1 ? 'request' : 'requests') + ' asking what networks are nearby.';
+    } else {
+      headline = audit.directedProbes + ' of ' + audit.totalProbes + ' Wi-Fi requests included a network name';
+      explanation = names.length ? 'ewave read these names directly from the captured requests.'
+        : 'Names are masked in this capture. Set audit.revealSsids when launching ewave to change that.';
+    }
+    if ($('probe-capture-headline').textContent !== headline) $('probe-capture-headline').textContent = headline;
+    if ($('probe-capture-explanation').textContent !== explanation) $('probe-capture-explanation').textContent = explanation;
+    const list = $('probe-capture-names');
+    list.hidden = names.length === 0;
+    list.replaceChildren(...names.map(name => element('li', name, 'mono')));
+  }
+
   function renderAudit() {
     const audit = state.audit;
+    renderProbeSource();
+    renderProbeFinding(audit);
     const corpus = audit?.corpus || [];
     const selected = corpus.find(entry => entry.id === state.ssid);
     const display = entry => entry.name || entry.id;
@@ -767,9 +823,10 @@
       clock(entry.firstSeen), clock(entry.lastSeen), isp(entry.name)
     ], () => { state.ssid = state.ssid === entry.id ? null : entry.id; renderAudit(); }, entry.id === selected?.id)));
     blank('ssid-empty', !corpus.length, audit ? '⊞ No directed probes in the audit window' : '⊞ Wi-Fi probe audit unavailable');
+    const count = selected?.deviceCount;
     $('ssid-device-title').textContent = selected
-      ? (selected.deviceCount == null ? display(selected) : display(selected) + ' — probed by ' + selected.deviceCount + ' devices')
-      : 'Devices that probed this SSID';
+      ? display(selected) + (count == null ? '' : ' · ' + count + (count === 1 ? ' observed address' : ' observed addresses'))
+      : 'Addresses that probed this SSID';
     const devices = new Map(state.wifi.map(item => [item.id, item]));
     const matching = selected?.devices || [];
     $('ssid-devices').replaceChildren(...matching.map(entry => {
@@ -790,7 +847,12 @@
         state.audit = audit;
         if (state.view === 'probe') renderAudit();
         if (state.view === 'intel' && state.selected) renderDetail(wifiWithLabels().find(item => item.id === state.selected));
-      } catch (error) { if (state.view === 'probe') blank('ssid-empty', true, '⊞ ' + error.message); }
+      } catch (error) {
+        if (state.view === 'probe') {
+          renderProbeFinding(null);
+          blank('ssid-empty', true, '⊞ ' + error.message);
+        }
+      }
     });
   }
 
@@ -817,6 +879,24 @@
     $('target-chips').replaceChildren(...chips);
   }
 
+  async function refreshChannelBadge() {
+    const badge = $('ops-channel-badge');
+    const ap = selectedAp();
+    badge.hidden = true;
+    if (!ap || ap.frequencyMhz !== 2407 + 5 * ap.channel || ap.channel < 1 || ap.channel > 13) return;
+    try {
+      const data = await api('/api/channels', undefined, 503);
+      if (selectedAp() !== ap) return;
+      const channel = data?.channels?.find(entry => entry.channel === ap.channel);
+      if (!finite(channel?.score)) return;
+      badge.textContent = 'Ch ' + ap.channel + ' · scanner score ' + channel.score.toFixed(2);
+      badge.classList.toggle('amber-text', channel.score < .10);
+      badge.hidden = false;
+    } catch {
+      // Scanner context is optional. The cached AP remains selectable.
+    }
+  }
+
   function renderTargets() {
     options('ap-target', ops.aps.map(ap => [ap.bssid, (ap.ssid || 'Hidden SSID') + ' · ch ' + ap.channel + ' · ' + ap.bssid]), 'Select cached AP');
     const clients = new Map();
@@ -825,6 +905,7 @@
     }
     options('client-target', Array.from(clients), 'None selected · broadcast / any');
     renderTargetChips();
+    refreshChannelBadge();
   }
 
   let targetRequest;
@@ -845,11 +926,11 @@
     renderTargets();
   }
 
-  function log(message) {
+  function log(message, level) {
     for (const line of String(message).trim().split('\n')) {
       if (!line) continue;
-      const tone = /error|fail/i.test(line) ? 'red' : /handshake|KEY FOUND/i.test(line) ? 'green'
-        : /sending|deauth/i.test(line) ? 'amber-text' : '';
+      const tone = level ?? (/error|fail/i.test(line) ? 'red' : /handshake|KEY FOUND/i.test(line) ? 'green'
+        : /sending|deauth/i.test(line) ? 'amber-text' : '');
       $('console').append(element('div', '[' + clock(Date.now()) + '] ' + line, tone));
     }
     while ($('console').childElementCount > 400) $('console').firstChild.remove();
@@ -927,6 +1008,7 @@
     }, result => {
       const text = result.success ? 'Deauth process completed' : 'Deauth failed';
       $('deauth-status').textContent = text;
+      if (result.channelWarning) log(result.channelWarning, 'amber-text');
       log(text + '\n' + (result.output || ''));
     });
   });
@@ -997,6 +1079,7 @@
     const ap = selectedAp();
     if (ap) $('handshake-channel').value = ap.channel;
     renderTargetChips();
+    refreshChannelBadge();
   });
   function resetIntelPage() {
     state.intelLimit = intelPageSize;
@@ -1255,8 +1338,20 @@
     socket.onerror = () => socket.close();
     let inventoryTimer, auditTimer;
     socket.onmessage = event => {
-      let type;
-      try { ({ type } = JSON.parse(event.data)); } catch { return; }
+      let message;
+      try { message = JSON.parse(event.data); } catch { return; }
+      if (!message || typeof message.type !== 'string') return;
+      const { type, channel, reason, deviation, deviceHint } = message;
+      if (type === 'eapol_window') {
+        log('Channel ' + channel + ' activity rose after deauth (' + reason
+          + '). Possible reconnect. EAPOL was not verified.', 'amber-text');
+        const field = $('handshake-channel');
+        if (!field.value && selectedAp()?.channel === channel) field.value = channel;
+      }
+      if (type === 'anomaly_target' && finite(deviation)) {
+        log('New activity on channel ' + channel + ' · ' + deviceHint + ' · deviation '
+          + deviation.toFixed(1) + 'σ. Review cached access points on this channel.', '');
+      }
       if (['WIFI_DEVICE_SEEN', 'DEVICE_APPEARED', 'DEVICE_UPDATED'].includes(type)) {
         inventoryTimer ||= setTimeout(() => { inventoryTimer = null; refreshInventory(); }, 1000);
       }

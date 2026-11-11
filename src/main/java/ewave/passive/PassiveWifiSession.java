@@ -35,8 +35,8 @@ public final class PassiveWifiSession {
     private List<String> bssids;
     private boolean neighborhoodProbes;
     private final WifiInventory inventory;
-    private final ProbeAuditAggregator audit = new ProbeAuditAggregator();
-    private final TopologyBuilder topology = new TopologyBuilder(ids, this::allowsBssid);
+    private final ProbeAuditAggregator audit;
+    private final TopologyBuilder topology;
     private long nextPurge;
 
     public PassiveWifiSession(DeviceProfiler profiler) throws IOException {
@@ -48,8 +48,22 @@ public final class PassiveWifiSession {
     }
 
     public PassiveWifiSession(DeviceProfiler profiler, MyNetworkProfile profile, LongSupplier clock) throws IOException {
+        this(profiler, profile, clock, false);
+    }
+
+    public static PassiveWifiSession forReplay(DeviceProfiler profiler, MyNetworkProfile profile, LongSupplier clock)
+            throws IOException {
+        return new PassiveWifiSession(profiler, profile, clock, true);
+    }
+
+    private PassiveWifiSession(DeviceProfiler profiler, MyNetworkProfile profile, LongSupplier clock,
+                               boolean revealNamesByDefault) throws IOException {
         this.clock = Objects.requireNonNull(clock);
         inventory = new WifiInventory(profiler.ouiLookup(), new FingerprintDb());
+        boolean revealNames = Boolean.parseBoolean(
+                System.getProperty("audit.revealSsids", Boolean.toString(revealNamesByDefault)));
+        audit = new ProbeAuditAggregator(revealNames);
+        topology = new TopologyBuilder(ids, this::allowsBssid, revealNames);
         configure(profile);
     }
 
