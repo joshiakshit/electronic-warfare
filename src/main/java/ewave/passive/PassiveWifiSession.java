@@ -19,8 +19,10 @@ import java.util.function.LongSupplier;
 /** Only pseudonymized or aggregate observations outlive the packet callback. */
 public final class PassiveWifiSession {
     private static final int AP_DIRECTORY_LIMIT = 512;
+    private static final int CLIENT_DIRECTORY_LIMIT = 4096;
     private static final long DIRECTORY_TTL = TimeUnit.MINUTES.toMillis(10);
     private record ObservedAp(String address, String ssidToken, int channel, Double rssi, long time) { }
+    private record ObservedClient(String address, long time) { }
     public record Observation(boolean inventory, boolean probe) { }
     private static final Observation IGNORED = new Observation(false, false);
     private static final Observation INVENTORY = new Observation(true, false);
@@ -32,6 +34,7 @@ public final class PassiveWifiSession {
     private final long retention = RfSettings.retentionMillis();
     private final List<String> commandLineBssids = configuredBssids();
     private final LinkedHashMap<String, ObservedAp> observedAps = new LinkedHashMap<>(16, .75f, true);
+    private final LinkedHashMap<String, ObservedClient> observedClients = new LinkedHashMap<>(16, .75f, true);
     private List<String> bssids;
     private boolean neighborhoodProbes;
     private final WifiInventory inventory;
@@ -85,6 +88,12 @@ public final class PassiveWifiSession {
     public synchronized String observedBssid(String token) {
         ObservedAp ap = observedAps.get(token);
         return ap == null || ap.time < clock.getAsLong() - DIRECTORY_TTL ? null : ap.address;
+    }
+
+    /** Resolves a topology client token for active operations without exposing addresses in reports. */
+    public synchronized String observedClient(String token) {
+        ObservedClient client = observedClients.get(token);
+        return client == null || client.time < clock.getAsLong() - DIRECTORY_TTL ? null : client.address;
     }
 
     public synchronized List<MyNetworkProfile.NearbyAp> observedAccessPoints() {
@@ -141,7 +150,11 @@ public final class PassiveWifiSession {
         if (!inScope) return PROBE_ONLY;
         inventory.observe(frame, sender, local, signature, directed, wps);
         String client = topology.observe(frame, sender);
-        if (client != null) inventory.confirmClient(addressId(client), client, frame.timestamp());
+        if (client != null) {
+            observedClients.put(addressId(client), new ObservedClient(client, frame.timestamp()));
+            if (observedClients.size() > CLIENT_DIRECTORY_LIMIT) observedClients.pollFirstEntry();
+            inventory.confirmClient(addressId(client), client, frame.timestamp());
+        }
         return auditProbe ? BOTH : INVENTORY;
     }
 
@@ -198,6 +211,7 @@ public final class PassiveWifiSession {
     private void purge(long now) {
         nextPurge = now + TimeUnit.MINUTES.toMillis(1);
         observedAps.values().removeIf(ap -> ap.time < now - DIRECTORY_TTL);
+        observedClients.values().removeIf(client -> client.time < now - DIRECTORY_TTL);
         inventory.purge(now - retention);
         topology.purge(now, retention);
         audit.purge(now, retention);

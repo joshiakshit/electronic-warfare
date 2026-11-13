@@ -62,7 +62,7 @@ class DeauthRoutesTest {
                 var response = get(client, server, "/api/attack/scan-lan");
                 if (fails) {
                     assertEquals(404, response.statusCode());
-                    assertEquals("No LAN cache found. Restart ewave with ./scripts/start-ewave.sh to populate.",
+                    assertEquals("No LAN cache found. Restore managed Wi-Fi and recreate /tmp/ewave-lan-hosts.txt; see README, 'Restoring networking after a live session'.",
                             mapper.readTree(response.body()).path("error").asText());
                 } else {
                     assertEquals(200, response.statusCode());

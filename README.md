@@ -27,6 +27,13 @@ java -jar target/ewave-0.1.0-SNAPSHOT.jar \
 Open the loopback URL printed at startup. Replay processes four probe requests
 and leaves the dashboard available for inspection. Press Ctrl+C to stop it.
 
+## Using the dashboard
+
+New to ewave? Open **Start here** in the sidebar for a short guide to the views,
+the numbers, and a suggested tour. Each view also has a **How to read** section.
+The theme control at the bottom of the sidebar switches between **Paper**,
+**Dusk**, and **Midnight**; the choice is saved in the browser.
+
 ## Probe Lab demo
 
 Open **Probe Lab** and select **Built-in example**, or append `#probe-demo`
@@ -129,13 +136,47 @@ java -jar target/ewave-0.1.0-SNAPSHOT.jar --passive-rf --iface wlo1
 | --- | --- |
 | Wi-Fi summary and spectrum | `--iface wlo1` |
 | Passive Wi-Fi inventory and probe audit | `--passive-rf --iface wlo1` |
-| Live Intel and adaptive Spectrum on a monitor interface | `--passive-rf --adaptive --iface wlo1` |
+| Live device inventory and adaptive Spectrum on a monitor interface | `--passive-rf --adaptive --iface wlo1` |
 
 Wi-Fi summary mode uses the current interface configuration and requests 2.4 GHz
 channel changes through `sudo iw` as the adaptive scanner selects channels.
 Run the JAR with `--help` for all launcher options. Passive RF mode disables lab operations
 by default. The standard live launcher enables the Ops controls. Use these
 controls only on networks and devices you are authorized to test.
+
+### Restoring networking after a live session
+
+The launcher does not change the adapter mode or NetworkManager state; it starts
+`tcpdump` and, in adaptive modes, requests channel changes with `sudo iw`. If
+you moved the adapter to monitor mode yourself, restore managed mode after the
+JAR has exited. Use an Ethernet or console session so the restore does not depend
+on the captured radio.
+
+```sh
+sudo ip link set wlo1 down
+sudo iw dev wlo1 set type managed
+sudo ip link set wlo1 up
+sudo systemctl start NetworkManager
+```
+
+Replace `wlo1` with the capture interface. Start NetworkManager after the
+interface is back in managed mode, and reconnect with
+`nmcli device wifi connect <SSID>` if Wi-Fi does not return. If setup failed
+after NetworkManager was stopped, these commands are the supported recovery
+path. They are safe to repeat.
+
+The Ops **AP cache** and **LAN cache** views read snapshots taken while the
+adapter is managed. Recreate them in managed mode if the dashboard reports them
+missing (install `arp-scan` and `nmcli` first):
+
+```sh
+sudo arp-scan --localnet > /tmp/ewave-lan-hosts.txt
+sudo nmcli --terse --escape yes --fields SSID,BSSID,CHAN,FREQ \
+  device wifi list ifname wlo1 --rescan yes > /tmp/ewave-wifi-aps.txt
+```
+
+Restart ewave after recreating the caches. API errors for a missing cache point
+here.
 
 ## Optional Wi-Fi vendor names
 

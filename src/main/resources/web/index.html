@@ -2,8 +2,22 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#faf9f5">
+  <meta name="color-scheme" content="light dark">
   <title>ewave · RF Console</title>
+  <script>
+    (() => {
+      try {
+        const saved = localStorage.getItem('ewave-theme');
+        const theme = ['paper', 'dusk', 'midnight'].includes(saved)
+          ? saved : (matchMedia('(prefers-color-scheme: dark)').matches ? 'dusk' : 'paper');
+        document.documentElement.dataset.theme = theme;
+        if (localStorage.getItem('ewave-welcome-dismissed') === '1')
+          document.documentElement.classList.add('welcome-dismissed');
+      } catch { /* Local storage is optional. */ }
+    })();
+  </script>
+  <link rel="icon" href="/ewave.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/ewave.css">
   <script src="/graph.js" defer></script>
   <script src="/spectrum.js" defer></script>
@@ -13,17 +27,26 @@
 </head>
 <body>
 <aside class="sidebar">
-  <div class="brand">ewave</div>
+  <div class="brand">ewave<span aria-hidden="true">.</span></div>
   <nav aria-label="Console">
-    <button class="nav active" data-view="intel" aria-current="page"><span aria-hidden="true">◉</span> Intel</button>
-    <button class="nav" data-view="nearby"><span aria-hidden="true">⌁</span> Nearby</button>
-    <button class="nav" data-view="map"><span aria-hidden="true">◎</span> Map</button>
-    <button class="nav" data-view="health"><span aria-hidden="true">◈</span> Capture health</button>
-    <button class="nav" data-view="spectrum"><span aria-hidden="true">≋</span> Spectrum</button>
-    <button class="nav" data-view="probe"><span aria-hidden="true">⊞</span> Probe Lab</button>
-    <button class="nav" data-view="ops"><span aria-hidden="true">↯</span> Ops</button>
+    <button class="nav" data-view="guide">Start here</button>
+    <button class="nav active" data-view="intel" aria-current="page">Devices</button>
+    <button class="nav" data-view="nearby">Nearby APs</button>
+    <button class="nav" data-view="map">Network map</button>
+    <button class="nav" data-view="health">Capture health</button>
+    <button class="nav" data-view="spectrum">Spectrum</button>
+    <button class="nav" data-view="probe">Probe Lab</button>
+    <button class="nav" data-view="ops">Lab ops</button>
   </nav>
   <div class="sidebar-status">
+    <div class="theme-row">
+      <b>Theme</b>
+      <div class="theme-swatches" role="group" aria-label="Color theme">
+        <button type="button" class="theme-swatch" data-theme-option="paper" aria-label="Paper theme" aria-pressed="true" title="Paper"></button>
+        <button type="button" class="theme-swatch" data-theme-option="dusk" aria-label="Dusk theme" aria-pressed="false" title="Dusk"></button>
+        <button type="button" class="theme-swatch" data-theme-option="midnight" aria-label="Midnight theme" aria-pressed="false" title="Midnight"></button>
+      </div>
+    </div>
     <div><b>WiFi</b><i id="wifi-dot" class="dot"></i><span id="wifi-status">Connecting</span></div>
     <div><b>Uptime</b><span id="uptime" class="mono">00:00:00</span></div>
   </div>
@@ -31,12 +54,145 @@
 <main>
   <p id="connection" class="banner amber" role="status" hidden>Event stream disconnected. Reconnecting in 3 seconds.</p>
 
+
+  <section id="guide" class="view" hidden>
+    <div class="guide-hero">
+      <p class="eyebrow">Start here</p>
+      <h1>Wi-Fi, made legible.</h1>
+      <p class="guide-lede">ewave listens to the Wi-Fi management frames around you and turns them into a device inventory, a network map, and a channel plan. This guide explains what each screen answers and how to read the numbers.</p>
+    </div>
+
+    <div class="guide-grid">
+      <article class="panel guide-card">
+        <p class="eyebrow">01 · Observe</p>
+        <h3>Frames, not guesses</h3>
+        <p>Access points broadcast beacons; phones and laptops send probe requests. ewave records those frames and groups them by address.</p>
+      </article>
+      <article class="panel guide-card">
+        <p class="eyebrow">02 · Explain</p>
+        <h3>A readable inventory</h3>
+        <p>Each address gets a vendor guess, a signal history, and a place in the network map. Private addresses stay pseudonymous per session.</p>
+      </article>
+      <article class="panel guide-card">
+        <p class="eyebrow">03 · Test</p>
+        <h3>Channels and lab work</h3>
+        <p>Spectrum scores channels and simulates listening policies. Ops runs authorized lab actions such as deauth or handshake capture.</p>
+      </article>
+    </div>
+
+    <section class="guide-section">
+      <h2>Choose a starting point</h2>
+      <div class="guide-grid guide-paths">
+        <article class="panel guide-card">
+          <p class="eyebrow">Offline</p>
+          <h3>Try the replay</h3>
+          <p>No radio, root, or network needed. This loads a bundled probe-request capture.</p>
+          <pre class="command">java -jar target/ewave-0.1.0-SNAPSHOT.jar \
+  --replay src/test/resources/probes/probe-requests.pcap \
+  --port 0</pre>
+        </article>
+        <article class="panel guide-card">
+          <p class="eyebrow">Live inventory</p>
+          <h3>Watch your network</h3>
+          <p>Passive capture on a prepared monitor interface. Start with My Network setup.</p>
+          <pre class="command">java -jar target/ewave-0.1.0-SNAPSHOT.jar \
+  --passive-rf --iface wlo1</pre>
+        </article>
+        <article class="panel guide-card">
+          <p class="eyebrow">Experiment</p>
+          <h3>Compare channel plans</h3>
+          <p>Add adaptive tuning to the passive inventory and open Spectrum.</p>
+          <pre class="command">java -jar target/ewave-0.1.0-SNAPSHOT.jar \
+  --passive-rf --adaptive --iface wlo1</pre>
+        </article>
+        <article class="panel guide-card">
+          <p class="eyebrow">Authorized lab</p>
+          <h3>Enable Ops</h3>
+          <p>Only on networks and devices you are allowed to test. This can transmit frames.</p>
+          <pre class="command">java -jar target/ewave-0.1.0-SNAPSHOT.jar \
+  --passive-rf --ops --iface wlo1</pre>
+        </article>
+      </div>
+    </section>
+
+    <section class="guide-section">
+      <h2>Where to go for what</h2>
+      <div class="table-wrap guide-table">
+        <table>
+          <thead><tr><th>If you want to…</th><th>Open</th><th>What you get</th></tr></thead>
+          <tbody>
+            <tr><td>See every device heard</td><td>Devices</td><td>Roster, vendor guesses, signal, first and last seen</td></tr>
+            <tr><td>Spot other access points</td><td>Nearby APs</td><td>APs outside My Network with channel and signal</td></tr>
+            <tr><td>See who belongs to which AP</td><td>Network map</td><td>Observed AP–client links and hidden-name evidence</td></tr>
+            <tr><td>Check if capture is working</td><td>Capture health</td><td>Frames per second, drops, decoder rejects, readiness</td></tr>
+            <tr><td>Understand channel congestion</td><td>Spectrum</td><td>Scores, period fits, occupancy, listening demo</td></tr>
+            <tr><td>See names devices ask for</td><td>Probe Lab</td><td>Probe findings and the SSID corpus</td></tr>
+            <tr><td>Run an authorized test</td><td>Lab ops</td><td>Deauth, handshake, PMKID, beacon, evil-twin tools</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="guide-section">
+      <h2>How to read the numbers</h2>
+      <dl class="glossary">
+        <dt>SSID / BSSID</dt><dd>An SSID is the network name people see. A BSSID is the radio’s address; the same name can have several.</dd>
+        <dt>Probe request</dt><dd>A request a device broadcasts while looking for networks. It can name a network or ask for any nearby network.</dd>
+        <dt>RSSI</dt><dd>Received signal strength in dBm. Values closer to 0 are stronger: roughly −30 is very near, −90 is far or blocked.</dd>
+        <dt>Randomized address</dt><dd>A phone rotating its Wi-Fi address. The device can look new each time, and the vendor guess may be unknown.</dd>
+        <dt>Channel</dt><dd>The 2.4 GHz slice being observed. Overlapping channels share airtime and interfere with each other.</dd>
+        <dt>Frames/s, rejects, drops</dt><dd>Capture health metrics. Rejects are frames the decoder could not use; kernel drops are frames the radio missed.</dd>
+        <dt>Confidence / period</dt><dd>How regular a channel’s activity looks and how confident the fit is. Repeated patterns score higher.</dd>
+        <dt>Scope</dt><dd>Whether the inventory is restricted to My Network or shows every observed address.</dd>
+      </dl>
+    </section>
+
+    <section class="guide-section">
+      <h2>A five-minute tour</h2>
+      <ol class="guide-steps">
+        <li><b>Check Capture health.</b> Confirm the mode is replay or live and that frames are arriving.</li>
+        <li><b>Open Devices.</b> Set Scope to All observed, select a device, and read its signal and vendor.</li>
+        <li><b>Open Nearby APs.</b> See access points outside My Network and the channels they use.</li>
+        <li><b>Open Network map.</b> Select a node to see the evidence behind its links.</li>
+        <li><b>Open Probe Lab.</b> Read the finding, then expand the SSID corpus.</li>
+        <li><b>Open Spectrum.</b> Run the comparison; it works offline and shows why channel choice matters.</li>
+        <li><b>Only if authorized, open Lab ops.</b> Start with a small frame count and a monitor interface you control.</li>
+      </ol>
+    </section>
+
+    <aside class="guide-note">
+      <h2>What ewave is not</h2>
+      <p>It is not a physical map, a proof of ownership, or a live view of every frame in the air. Signal strength is a rough distance hint, names can be stale, and a probe request does not prove a past connection. Treat the dashboard as evidence to investigate, not a verdict.</p>
+    </aside>
+  </section>
+
   <section id="intel" class="view">
-    <div class="title-row"><h1>Intel</h1><button data-network-setup>My Network setup</button></div>
+    <section id="welcome" class="welcome" aria-labelledby="welcome-title">
+      <div>
+        <p class="eyebrow">New to ewave?</p>
+        <h2 id="welcome-title">Start with the guide.</h2>
+        <p>It explains what ewave does, what the numbers mean, and which screen answers which question. You can reopen it from <b>Start here</b> at any time.</p>
+      </div>
+      <div class="welcome-actions">
+        <button class="primary" type="button" data-open-guide>Open the guide</button>
+        <button id="dismiss-welcome" type="button">Dismiss</button>
+      </div>
+    </section>
+    <div class="title-row"><h1>Devices</h1><button data-network-setup>My Network setup</button></div>
+    <p class="view-lede">Every Wi-Fi address ewave has heard in this capture. <b>Scope</b> decides whether this roster is limited to My Network or shows everything on the air; select a row to inspect its evidence.</p>
+    <details class="view-help">
+      <summary>How to read Devices</summary>
+      <dl class="glossary compact">
+        <dt>RSSI</dt><dd>Signal strength in dBm. Closer to 0 is stronger; distance is only a rough hint.</dd>
+        <dt>Randomized</dt><dd>The device rotated its Wi-Fi address, so the vendor may show as locally administered or unknown.</dd>
+        <dt>Frames</dt><dd>Frames observed for this address. More frames make the profile and signal history more trustworthy.</dd>
+        <dt>Est. dist</dt><dd>An estimate from signal strength, not a measured distance.</dd>
+      </dl>
+    </details>
     <div class="stats" aria-label="Inventory totals">
-      <div class="panel"><span>Observed WiFi addresses</span><strong id="wifi-total">—</strong></div>
-      <div class="panel"><span>Probes</span><strong id="probe-total">—</strong></div>
-      <div class="panel"><span>Unique vendors</span><strong id="vendor-total">—</strong></div>
+      <div class="panel"><span>Wi-Fi devices</span><strong id="wifi-total">—</strong></div>
+      <div class="panel"><span>Probe requests</span><strong id="probe-total">—</strong></div>
+      <div class="panel"><span>Vendors</span><strong id="vendor-total">—</strong></div>
     </div>
     <article id="pinned-panel" class="panel pinned-panel" hidden>
       <header><h2>Pinned devices</h2><span class="caption">Exact Wi-Fi address matches</span></header>
@@ -49,13 +205,13 @@
           <label class="scope-control">Scope
             <select id="intel-scope"><option value="network">My Network · Last 5 minutes</option><option value="all">All observed</option></select>
           </label>
-          <label id="intel-ap-control" class="scope-control">AP <select id="intel-ap" aria-label="Intel access point"></select></label>
+          <label id="intel-ap-control" class="scope-control">AP <select id="intel-ap" aria-label="Device access point"></select></label>
           <label class="range">RSSI <input id="rssi" type="range" min="-100" max="0" value="-100"><output id="rssi-value">Any</output></label>
           <input id="search" type="search" placeholder="Search devices" aria-label="Search devices">
         </div>
         <p id="feed-summary" class="feed-summary caption" hidden></p>
         <div class="table-wrap feed" tabindex="0" role="region" aria-label="Device feed">
-          <table><thead><tr><th>Vendor</th><th>Type</th><th>MAC / ID</th><th>RSSI</th><th>Dist</th><th>First seen</th><th>Pkts</th></tr></thead>
+          <table><thead><tr><th>Vendor</th><th>Type</th><th>MAC / ID</th><th>RSSI</th><th>Est. dist</th><th>First seen</th><th>Frames</th></tr></thead>
           <tbody id="device-rows"></tbody></table>
           <p id="feed-empty" class="empty loading">◉ Loading inventory</p>
           <button id="more-intel" class="map-more" hidden>Show more addresses</button>
@@ -97,7 +253,16 @@
   </dialog>
 
   <section id="nearby" class="view" hidden>
-    <div class="title-row"><h1>Nearby</h1><button data-network-setup>My Network setup</button></div>
+    <div class="title-row"><h1>Nearby APs</h1><button data-network-setup>My Network setup</button></div>
+    <p class="view-lede">Access points that are not part of My Network. Use this list to see what else is on the air and whether nearby networks overlap your channels.</p>
+    <details class="view-help">
+      <summary>How to read Nearby APs</summary>
+      <dl class="glossary compact">
+        <dt>Access point</dt><dd>The network name and radio address. A hidden name is shown as hidden.</dd>
+        <dt>Channel</dt><dd>Where the AP was last heard. Several busy APs on one channel compete for airtime.</dd>
+        <dt>RSSI</dt><dd>How strongly this radio hears the AP. This is not the AP’s transmit power.</dd>
+      </dl>
+    </details>
     <article class="panel">
       <header><h2>Observed access points outside My Network</h2><button id="all-observations">Browse retained addresses</button></header>
       <p class="feed-summary caption">Recent AP advertisements on the tuned channel. Capture scope controls which clients enter the inventory.</p>
@@ -112,7 +277,16 @@
   </section>
 
   <section id="map" class="view" hidden>
-    <h1>Map</h1>
+    <h1>Network map</h1>
+    <p class="view-lede">Which clients were observed with which access points. A line means ewave saw evidence tying them together — not that every association is current.</p>
+    <details class="view-help">
+      <summary>How to read the network map</summary>
+      <dl class="glossary compact">
+        <dt>Nodes</dt><dd>Access points are squares; clients use a shape for phone, laptop, or other Wi-Fi.</dd>
+        <dt>Lines</dt><dd>Observed traffic between a client and an AP. Weak or old evidence is drawn fainter.</dd>
+        <dt>Hidden names</dt><dd>Beacons without a name, and later frames that reveal it. Evidence is shown with its source.</dd>
+      </dl>
+    </details>
     <article class="panel">
       <header class="controls">
         <label>Focus <select id="map-ap" aria-label="Map access point"></select></label>
@@ -138,7 +312,7 @@
     <article class="panel map-hidden">
       <header><h2>Hidden network names</h2><span id="map-hidden-count" class="caption"></span></header>
       <div id="map-hidden-table" class="table-wrap corpus" tabindex="0" role="region" aria-label="Hidden network evidence" hidden>
-        <table><thead><tr><th scope="col">Access point</th><th scope="col">Network name</th><th scope="col">Evidence</th><th scope="col">Observed at</th></tr></thead>
+        <table><thead><tr><th scope="col">Access point</th><th scope="col">Network name</th><th scope="col">Evidence</th><th scope="col">Observed at</th><th scope="col">Action</th></tr></thead>
           <tbody id="map-hidden-rows"></tbody></table>
       </div>
       <p id="map-hidden-empty" class="empty">No access points with hidden beacons in this view</p>
@@ -147,6 +321,15 @@
 
   <section id="health" class="view" hidden>
     <div class="title-row"><h1>Capture health</h1><span id="health-status" class="caption" role="status">Loading capture health</span></div>
+    <p class="view-lede">Whether the receiver is actually working. Check this page first when the inventory looks empty or the counts seem wrong.</p>
+    <details class="view-help">
+      <summary>How to read Capture health</summary>
+      <dl class="glossary compact">
+        <dt>Frames received</dt><dd>Frames decoded in this capture. Zero usually means the radio, interface, or permissions need attention.</dd>
+        <dt>Decoder rejects / kernel drops</dt><dd>Frames the decoder could not use, and frames the kernel discarded before decoding.</dd>
+        <dt>Capture readiness</dt><dd>Adapter mode, interface, and recent reception checks. An address on the interface does not guarantee monitor mode.</dd>
+      </dl>
+    </details>
     <p id="health-error" class="banner amber" role="status" hidden></p>
     <article class="panel capture-readiness">
       <header><h2>Capture readiness</h2><span class="caption">Live Wi-Fi</span></header>
@@ -186,6 +369,16 @@
 
   <section id="spectrum" class="view" hidden>
     <div class="title-row"><h1>Spectrum</h1><span id="spectrum-updated" class="caption"></span></div>
+    <p class="view-lede">How ewave scores channels and where a lab access point was observed. The comparison works offline and shows why listening strategy changes what you catch.</p>
+    <details class="view-help">
+      <summary>How to read Spectrum</summary>
+      <dl class="glossary compact">
+        <dt>Channel score</dt><dd>Expected activity and fit quality combined. It steers adaptive tuning; it is not a quality rating for your network.</dd>
+        <dt>Period fit</dt><dd>How regular a channel’s activity looks. Confidence rises when the pattern repeats.</dd>
+        <dt>Dwell</dt><dd>Time actually spent listening on a channel, excluding retune time and unconfirmed intervals.</dd>
+        <dt>Alerts</dt><dd>Changes such as new activity or a broken period. Treat them as prompts to inspect, not conclusions.</dd>
+      </dl>
+    </details>
     <article class="panel spectrum-demo">
       <header><h2>Watch an access point</h2><span class="caption">Live passive capture · 2.4 GHz</span></header>
       <div class="body stack">
@@ -251,7 +444,7 @@
           <ul class="scanner-alerts" id="scanner-alerts"></ul>
         </div>
       </div>
-      <div id="channel-chart" tabindex="0" role="region" aria-label="Channel scores" hidden><p class="caption channel-scroll-note">Scroll sideways to see all 13 channels.</p><div id="coupled" class="coupled"></div><div id="channel-bars" class="channel-bars"></div></div>
+      <div id="channel-chart" tabindex="0" role="region" aria-label="Channel scores" hidden><div id="coupled" class="coupled"></div><div id="channel-bars" class="channel-bars"></div></div>
     </article>
     <div class="two-col">
       <article class="panel">
@@ -268,6 +461,16 @@
 
   <section id="probe" class="view" hidden>
     <h1>Probe Lab</h1>
+    <p class="view-lede">The names devices ask for when they search for Wi-Fi, and what those requests do and do not prove.</p>
+    <details class="view-help">
+      <summary>How to read Probe Lab</summary>
+      <dl class="glossary compact">
+        <dt>Named probe</dt><dd>A request for a specific network. It suggests the name was known, not that the device connected.</dd>
+        <dt>General probe</dt><dd>A request for any nearby network. It carries no network name to compare.</dd>
+        <dt>SSID corpus</dt><dd>Every name observed, with the addresses that asked for it. Names are masked by default in live capture.</dd>
+        <dt>Addresses</dt><dd>Session-specific pseudonyms. They group observations without exposing the hardware address in shared reports.</dd>
+      </dl>
+    </details>
     <article class="panel probe-demo">
       <header><h2>What can a Wi-Fi request reveal?</h2><button type="button" id="probe-compare">Compare listening policies</button></header>
       <div class="body stack">
@@ -326,7 +529,16 @@
   </section>
 
   <section id="ops" class="view" hidden>
-    <h1>Ops</h1>
+    <h1>Lab ops</h1>
+    <p class="view-lede">Authorized lab actions. This page is disabled unless ewave was launched with <code>--ops</code>; every operation here can transmit frames.</p>
+    <details class="view-help">
+      <summary>How to use Lab ops safely</summary>
+      <dl class="glossary compact">
+        <dt>Authorization first</dt><dd>Use Ops only on networks and devices you own or have written permission to test.</dd>
+        <dt>Monitor interface</dt><dd>Most operations need a prepared monitor interface; the evil-twin flow also needs a second AP interface.</dd>
+        <dt>Console</dt><dd>Live output from the helper process. Stop every operation before changing interfaces or shutting down.</dd>
+      </dl>
+    </details>
     <p id="ops-notice" class="banner amber" hidden>Lab operations are disabled. Launch with <code>--ops</code> alongside <code>--passive-rf</code> to enable them.</p>
     <div class="ops-grid">
       <article class="panel">
@@ -347,7 +559,10 @@
         <header class="segmented tabs" aria-label="Operations">
           <button class="chosen" data-operation="deauth" aria-pressed="true">Deauth</button>
           <button data-operation="handshake" aria-pressed="false">Handshake</button>
-          <button data-operation="verify" aria-pressed="false">Verify PSK</button>
+          <button data-operation="verify" aria-pressed="false" disabled>Verify PSK</button>
+          <button data-operation="pmkid" aria-pressed="false">PMKID</button>
+          <button data-operation="beacon" aria-pressed="false">Beacon flood</button>
+          <button data-operation="evil-twin" aria-pressed="false">Evil twin</button>
         </header>
         <form id="deauth-form" class="body stack">
           <p id="ops-channel-badge" class="channel-badge mono caption" role="status" hidden></p>
@@ -359,6 +574,7 @@
         <form id="handshake-form" class="body stack" hidden>
           <label>Channel<input id="handshake-channel" type="number" min="1" max="233" value="6" required></label>
           <label>Monitor interface<input id="handshake-interface" value="wlo1" required></label>
+          <label class="check"><input id="use-precaptured" type="checkbox"> Use pre-captured capture file</label>
           <div class="controls"><button class="primary" type="submit">Start capture</button><button type="button" data-stop>Stop</button></div>
           <ol id="handshake-stages" class="stages">
             <li>Tuning frequency</li><li>Waiting for beacon</li><li>Waiting for device reconnect</li><li>Finishing capture</li><li>Complete</li>
@@ -367,12 +583,44 @@
           <button id="verify-jump" type="button" hidden>Verify PSK →</button>
         </form>
         <form id="verify-form" class="body stack" hidden>
+          <p id="verify-gate" class="caption">Capture a handshake or select a pre-captured file to enable verification.</p>
           <label>Capture file path<input id="capture-path" required spellcheck="false"></label>
           <label>Wordlist path<input id="wordlist" value="/usr/share/wordlists/rockyou.txt" required spellcheck="false"></label>
           <div class="controls"><button class="primary" type="submit">Run Aircrack</button><button type="button" data-stop>Stop</button></div>
           <p id="verify-status" class="op-status" role="status">Idle</p>
           <strong id="psk" class="key mono" hidden></strong>
           <details id="verify-details" hidden><summary>Full output</summary><pre id="verify-output"></pre></details>
+        </form>
+        <form id="pmkid-form" class="body stack" hidden>
+          <label>Capture duration (seconds)<input id="pmkid-duration" type="number" min="1" max="300" value="30" required></label>
+          <label>Monitor interface<input id="pmkid-interface" value="wlo1" required></label>
+          <label>Wordlist path<input id="pmkid-wordlist" value="/usr/share/wordlists/rockyou.txt" required spellcheck="false"></label>
+          <div class="controls"><button class="primary" type="submit">Start PMKID capture</button><button type="button" data-stop>Stop</button></div>
+          <p id="pmkid-status" class="op-status" role="status">Idle</p>
+          <p id="pmkid-result" class="caption" role="status"></p>
+        </form>
+        <form id="beacon-form" class="body stack" hidden>
+          <label>SSID<input id="beacon-ssid" maxlength="32" placeholder="ewave-lab" required spellcheck="false"></label>
+          <label>Channel<input id="beacon-channel" type="number" min="1" max="233" value="6" required></label>
+          <label>Beacons per second<input id="beacon-rate" type="number" min="1" max="10000" value="100" required></label>
+          <label>Monitor interface<input id="beacon-interface" value="wlo1" required></label>
+          <div class="controls"><button class="primary" type="submit">Start beacon flood</button><button type="button" data-stop>Stop</button></div>
+          <p id="beacon-status" class="op-status" role="status">Idle</p>
+          <p id="beacon-tool" class="caption">mdk4 is used first; mdk3 is tried when mdk4 is not installed.</p>
+        </form>
+        <form id="evil-twin-form" class="body stack" hidden>
+          <label>Network name (SSID)<input id="evil-twin-ssid" maxlength="32" placeholder="ewave-portal" required spellcheck="false"></label>
+          <label>AP interface<input id="evil-twin-interface" value="wlo1ap" required spellcheck="false"></label>
+          <label>Channel<input id="evil-twin-channel" type="number" min="1" max="233" value="6" required></label>
+          <label>Portal port<input id="evil-twin-port" type="number" min="1" max="65535" value="80" required></label>
+          <div class="controls"><button class="primary" type="submit">Start evil twin</button><button type="button" data-stop>Stop</button></div>
+          <p id="evil-twin-status" class="op-status" role="status">Idle</p>
+          <p id="evil-twin-portal" class="caption"></p>
+          <div class="table-wrap" tabindex="0" role="region" aria-label="Captured portal credentials">
+            <table><thead><tr><th scope="col">Time</th><th scope="col">Client</th><th scope="col">Username</th><th scope="col">Password</th></tr></thead>
+              <tbody id="evil-twin-rows"></tbody></table>
+          </div>
+          <p id="evil-twin-empty" class="empty">No credentials captured yet</p>
         </form>
       </article>
       <article class="panel">
@@ -381,6 +629,7 @@
       </article>
     </div>
   </section>
+  <footer class="site-footer"><b>ewave</b><span>Local RF console. Capture data stays on this machine.</span></footer>
 </main>
 <dialog id="network-dialog" class="panel network-dialog" aria-labelledby="network-title">
   <header><h2 id="network-title">My Network setup</h2><button id="close-network" type="button" aria-label="Close My Network setup">Close</button></header>

@@ -40,6 +40,7 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
@@ -61,7 +62,9 @@ import java.util.stream.Stream;
  * <p>Ticks, discovered devices and queued events survive stop/start. A scanner
  * supplied to a new bridge must have fresh feedback chronology. All bridge access
  * to the single-threaded scanner is synchronized on the scanner; callers sharing
- * it must use the same monitor. Queues are unbounded and should be drained.
+ * it must use the same monitor. The optional packet retention queue is bounded
+ * and evicts the oldest packets; overflow is counted by {@link #getDroppedPackets()}.
+ * The event queue is unbounded and should be drained.
  */
 public final class PacketBridge implements AutoCloseable {
     private static final System.Logger LOG = System.getLogger(PacketBridge.class.getName());
@@ -91,7 +94,11 @@ public final class PacketBridge implements AutoCloseable {
 
     private final ConcurrentHashMap<String, DeviceRecord> devices = new ConcurrentHashMap<>();
     private final Map<String, DeviceRecord> deviceView = Collections.unmodifiableMap(devices);
-    private final BlockingQueue<PacketEvent> packetQueue = new LinkedBlockingQueue<>();
+    /** Default cap for the diagnostic packet queue; production does not drain it. */
+    public static final int PACKET_QUEUE_CAPACITY = 1024;
+    private final BlockingQueue<PacketEvent> packetQueue;
+    private final int packetCapacity;
+    private final AtomicLong droppedPackets = new AtomicLong();
     private final BlockingQueue<EwaveEvent> eventQueue = new LinkedBlockingQueue<>();
     public static final int RECENT_PROBE_LIMIT = 256;
     private final ArrayDeque<ProbeRequest> recentProbes = new ArrayDeque<>();
@@ -143,9 +150,17 @@ public final class PacketBridge implements AutoCloseable {
     }
 
     PacketBridge(ProcessStarter processStarter, Map<String, String> vendors, DeviceProfiler profiler, int tickMs) {
+        this(processStarter, vendors, profiler, tickMs, PACKET_QUEUE_CAPACITY);
+    }
+
+    PacketBridge(ProcessStarter processStarter, Map<String, String> vendors, DeviceProfiler profiler, int tickMs,
+                 int packetCapacity) {
         if (tickMs < 10 || tickMs > 2000) throw new IllegalArgumentException("--tick-ms must be 10..2000");
+        if (packetCapacity < 1) throw new IllegalArgumentException("packetCapacity must be positive");
         this.tickMs = tickMs;
         tickNanos = TimeUnit.MILLISECONDS.toNanos(tickMs);
+        this.packetCapacity = packetCapacity;
+        this.packetQueue = new ArrayBlockingQueue<>(packetCapacity);
         this.processStarter = Objects.requireNonNull(processStarter);
         this.vendors = Map.copyOf(vendors);
         this.profiler = Objects.requireNonNull(profiler);
@@ -348,6 +363,12 @@ public final class PacketBridge implements AutoCloseable {
 
     public BlockingQueue<PacketEvent> getPacketQueue() { return packetQueue; }
 
+    /** Capacity of the bounded diagnostic packet queue. */
+    public int getPacketQueueCapacity() { return packetCapacity; }
+
+    /** Packets discarded because the bounded packet queue was full; cumulative across stop/start. */
+    public long getDroppedPackets() { return droppedPackets.get(); }
+
     /** Device lifecycle and decoded-probe events, with immutable payloads. */
     public BlockingQueue<EwaveEvent> getEventQueue() { return eventQueue; }
 
@@ -363,9 +384,12 @@ public final class PacketBridge implements AutoCloseable {
         }
         if (channel != 0) status.put("channel", channel);
         status.put("captureMode", captureMode);
+        status.put("scannerAttached", session != null && session.scanner != null);
         if (captureInterface != null) status.put("captureInterface", captureInterface);
         status.put("probeRequests", probeCount);
         status.put("recentProbeLimit", RECENT_PROBE_LIMIT);
+        status.put("packetQueueCapacity", packetCapacity);
+        status.put("packetsDropped", droppedPackets.get());
         if (captureError != null) status.put("captureError", captureError);
         if (passiveWifi != null) {
             status.put("scopedBssidCount", passiveWifi.scopedBssidCount());
@@ -471,6 +495,7 @@ public final class PacketBridge implements AutoCloseable {
                     profiler.observe(packet);
                     if (packet.channel() >= 1 && packet.channel() <= 13) current.counts[packet.channel()]++;
                     current.pending.add(packet);
+                    if (current.pending.size() >= packetCapacity) publishPending(current);
                     updateDevice(packet.srcMac(), packet, true);
                     if (!packet.dstMac().equals(packet.srcMac())) updateDevice(packet.dstMac(), packet, false);
                 }
@@ -773,9 +798,24 @@ public final class PacketBridge implements AutoCloseable {
         }
     }
 
+    /** Publishes collected packets, evicting the oldest when the bounded queue is full. Caller holds this. */
     private void publishPending(Session current) {
-        packetQueue.addAll(current.pending);
+        if (current.pending.isEmpty()) return;
+        for (PacketEvent packet : current.pending) {
+            if (packetQueue.offer(packet)) continue;
+            PacketEvent evicted = packetQueue.poll();
+            if (evicted != null) recordDrop();
+            if (!packetQueue.offer(packet)) recordDrop();
+        }
         current.pending.clear();
+    }
+
+    private void recordDrop() {
+        if (droppedPackets.incrementAndGet() == 1) {
+            LOG.log(System.Logger.Level.WARNING,
+                    "Packet retention queue reached capacity " + packetCapacity
+                            + "; oldest packets are being discarded. The launcher does not drain this diagnostic queue.");
+        }
     }
 
     private void updateDevice(String mac, PacketEvent packet, boolean transmitter) {

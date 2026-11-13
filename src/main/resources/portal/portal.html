@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Network sign-in</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 24px;
+      font: 15px/1.5 system-ui, sans-serif; color: #f4f4f4; background: #0d0d0d; }
+    main { width: min(420px, 100%); padding: 28px; border: 1px solid #303030; border-radius: 14px; background: #161616; }
+    .brand { margin: 0 0 4px; color: #5de6a8; font: 700 24px/1.2 ui-monospace, monospace; letter-spacing: -.04em; }
+    h1 { margin: 0 0 8px; font-size: 21px; }
+    p { margin: 0 0 18px; color: #a8a8a8; }
+    label { display: grid; gap: 6px; margin-bottom: 14px; color: #a8a8a8; font-size: 13px; }
+    input { min-height: 42px; padding: 9px 11px; color: #f4f4f4; background: #202020;
+      border: 1px solid #707070; border-radius: 8px; font: inherit; }
+    input:focus-visible { outline: 2px solid #5de6a8; outline-offset: 2px; }
+    button { width: 100%; min-height: 42px; margin-top: 4px; border: 0; border-radius: 8px;
+      color: #0d0d0d; background: #5de6a8; font: 700 14px system-ui, sans-serif; cursor: pointer; }
+    .note { margin: 16px 0 0; font-size: 12px; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="brand">ewave</p>
+  <h1>Sign in to continue</h1>
+  <p>This network requires a quick sign-in before internet access is available.</p>
+  <form method="post" action="/submit" autocomplete="off">
+    <label>Username <input name="username" maxlength="128" required autofocus></label>
+    <label>Password <input name="password" type="password" maxlength="128" required></label>
+    <button type="submit">Connect</button>
+  </form>
+  <p class="note">Lab captive portal. Credentials are recorded for the authorized test session only.</p>
+</main>
+</body>
+</html>

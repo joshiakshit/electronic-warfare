@@ -1,5 +1,6 @@
 package ewave.core;
 
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
@@ -61,6 +62,7 @@ public final class AdaptiveScanner {
     private final long[] feedbackTicks;
     private final AnomalyDetector[] anomalyDetectors;
     private final int anomalyHistorySize;
+    private final Clock clock;
     private final PeriodFit.History[] fitEvidence;
     private final double[] fitConfidence;
     private final long[] observationsSinceConfidence;
@@ -69,7 +71,13 @@ public final class AdaptiveScanner {
     }
 
     public AdaptiveScanner(Config config, int anomalyHistorySize) {
+        this(config, anomalyHistorySize, Clock.systemUTC());
+    }
+
+    /** Uses the supplied clock for anomaly timestamps so simulations and tests are reproducible. */
+    public AdaptiveScanner(Config config, int anomalyHistorySize, Clock clock) {
         this.anomalyHistorySize = anomalyHistorySize;
+        this.clock = Objects.requireNonNull(clock);
         this.config = Objects.requireNonNull(config);
         feedbackTicks = new long[config.bands()];
         anomalyDetectors = new AnomalyDetector[config.bands()];
@@ -82,7 +90,7 @@ public final class AdaptiveScanner {
     public void reset() {
         model = new PhaseModel(config); random = new Random(config.seed()); latestTick = -1;
         Arrays.fill(feedbackTicks,-1);
-        Arrays.setAll(anomalyDetectors, band -> new AnomalyDetector(anomalyHistorySize));
+        Arrays.setAll(anomalyDetectors, band -> new AnomalyDetector(anomalyHistorySize, clock));
         Arrays.setAll(fitEvidence, band -> new PeriodFit.History(config.capacity()));
         Arrays.fill(fitConfidence, 0);
         Arrays.fill(observationsSinceConfidence, 0);

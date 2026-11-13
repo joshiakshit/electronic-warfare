@@ -4,6 +4,7 @@ import ewave.core.AdaptiveScanner;
 import ewave.model.DeviceRecord;
 import ewave.model.PacketEvent;
 import ewave.model.EwaveEvent;
+import ewave.passive.DeviceProfiler;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -241,6 +242,22 @@ class PacketBridgeTest {
             await(() -> !bridge.isRunning());
             assertEquals(ETHERNET, bridge.getPacketQueue().poll(2, TimeUnit.SECONDS).rawSummary());
             assertFalse(process.isAlive());
+        }
+    }
+
+    @Test void boundsPacketRetentionAndCountsOverflow() throws Exception {
+        FakeProcess process = new FakeProcess();
+        try (PacketBridge bridge = new PacketBridge(builder -> process, Map.of(), new DeviceProfiler(),
+                PacketBridge.DEFAULT_TICK_MS, 2)) {
+            bridge.start("wlo1", scanner());
+            for (int i = 0; i < 12; i++) process.write(ETHERNET);
+            await(() -> bridge.getDroppedPackets() == 10);
+            assertEquals(2, bridge.getPacketQueueCapacity());
+            assertEquals(2, bridge.getPacketQueue().size());
+            assertEquals(2, bridge.getCaptureStatus().get("packetQueueCapacity"));
+            assertEquals(10L, bridge.getCaptureStatus().get("packetsDropped"));
+            bridge.stop();
+            assertEquals(2, bridge.getPacketQueue().size());
         }
     }
 

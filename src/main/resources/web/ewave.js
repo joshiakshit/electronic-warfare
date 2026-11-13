@@ -17,10 +17,44 @@
     profile: null, captureRevision: 0, profileRevision: 0, profileSaving: false,
     scope: 'network', apChoice: null, autoAp: null, intelLimit: intelPageSize,
     audit: null, ssid: null, selected: null, known: new Set(), flashed: new Map(),
-    ops: { aps: [], targets: [], lan: [], manual: [], active: null, stage: -1 }
+    ops: { aps: [], targets: [], lan: [], manual: [], active: null, stage: -1, handshakeFound: false },
+    uncloak: null
   };
   const pending = new Set();
   const observationNow = () => state.status?.wifi?.referenceTime ?? Date.now();
+
+  const root = document.documentElement;
+  const themeMeta = document.querySelector('meta[name="theme-color"]');
+  function applyTheme(theme, persist = true) {
+    if (persist) {
+      root.classList.add('theme-transition');
+      void root.offsetWidth;
+    }
+    root.dataset.theme = theme;
+    for (const button of by('[data-theme-option]')) {
+      const chosen = button.dataset.themeOption === theme;
+      button.classList.toggle('chosen', chosen);
+      button.setAttribute('aria-pressed', String(chosen));
+    }
+    if (themeMeta) themeMeta.content = getComputedStyle(root).getPropertyValue('--bg-base').trim();
+    if (!persist) return;
+    try { localStorage.setItem('ewave-theme', theme); } catch { /* Local storage is optional. */ }
+    clearTimeout(applyTheme.timer);
+    applyTheme.timer = setTimeout(() => root.classList.remove('theme-transition'), 480);
+  }
+  for (const button of by('[data-theme-option]')) {
+    button.addEventListener('click', () => applyTheme(button.dataset.themeOption));
+  }
+  applyTheme(root.dataset.theme || 'paper', false);
+
+  function dismissWelcome() {
+    root.classList.add('welcome-dismissed');
+    try { localStorage.setItem('ewave-welcome-dismissed', '1'); } catch { /* Local storage is optional. */ }
+  }
+  $('dismiss-welcome')?.addEventListener('click', dismissWelcome);
+  for (const button of by('[data-open-guide]')) {
+    button.addEventListener('click', () => { dismissWelcome(); switchView('guide'); });
+  }
 
   function element(tag, value, className) {
     const node = document.createElement(tag);
@@ -105,6 +139,8 @@
     $('ops-notice').hidden = state.status?.operationsEnabled !== false;
     for (const button of by('#ops button[type="submit"], #lan-button')) button.disabled = !state.status?.operationsEnabled || !!state.ops.active;
     for (const button of by('[data-stop]')) button.disabled = !state.status?.operationsEnabled;
+    $('use-precaptured').disabled = !state.status?.operationsEnabled || !!state.ops.active;
+    syncVerifyAvailability();
     tickUptime();
   }
 
@@ -199,9 +235,42 @@
         window.EwaveGraph.apLabel(ap),
         element('td', evidence?.name ?? (nameObserved ? 'Name masked' : 'Name not observed'), 'mono'),
         nameObserved ? sources[evidence.source] || 'Named management frame' : 'Hidden beacon',
-        clock(evidence?.observedAt ?? evidence?.beaconObservedAt)
+        clock(evidence?.observedAt ?? evidence?.beaconObservedAt),
+        uncloakCell(ap)
       ]);
     }));
+  }
+
+  const monitorInterface = () => state.status?.wifi?.captureInterface || $('deauth-interface').value.trim() || 'wlo1';
+
+  function uncloakCell(ap) {
+    const cell = element('td', null, 'uncloak-cell');
+    const active = state.uncloak?.bssid === ap.bssid;
+    const busy = !!state.uncloak?.running;
+    const probe = element('button', active && busy ? 'Probing…' : 'Probe');
+    probe.type = 'button';
+    probe.disabled = busy || !state.status?.operationsEnabled || !!state.ops.active;
+    probe.title = state.status?.operationsEnabled === false ? 'Lab operations are disabled'
+      : 'Send a targeted deauth so the client reconnects and reveals the network name';
+    probe.addEventListener('click', () => uncloakAccessPoint(ap.bssid));
+    cell.append(probe);
+    if (active && state.uncloak.message) {
+      cell.append(element('span', state.uncloak.message, 'caption' + (state.uncloak.error ? ' red' : '')));
+    }
+    return cell;
+  }
+
+  async function uncloakAccessPoint(bssid) {
+    if (state.uncloak?.running) return;
+    state.uncloak = { bssid, running: true, message: '', error: false };
+    renderMap();
+    try {
+      const result = await api('/api/attack/uncloak', { bssid, interface: monitorInterface() });
+      state.uncloak = { bssid, running: false, message: result.message + ' Target ' + result.targetClient, error: false };
+    } catch (error) {
+      state.uncloak = { bssid, running: false, message: error.message, error: true };
+    }
+    renderMap();
   }
 
   function renderMap() {
@@ -331,7 +400,7 @@
       ...(item.label ? [['Enrolled name', item.label]] : []),
       ['MAC / ID', item.id, 'mono'], ['Vendor hint', item.vendor],
       ['Role / class', item.type], [item.details.id ? 'Median RSSI' : 'RSSI', signal(item.rssi), 'mono'],
-      ['Distance', item.distance], ['First seen', clock(item.first)], ['Last seen', clock(item.last)], ['Packets', number(item.count)]
+      ['Est. distance', item.distance], ['First seen', clock(item.first)], ['Last seen', clock(item.last)], ['Frames', number(item.count)]
     ];
     const wifi = item.details;
     if (wifi.fingerprintHint) {
@@ -725,7 +794,7 @@
       }
       renderCaptureHealth(health);
       let scanner, scannerError;
-      if (health?.mode === 'passive-rf' && health.running) {
+      if (health?.mode === 'passive-rf' && health.running && state.status?.wifi?.scannerAttached !== false) {
         try { scanner = await api('/api/channels', undefined, 503); }
         catch (error) { scannerError = error.message; }
       }
@@ -735,6 +804,10 @@
 
   async function refreshSpectrum() {
     return once('spectrum', async () => {
+      if (state.status?.wifi?.scannerAttached === false) {
+        window.EwaveSpectrum.update(null, null);
+        return;
+      }
       try { window.EwaveSpectrum.update(await api('/api/channels', undefined, 503), state.status?.wifi?.channel); }
       catch (error) { window.EwaveSpectrum.update(null, null, error.message); }
     });
@@ -857,7 +930,28 @@
   }
 
   const ops = state.ops;
+  let beaconTimer = null;
+  let evilTwinTimer = null;
   const selectedAp = () => ops.aps.find(ap => ap.bssid === $('ap-target').value);
+  function verifyUnlocked() {
+    return state.status?.operationsEnabled !== false && (ops.handshakeFound || $('use-precaptured').checked);
+  }
+
+  function syncVerifyAvailability() {
+    const unlocked = verifyUnlocked();
+    const tab = by('[data-operation]').find(button => button.dataset.operation === 'verify');
+    if (tab) {
+      tab.disabled = !unlocked;
+      tab.title = unlocked ? '' : 'Capture a handshake or select a pre-captured file first';
+    }
+    const gate = $('verify-gate');
+    gate.hidden = unlocked;
+    gate.textContent = state.status?.operationsEnabled === false ? 'Lab operations are disabled.'
+      : 'Capture a handshake or select a pre-captured file to enable verification.';
+    const capture = $('handshake-form').querySelector('button[type="submit"]');
+    if (capture) capture.disabled = $('use-precaptured').checked
+      || !state.status?.operationsEnabled || !!ops.active;
+  }
   function options(id, items, placeholder) {
     const select = $(id), selected = select.value;
     const initial = element('option', placeholder);
@@ -926,24 +1020,30 @@
     renderTargets();
   }
 
-  function log(message, level) {
+  function log(message, level, highlight) {
     for (const line of String(message).trim().split('\n')) {
       if (!line) continue;
       const tone = level ?? (/error|fail/i.test(line) ? 'red' : /handshake|KEY FOUND/i.test(line) ? 'green'
         : /sending|deauth/i.test(line) ? 'amber-text' : '');
-      $('console').append(element('div', '[' + clock(Date.now()) + '] ' + line, tone));
+      const entry = element('div', null, tone);
+      entry.append('[' + clock(Date.now()) + '] ');
+      const at = highlight ? line.indexOf(highlight) : -1;
+      if (at < 0) entry.append(line);
+      else entry.append(line.slice(0, at), element('span', highlight, 'key-inline'), line.slice(at + highlight.length));
+      $('console').append(entry);
     }
     while ($('console').childElementCount > 400) $('console').firstChild.remove();
     $('console').scrollTop = $('console').scrollHeight;
   }
 
   function operation(name) {
+    if (name === 'verify' && !verifyUnlocked()) return;
     for (const button of by('[data-operation]')) {
       const active = button.dataset.operation === name;
       button.classList.toggle('chosen', active);
       button.setAttribute('aria-pressed', String(active));
     }
-    for (const id of ['deauth', 'handshake', 'verify']) $(id + '-form').hidden = id !== name;
+    for (const id of ['deauth', 'handshake', 'verify', 'pmkid', 'beacon', 'evil-twin']) $(id + '-form').hidden = id !== name;
   }
 
   function stages(index, result) {
@@ -964,7 +1064,8 @@
   async function pollOperation(name) {
     return once('ops-status', async () => {
       try {
-        const path = name === 'deauth' ? '/api/attack/status' : '/api/attack/handshake/status';
+        const path = name === 'deauth' ? '/api/attack/status'
+          : name === 'pmkid' ? '/api/attack/pmkid/status' : '/api/attack/handshake/status';
         const status = await api(path);
         if (ops.active !== name || !status.running) return;
         const text = name === 'deauth' ? status.command || 'Sending deauth frames…' : status.stage;
@@ -984,7 +1085,8 @@
     status.textContent = 'Running…';
     updateStatus();
     log('Starting ' + name);
-    const timer = name !== 'verify' ? setInterval(() => pollOperation(name), 1000) : null;
+    const timer = name !== 'verify'
+      ? setInterval(() => pollOperation(name), name === 'handshake' || name === 'pmkid' ? 2000 : 1000) : null;
     try { finish(await api(path, body)); }
     catch (error) {
       status.textContent = error.message;
@@ -1015,26 +1117,39 @@
 
   $('handshake-form').addEventListener('submit', event => {
     event.preventDefault();
+    if ($('use-precaptured').checked) {
+      operation('verify');
+      return;
+    }
     const ap = selectedAp();
     if (!ap) { $('handshake-status').textContent = 'Select a cached access point first.'; return; }
-    $('verify-jump').hidden = true;
     stages(0, 'active');
     runOperation('handshake', '/api/attack/handshake', {
       apBssid: ap.bssid, clientMac: $('client-target').value || null,
       interface: $('handshake-interface').value.trim(), channel: $('handshake-channel').valueAsNumber,
       frequencyMhz: ap.frequencyMhz, ssid: ap.ssid
     }, result => {
-      const text = result.handshakeDetected ? 'Handshake captured' : result.outcome.replaceAll('_', ' ');
-      $('handshake-status').textContent = text + (result.capFilePath ? '\n' + result.capFilePath : '');
-      stages(4, result.handshakeDetected ? 'done' : 'failed');
-      if (result.capFilePath) $('capture-path').value = result.capFilePath;
-      $('verify-jump').hidden = !result.handshakeDetected;
+      const found = !!(result.handshakeDetected ?? result.handshakeFound);
+      const captureFile = result.capFilePath || result.captureFile;
+      const outcome = result.outcome || (found ? 'COMPLETE' : 'CAPTURE_ENDED');
+      const text = found ? 'Handshake captured' : String(outcome).replaceAll('_', ' ');
+      $('handshake-status').textContent = text + (captureFile ? '\n' + captureFile : '');
+      stages(4, found ? 'done' : 'failed');
+      if (captureFile) $('capture-path').value = captureFile;
+      if (found) ops.handshakeFound = true;
+      $('verify-jump').hidden = !ops.handshakeFound;
+      if (ops.handshakeFound) $('verify-status').textContent = 'Handshake ready · run Aircrack to test the key';
+      syncVerifyAvailability();
       log(text + (result.captureOutput ? '\n' + result.captureOutput : ''));
     });
   });
 
   $('verify-form').addEventListener('submit', event => {
     event.preventDefault();
+    if (!verifyUnlocked()) {
+      $('verify-status').textContent = 'Capture a handshake or select a pre-captured file first.';
+      return;
+    }
     $('psk').hidden = $('verify-details').hidden = true;
     runOperation('verify', '/api/attack/handshake/verify', {
       capFilePath: $('capture-path').value.trim(), wordlistPath: $('wordlist').value.trim()
@@ -1045,15 +1160,185 @@
       $('psk').textContent = result.vulnerable ? result.psk : '';
       $('verify-details').hidden = !result.fullOutput;
       $('verify-output').textContent = result.fullOutput || '';
-      log(text);
+      log(text, result.vulnerable ? 'green' : 'amber-text');
+      log(result.fullOutput || 'aircrack-ng returned no output', undefined, result.vulnerable ? result.psk : null);
     });
+  });
+
+  $('pmkid-form').addEventListener('submit', event => {
+    event.preventDefault();
+    if (ops.active || !state.status?.operationsEnabled) return;
+    $('pmkid-result').textContent = '';
+    runOperation('pmkid', '/api/attack/pmkid', {
+      interface: $('pmkid-interface').value.trim(),
+      wordlistPath: $('pmkid-wordlist').value.trim(),
+      durationSeconds: $('pmkid-duration').valueAsNumber
+    }, result => {
+      const text = result.vulnerable ? 'PMKID key found'
+        : result.captured ? 'PMKID captured · key not in wordlist' : 'No PMKID captured';
+      $('pmkid-status').textContent = text;
+      $('pmkid-result').textContent = result.hashPath ? 'Hash ' + result.hashPath : '';
+      log(text);
+      log(result.output || '');
+      if (result.psk) log('KEY FOUND! [ ' + result.psk + ' ]', 'green', result.psk);
+    });
+  });
+
+  async function pollBeacon() {
+    return once('beacon-status', async () => {
+      try {
+        const status = await api('/api/attack/beacon/status');
+        if (status.tool) $('beacon-tool').textContent = status.tool + ' · ' + (status.command || '');
+        if (status.running) {
+          $('beacon-status').textContent = 'Running · ' + status.command;
+          return;
+        }
+        $('beacon-status').textContent = status.error || 'Stopped';
+        if (status.error) $('beacon-status').classList.add('red');
+        if (status.output || status.error) log(status.output || status.error, status.error ? 'red' : undefined);
+        if (beaconTimer) { clearInterval(beaconTimer); beaconTimer = null; }
+        if (ops.active === 'beacon') { ops.active = null; updateStatus(); }
+      } catch (error) {
+        if (beaconTimer) { clearInterval(beaconTimer); beaconTimer = null; }
+        if (ops.active === 'beacon') { ops.active = null; updateStatus(); }
+        $('beacon-status').textContent = 'Status unavailable · ' + error.message;
+        $('beacon-status').classList.add('red');
+      }
+    });
+  }
+
+  $('beacon-form').addEventListener('submit', async event => {
+    event.preventDefault();
+    if (ops.active || !state.status?.operationsEnabled) return;
+    ops.active = 'beacon';
+    updateStatus();
+    $('beacon-status').classList.remove('red');
+    $('beacon-status').textContent = 'Starting…';
+    try {
+      const status = await api('/api/attack/beacon', {
+        interface: $('beacon-interface').value.trim(),
+        ssid: $('beacon-ssid').value,
+        channel: $('beacon-channel').valueAsNumber,
+        rate: $('beacon-rate').valueAsNumber
+      });
+      if (status.tool) $('beacon-tool').textContent = status.tool + ' · ' + (status.command || '');
+      if (!status.running) {
+        $('beacon-status').textContent = status.error || 'Beacon flood stopped';
+        $('beacon-status').classList.add('red');
+        ops.active = null;
+        updateStatus();
+        return;
+      }
+      $('beacon-status').textContent = 'Running · ' + status.command;
+      log('Beacon flood started with ' + status.tool + '\n' + status.command);
+      if (beaconTimer) clearInterval(beaconTimer);
+      beaconTimer = setInterval(pollBeacon, 2000);
+    } catch (error) {
+      $('beacon-status').textContent = error.message;
+      $('beacon-status').classList.add('red');
+      log('Error · ' + error.message);
+      ops.active = null;
+      updateStatus();
+    }
+  });
+
+  function renderEvilTwin(status) {
+    const running = !!status.running;
+    $('evil-twin-status').textContent = running ? 'Portal active · ' + status.stage
+      : status.error || status.stage || 'Stopped';
+    $('evil-twin-status').classList.toggle('red', !running && !!status.error);
+    $('evil-twin-portal').textContent = status.portalUrl
+      ? 'Portal ' + status.portalUrl + ' · log ' + status.credentialsFile : '';
+    const captured = status.credentials || [];
+    $('evil-twin-rows').replaceChildren(...captured.map(entry => row([
+      clock(entry.time), entry.client,
+      element('td', entry.username, 'mono'), element('td', entry.password, 'mono green')
+    ])));
+    $('evil-twin-empty').hidden = captured.length > 0;
+    $('evil-twin-empty').textContent = running ? 'Waiting for submitted credentials' : 'No credentials captured';
+  }
+
+  async function pollEvilTwin() {
+    return once('evil-twin-status', async () => {
+      try {
+        const status = await api('/api/attack/evil-twin/status');
+        renderEvilTwin(status);
+        if (status.running) return;
+        if (evilTwinTimer) { clearInterval(evilTwinTimer); evilTwinTimer = null; }
+        if (ops.active === 'evil-twin') { ops.active = null; updateStatus(); }
+        if (status.error) log(status.error, 'red');
+        if (status.output) log(status.output, 'red');
+      } catch (error) {
+        if (evilTwinTimer) { clearInterval(evilTwinTimer); evilTwinTimer = null; }
+        if (ops.active === 'evil-twin') { ops.active = null; updateStatus(); }
+        $('evil-twin-status').textContent = 'Status unavailable · ' + error.message;
+        $('evil-twin-status').classList.add('red');
+      }
+    });
+  }
+
+  $('evil-twin-form').addEventListener('submit', async event => {
+    event.preventDefault();
+    if (ops.active || !state.status?.operationsEnabled) return;
+    ops.active = 'evil-twin';
+    updateStatus();
+    $('evil-twin-status').classList.remove('red');
+    $('evil-twin-status').textContent = 'Starting…';
+    try {
+      const status = await api('/api/attack/evil-twin', {
+        ssid: $('evil-twin-ssid').value,
+        interface: $('evil-twin-interface').value.trim(),
+        channel: $('evil-twin-channel').valueAsNumber,
+        portalPort: $('evil-twin-port').valueAsNumber
+      });
+      renderEvilTwin(status);
+      if (!status.running) {
+        ops.active = null;
+        updateStatus();
+        if (status.output) log(status.output, 'red');
+        return;
+      }
+      log('Evil twin started · ' + status.ssid + ' · ' + status.portalUrl);
+      if (evilTwinTimer) clearInterval(evilTwinTimer);
+      evilTwinTimer = setInterval(pollEvilTwin, 2000);
+    } catch (error) {
+      $('evil-twin-status').textContent = error.message;
+      $('evil-twin-status').classList.add('red');
+      log('Error · ' + error.message);
+      ops.active = null;
+      updateStatus();
+    }
   });
 
   for (const button of by('[data-stop]')) button.addEventListener('click', async () => {
     try { await api('/api/attack/stop', {}); log('Stop requested'); }
     catch (error) { log('Error · ' + error.message); }
+    if (ops.active === 'beacon') {
+      if (beaconTimer) { clearInterval(beaconTimer); beaconTimer = null; }
+      ops.active = null;
+      $('beacon-status').textContent = 'Stopped';
+      updateStatus();
+    }
+    if (ops.active === 'evil-twin') {
+      if (evilTwinTimer) { clearInterval(evilTwinTimer); evilTwinTimer = null; }
+      ops.active = null;
+      $('evil-twin-status').textContent = 'Stopped';
+      updateStatus();
+    }
   });
   for (const tab of by('[data-operation]')) tab.addEventListener('click', () => operation(tab.dataset.operation));
+  $('use-precaptured').addEventListener('change', () => {
+    const checked = $('use-precaptured').checked;
+    syncVerifyAvailability();
+    if (checked) {
+      operation('verify');
+      $('verify-status').textContent = 'Pre-captured mode · enter a capture file path';
+      $('capture-path').focus();
+    } else if (!ops.handshakeFound) {
+      operation('handshake');
+      $('handshake-status').textContent = 'Live capture mode';
+    }
+  });
   $('verify-jump').addEventListener('click', () => operation('verify'));
   $('clear-console').addEventListener('click', () => $('console').replaceChildren());
   $('manual-form').addEventListener('submit', event => {
@@ -1139,13 +1424,6 @@
       const entry = row([ap.caption, ap.channel || unavailable, signalCell(ap.rssi), clock(ap.lastSeen), action]);
       entry.setAttribute('role', 'row');
       for (const cell of entry.cells) cell.setAttribute('role', 'cell');
-      const [name, channel, signalReading, seen] = entry.cells;
-      name.classList.add('nearby-name');
-      for (const [cell, label] of [[channel, 'Channel'], [signalReading, 'Signal'], [seen, 'Last seen']]) {
-        const caption = element('span', label, 'nearby-field caption');
-        caption.setAttribute('aria-hidden', 'true');
-        cell.prepend(caption);
-      }
       return entry;
     }));
     blank('nearby-empty', !aps.length, '⌁ No nearby access points heard recently');
@@ -1326,6 +1604,8 @@
     if (name === 'spectrum') { refreshSpectrum(); window.EwaveApWatch.refresh(); }
     if (name === 'probe') { refreshAudit(); refreshInventory(); }
     if (name === 'ops') refreshTargets();
+    const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+    window.scrollTo({ top: 0, behavior: reduced ? 'auto' : 'smooth' });
   }
 
   for (const button of by('[data-view]')) button.addEventListener('click', () => switchView(button.dataset.view));
