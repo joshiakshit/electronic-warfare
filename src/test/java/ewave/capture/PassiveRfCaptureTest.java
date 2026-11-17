@@ -128,7 +128,7 @@ class PassiveRfCaptureTest {
             assertEquals(2, report.path("totalProbes").asInt());
             assertEquals(1, report.path("directedProbes").asInt());
             assertEquals(1, report.path("distinctDirectedSsids").asInt());
-            assertEquals(200, get(client, server, "/").statusCode());
+            assertEquals(404, get(client, server, "/").statusCode());
             assertEquals(404, get(client, server, "/api/attack/scan-lan").statusCode());
             assertEquals(404, get(client, server, "/api/probes").statusCode());
             assertTrue(wifi.getEventQueue().isEmpty());

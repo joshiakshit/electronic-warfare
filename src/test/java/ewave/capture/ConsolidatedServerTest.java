@@ -41,13 +41,14 @@ class ConsolidatedServerTest {
     private static final String MAC = "02:11:22:33:44:55";
     private final ObjectMapper mapper = new ObjectMapper();
 
-    @Test void servesNewUiAndRejectsCrossOriginOperations() throws Exception {
+    @Test void servesOnlyApiAndRejectsCrossOriginOperations() throws Exception {
         try (var bridge = new PacketBridge();
              var server = new PassiveRfServer(bridge, true).start(0);
              var client = HttpClient.newHttpClient()) {
-            assertEquals(200, get(client, server, "/").statusCode());
-            for (String asset : List.of("/ewave.js", "/ewave.css", "/graph.js", "/spectrum.js"))
-                assertEquals(200, get(client, server, asset).statusCode(), asset);
+            assertEquals(404, get(client, server, "/").statusCode());
+            for (String asset : List.of("/index.html", "/ewave.js", "/ewave.css", "/graph.js", "/spectrum.js",
+                    "/ap-watch.js", "/probe-demo.js", "/ewave.svg", "/portal/portal.html"))
+                assertEquals(404, get(client, server, asset).statusCode(), asset);
             assertEquals(404, get(client, server, "/dashboard.js").statusCode());
             var channels = get(client, server, "/api/channels");
             assertEquals(503, channels.statusCode());

@@ -101,7 +101,7 @@ public final class EvilTwin {
             watch(dnsmasq, "dnsmasq");
             stage = "Starting captive portal…";
             portal = launch(List.of("sudo", "python3", workDir.resolve("portal_server.py").toString(),
-                    "--port", Integer.toString(portalPort), "--root", workDir.toString(),
+                    "--port", Integer.toString(portalPort),
                     "--creds", credentialsFile.toString()));
             watch(portal, "portal server");
             synchronized (this) {
@@ -150,7 +150,6 @@ public final class EvilTwin {
     }
 
     private void writeResources() throws IOException {
-        copyResource("/portal/portal.html", workDir.resolve("portal.html"));
         copyResource("/portal/portal_server.py", workDir.resolve("portal_server.py"));
     }
 
@@ -311,7 +310,7 @@ public final class EvilTwin {
         }
     }
 
-    /** Diagnostics for the OPS console while the portal is running. */
+    /** Diagnostics for the Ops API while the portal is running. */
     public synchronized String output() {
         if (readFailure != null) return output + "\nCould not read process output: " + readFailure.getMessage() + "\n";
         return output.toString();

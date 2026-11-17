@@ -2,20 +2,11 @@
 """Minimal captive portal used by ewave's authorized lab evil-twin exercise."""
 
 import argparse
+import json
 import os
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
-
-SUCCESS = """<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1"><title>Connected</title>
-<style>body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;
-font:15px/1.5 system-ui,sans-serif;color:#f4f4f4;background:#0d0d0d}
-main{width:min(420px,100%);padding:28px;border:1px solid #303030;border-radius:14px;background:#161616}
-b{color:#5de6a8}h1{margin:0 0 8px;font-size:21px}p{margin:0;color:#a8a8a8}</style></head>
-<body><main><b>ewave</b><h1>Connected</h1>
-<p>This device is now signed in. You can close this window.</p></main></body></html>"""
-
 
 def clean(value):
     return value.replace("\t", " ").replace("\r", " ").replace("\n", " ")[:256]
@@ -24,7 +15,6 @@ def clean(value):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=80)
-    parser.add_argument("--root", required=True)
     parser.add_argument("--creds", required=True)
     args = parser.parse_args()
     try:
@@ -33,25 +23,22 @@ def main():
         os.chmod(args.creds, 0o600)
     except OSError:
         pass
-    with open(os.path.join(args.root, "portal.html"), "rb") as portal_file:
-        portal = portal_file.read()
-    success = SUCCESS.encode("utf-8")
-
     class Handler(BaseHTTPRequestHandler):
-        def send_page(self, body):
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
+        def send_json(self, value, status=200):
+            body = json.dumps(value).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
 
         def do_GET(self):
-            self.send_page(portal)
+            self.send_json({"service": "ewave-lab-portal", "status": "running"})
 
         def do_POST(self):
             if urlparse(self.path).path != "/submit":
-                self.send_error(404, "Not found")
+                self.send_json({"error": "Unknown endpoint"}, 404)
                 return
             try:
                 length = int(self.headers.get("Content-Length", "0") or "0")
@@ -71,7 +58,7 @@ def main():
                 os.chmod(args.creds, 0o600)
             except OSError:
                 pass
-            self.send_page(success)
+            self.send_json({"status": "recorded"})
 
         def log_message(self, fmt, *values):
             pass

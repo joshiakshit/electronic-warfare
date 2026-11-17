@@ -121,7 +121,7 @@ public final class Ewave {
             try {
                 startCapture(plan, bridge);
                 server.start(plan.port());
-                System.out.println("ewave running on http://127.0.0.1:" + server.port());
+                System.out.println("ewave API running on http://127.0.0.1:" + server.port());
                 shutdown.await();
             } finally {
                 try { Runtime.getRuntime().removeShutdownHook(hook); }

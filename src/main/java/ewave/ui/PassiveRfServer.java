@@ -24,7 +24,6 @@ import io.javalin.http.Context;
 import io.javalin.http.ForbiddenResponse;
 import io.javalin.http.NotFoundResponse;
 import io.javalin.Javalin;
-import io.javalin.http.staticfiles.Location;
 import io.javalin.json.JavalinJackson;
 import io.javalin.websocket.WsContext;
 
@@ -50,7 +49,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
 import java.util.regex.Pattern;
 
-/** Loopback dashboard for RF capture and opt-in lab operations. */
+/** Loopback HTTP API for RF capture and opt-in lab operations. */
 public final class PassiveRfServer implements AutoCloseable {
     public static final int PORT = 7070;
     private static final System.Logger LOG = System.getLogger(PassiveRfServer.class.getName());
@@ -157,7 +156,6 @@ public final class PassiveRfServer implements AutoCloseable {
         events = bridge.getEventQueue();
         app = Javalin.create(config -> {
             config.jsonMapper(new JavalinJackson(mapper, false));
-            config.staticFiles.add("/web", Location.CLASSPATH);
         });
         app.before(ctx -> {
             ctx.header("Cache-Control", "no-store");
@@ -357,7 +355,7 @@ public final class PassiveRfServer implements AutoCloseable {
                     coupledWith, anomaly));
         }
 
-        // Preserve the score arrays consumed by the bundled spectrum dashboard.
+        // Preserve the score arrays in the public channel API.
         ObjectNode response = mapper.valueToTree(snapshot);
         response.put("tickMs", wifi.getTickMs());
         response.set("radio", mapper.valueToTree(state.radio()));
@@ -877,12 +875,12 @@ public final class PassiveRfServer implements AutoCloseable {
         if (eventThread != null) throw new IllegalStateException("UI server is already running");
         synchronized (injectionLock) { closing = false; }
         app.start("127.0.0.1", port);
-        eventThread = new Thread(this::consumeEvents, "ewave-ui-events");
+        eventThread = new Thread(this::consumeEvents, "ewave-api-events");
         eventThread.setDaemon(true);
         eventThread.start();
         if (operations) {
             scannerEvents = Executors.newSingleThreadScheduledExecutor(
-                    Thread.ofPlatform().daemon().name("ewave-ui-scanner").factory());
+                    Thread.ofPlatform().daemon().name("ewave-api-scanner").factory());
             Map<Integer, Instant> suggestedAt = new HashMap<>();
             Map<Integer, Instant> suggestedFlags = new HashMap<>();
             scannerEvents.scheduleWithFixedDelay(() -> pollScannerEvents(suggestedAt, suggestedFlags), 0,

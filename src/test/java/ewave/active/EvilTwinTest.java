@@ -40,7 +40,7 @@ class EvilTwinTest {
         assertEquals(List.of("sudo", "hostapd", work.resolve("hostapd.conf").toString()), commands.get(0));
         assertEquals(List.of("sudo", "dnsmasq", "-C", work.resolve("dnsmasq.conf").toString(), "-k"), commands.get(1));
         assertEquals(List.of("sudo", "python3", work.resolve("portal_server.py").toString(), "--port", "8080",
-                "--root", work.toString(), "--creds", creds.toString()), commands.get(2));
+                "--creds", creds.toString()), commands.get(2));
 
         String hostapd = Files.readString(work.resolve("hostapd.conf"));
         assertTrue(hostapd.contains("interface=wlo1ap"));
@@ -50,7 +50,7 @@ class EvilTwinTest {
         String dnsmasq = Files.readString(work.resolve("dnsmasq.conf"));
         assertTrue(dnsmasq.contains("dhcp-range=10.0.0.10,10.0.0.100,12h"));
         assertTrue(dnsmasq.contains("address=/#/10.0.0.1"));
-        assertTrue(Files.readString(work.resolve("portal.html")).contains("action=\"/submit\""));
+        assertFalse(Files.exists(work.resolve("portal.html")));
         assertTrue(Files.readString(work.resolve("portal_server.py")).contains("ThreadingHTTPServer"));
         assertFalse(Files.exists(creds));
 
