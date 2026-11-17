@@ -12,6 +12,7 @@ import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -115,7 +116,6 @@ public final class HandshakeAnalyzer {
         try {
             stage = "Tuning to " + frequency + " MHz…";
             var iw = List.of("sudo", "iw", "dev", monitorInterface, "set", "freq", Integer.toString(frequency));
-            System.out.println("[HandshakeAnalyzer] iw cmd: " + iw);
             Process tune = launch(iw);
             tuning = new Output(tune.getInputStream(), CAPTURE_OUTPUT_LIMIT);
             if (!tune.waitFor(5, TimeUnit.SECONDS)) throw new IOException("Frequency tuning timed out");
@@ -124,7 +124,10 @@ public final class HandshakeAnalyzer {
             if (tune.exitValue() != 0) throw new IOException("Frequency tuning failed: " + tuning.text());
 
             Files.createDirectories(captureDir);
-            cap = Files.createTempFile(captureDir, "hs-" + apBssid.replace(":", "") + "-", ".cap");
+            try { Files.setPosixFilePermissions(captureDir, PosixFilePermissions.fromString("rwx------")); }
+            catch (UnsupportedOperationException ignored) { /* Non-POSIX filesystem. */ }
+            cap = Files.createTempFile(captureDir, "hs-" + apBssid.replace(":", "") + "-", ".cap",
+                    PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")));
             var decode = new ArrayList<>(List.of("tshark", "-n", "-l", "-r", "-", "-F", "pcap", "-w", cap.toString(),
                     "-P", "-T", "fields", "-E", "occurrence=f", "-o", "wlan.enable_decryption:FALSE"));
             for (String field : HandshakePackets.FIELDS) decode.addAll(List.of("-e", field));
@@ -187,7 +190,13 @@ public final class HandshakeAnalyzer {
             else if (earlyExit) outcome = Outcome.CAPTURE_ENDED;
             else if (!packets.beaconSeen()) outcome = Outcome.TARGET_NOT_SEEN;
             else outcome = Outcome.NO_EAPOL;
-            stage = "Capture complete";
+            stage = switch (outcome) {
+                case COMPLETE -> "Capture complete";
+                case PARTIAL -> "Partial EAPOL exchange (" + observed.messages().size() + " of 4 messages)";
+                case NO_EAPOL -> "No EAPOL observed";
+                case TARGET_NOT_SEEN -> "Target AP beacon not seen";
+                case CAPTURE_ENDED -> "Capture ended without handshake";
+            };
             return new HandshakeResult(outcome == Outcome.COMPLETE, cap.toString(), apBssid,
                     observed.clientMac(), diagnostics, Instant.now(), frequency, outcome, observed.messages());
         } catch (InterruptedException interrupted) {

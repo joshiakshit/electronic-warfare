@@ -310,11 +310,79 @@ public final class TopologyBuilder {
         recent.values().removeIf(time -> time < now - RETRY_MS);
     }
 
+    private record ApCopy(String id, List<Double> rssi, List<ClockSample> clocks, String ssid, String observedName,
+                          String security, String domain, String country, String nameSource,
+                          List<AdvertisedSecurity> advertisedSecurity, Integer stations, Integer utilization,
+                          Integer admissionCapacity, int frequency, int channel, int interval, boolean hidden,
+                          long last, long nameObservedAt, long beaconNameObservedAt) { }
+
+    static final class PendingSnapshot {
+        private final SessionIdentifiers ids;
+        private final List<AssociationEdge> links;
+        private final List<ApCopy> apCopies;
+        private final List<RoamEvent> roams;
+
+        private PendingSnapshot(SessionIdentifiers ids, List<AssociationEdge> links,
+                                List<ApCopy> apCopies, List<RoamEvent> roams) {
+            this.ids = ids;
+            this.links = links;
+            this.apCopies = apCopies;
+            this.roams = roams;
+        }
+
+        Snapshot build() {
+            var sortedLinks = new ArrayList<>(links);
+            sortedLinks.sort(Comparator.comparing(AssociationEdge::bssid).thenComparing(AssociationEdge::clientId));
+            var clients = new TreeMap<String, List<String>>();
+            for (var edge : sortedLinks) clients.computeIfAbsent(edge.bssid(), id -> new ArrayList<>()).add(edge.clientId());
+
+            var ess = new TreeMap<String, List<String>>();
+            var output = new ArrayList<AccessPoint>(apCopies.size());
+            var radio = new TreeMap<String, String>();
+            var clocks = new TreeMap<Integer, TreeMap<String, ApCopy>>();
+            var sortedAps = new TreeMap<String, ApCopy>();
+            for (ApCopy ap : apCopies) {
+                sortedAps.put(ap.id(), ap);
+                if (ap.clocks().size() >= 5) clocks.computeIfAbsent(ap.frequency(), freq -> new TreeMap<>()).put(ap.id(), ap);
+            }
+            for (var channel : clocks.values()) {
+                for (var a : channel.entrySet()) {
+                    if (radio.containsKey(a.getKey())) continue;
+                    for (var b : channel.tailMap(a.getKey(), false).entrySet()) {
+                        if (!radio.containsKey(b.getKey()) && sameClock(a.getValue().clocks(), b.getValue().clocks())) {
+                            radio.putIfAbsent(a.getKey(), a.getKey());
+                            radio.put(b.getKey(), a.getKey());
+                        }
+                    }
+                }
+            }
+            for (var row : sortedAps.entrySet()) {
+                String key = row.getKey();
+                ApCopy ap = row.getValue();
+                String group = ap.ssid() == null || ap.security() == null ? null
+                        : ids.id("ess", ap.ssid() + ":" + ap.security() + ":" + Objects.toString(ap.domain(), ""));
+                if (group != null) ess.computeIfAbsent(group, id -> new ArrayList<>()).add(key);
+                Double median = ap.rssi().isEmpty() ? null : WifiInventory.median(ap.rssi().stream().sorted().toList());
+                String hiddenNameSource = ap.hidden() ? ap.nameSource() : "NONE";
+                var hiddenEvidence = ap.hidden() ? new HiddenSsidEvidence(ap.observedName(), hiddenNameSource,
+                        hiddenNameSource.equals("NONE") ? null : ap.nameObservedAt(), ap.beaconNameObservedAt()) : null;
+                String legacyNameSource = hiddenNameSource.equals("REASSOC_REQ") ? "ASSOC_REQ" : hiddenNameSource;
+                output.add(new AccessPoint(key, ap.ssid(), ap.hidden(), legacyNameSource, ap.channel(),
+                        WifiInventory.band(ap.frequency()), ap.security(), ap.interval(), ap.domain(), ap.stations(),
+                        ap.utilization(), ap.admissionCapacity(), ap.country(), radio.get(key), group, median,
+                        median == null ? null : median > -55 ? "STRONG" : median < -75 ? "WEAK" : "MEDIUM",
+                        ap.last(), clients.getOrDefault(key, List.of()).stream().sorted().toList(),
+                        ap.advertisedSecurity(), hiddenEvidence));
+            }
+            ess.replaceAll((key, values) -> List.copyOf(values));
+            return new Snapshot(List.copyOf(output), Map.copyOf(ess), List.copyOf(sortedLinks), roams);
+        }
+    }
+
     Snapshot snapshot() { return snapshot(Long.MAX_VALUE); }
 
-    Snapshot snapshot(long retention) {
+    PendingSnapshot prepareSnapshot(long retention) {
         var links = new ArrayList<AssociationEdge>();
-        var clients = new TreeMap<String, List<String>>();
         for (var row : edges.entrySet()) {
             Link key = row.getKey();
             Edge edge = row.getValue();
@@ -324,52 +392,27 @@ public final class TopologyBuilder {
                     edge.associationSeen < 0 ? "DATA" : edge.associationType,
                     edge.lastData < 0 ? null : edge.lastData, edge.associationSeen < 0 ? null : edge.associationSeen,
                     lastEvidence + Math.min(edgeTtl, retention), Dot11FrameDecoder.channel(edge.frequency), edge.frequency));
-            clients.computeIfAbsent(key.ap, id -> new ArrayList<>()).add(key.client);
         }
-        links.sort(Comparator.comparing(AssociationEdge::bssid).thenComparing(AssociationEdge::clientId));
-        var ess = new TreeMap<String, List<String>>();
-        var output = new ArrayList<AccessPoint>();
-        var radio = new TreeMap<String, String>();
-        var clocks = new TreeMap<Integer, TreeMap<String, Ap>>();
-        aps.forEach((key, ap) -> {
-            if (ap.clocks.size() >= 5) clocks.computeIfAbsent(ap.frequency, freq -> new TreeMap<>()).put(key, ap);
-        });
-        for (var channel : clocks.values()) {
-            for (var a : channel.entrySet()) {
-                if (radio.containsKey(a.getKey())) continue;
-                for (var b : channel.tailMap(a.getKey(), false).entrySet()) {
-                    if (!radio.containsKey(b.getKey()) && sameClock(a.getValue(), b.getValue())) {
-                        radio.putIfAbsent(a.getKey(), a.getKey());
-                        radio.put(b.getKey(), a.getKey());
-                    }
-                }
-            }
-        }
-        for (var row : new TreeMap<>(aps).entrySet()) {
-            String key = row.getKey();
+        var apCopies = new ArrayList<ApCopy>(aps.size());
+        for (var row : aps.entrySet()) {
             Ap ap = row.getValue();
-            String group = ap.ssid == null || ap.security == null ? null
-                    : ids.id("ess", ap.ssid + ":" + ap.security + ":" + Objects.toString(ap.domain, ""));
-            if (group != null) ess.computeIfAbsent(group, id -> new ArrayList<>()).add(key);
-            Double median = ap.rssi.isEmpty() ? null : WifiInventory.median(ap.rssi.stream().sorted().toList());
-            String hiddenNameSource = ap.hidden ? ap.nameSource : "NONE";
-            var hiddenEvidence = ap.hidden ? new HiddenSsidEvidence(ap.observedName, hiddenNameSource,
-                    hiddenNameSource.equals("NONE") ? null : ap.nameObservedAt, ap.beaconNameObservedAt) : null;
-            String legacyNameSource = hiddenNameSource.equals("REASSOC_REQ") ? "ASSOC_REQ" : hiddenNameSource;
-            output.add(new AccessPoint(key, ap.ssid, ap.hidden, legacyNameSource, ap.channel, WifiInventory.band(ap.frequency),
-                    ap.security, ap.interval, ap.domain, ap.stations, ap.utilization, ap.admissionCapacity, ap.country,
-                    radio.get(key), group, median, median == null ? null : median > -55 ? "STRONG" : median < -75 ? "WEAK" : "MEDIUM",
-                    ap.last, clients.getOrDefault(key, List.of()).stream().sorted().toList(), ap.advertisedSecurity, hiddenEvidence));
+            apCopies.add(new ApCopy(row.getKey(), List.copyOf(ap.rssi), List.copyOf(ap.clocks), ap.ssid, ap.observedName,
+                    ap.security, ap.domain, ap.country, ap.nameSource, ap.advertisedSecurity, ap.stations,
+                    ap.utilization, ap.admissionCapacity, ap.frequency, ap.channel, ap.interval, ap.hidden,
+                    ap.last, ap.nameObservedAt, ap.beaconNameObservedAt));
         }
-        ess.replaceAll((key, values) -> List.copyOf(values));
-        return new Snapshot(List.copyOf(output), Map.copyOf(ess), List.copyOf(links), List.copyOf(roams));
+        return new PendingSnapshot(ids, links, apCopies, List.copyOf(roams));
     }
 
-    private static boolean sameClock(Ap a, Ap b) {
+    Snapshot snapshot(long retention) {
+        return prepareSnapshot(retention).build();
+    }
+
+    private static boolean sameClock(List<ClockSample> aClocks, List<ClockSample> bClocks) {
         // A shared clock yields nearly equal AP-minus-receiver TSF offsets. Pair nearby beacons
         // one to one so a single sample cannot establish a group, even at different beacon rates.
-        var left = a.clocks.iterator();
-        var right = b.clocks.iterator();
+        var left = aClocks.iterator();
+        var right = bClocks.iterator();
         ClockSample x = left.next(), y = right.next();
         int consistent = 0;
         while (true) {

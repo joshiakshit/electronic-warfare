@@ -464,6 +464,27 @@ class PacketBridgeTest {
         }
     }
 
+    @Test void boundsEventQueueAndCountsDroppedEventsWhenConsumerStalls() throws Exception {
+        FakeProcess process = new FakeProcess();
+        try (PacketBridge bridge = new PacketBridge(builder -> {
+            if (builder.command().getFirst().equals("sudo")) throw new IOException("Simulated unavailable retune");
+            return process;
+        }, Map.of(), new DeviceProfiler(), 100, 256, 4)) {
+            assertEquals(4, bridge.getEventQueueCapacity());
+            bridge.start("wlo1", scanner());
+            for (int i = 0; i < 10; i++) {
+                String src = String.format("00:11:22:33:44:%02x", i);
+                process.write("1700000000.123456 " + src + " > " + DST
+                        + ", ethertype IPv4 (0x0800), length 128: IP 192.0.2.1 > 192.0.2.2: UDP, length 86");
+            }
+            await(() -> bridge.getDevices().size() >= 10);
+            assertTrue(bridge.getEventQueue().size() <= 4);
+            assertTrue(bridge.getDroppedEvents() >= 6, "dropped=" + bridge.getDroppedEvents());
+            assertEquals(4, bridge.getCaptureStatus().get("eventQueueCapacity"));
+            assertEquals(bridge.getDroppedEvents(), bridge.getCaptureStatus().get("eventsDropped"));
+        }
+    }
+
     private static PacketBridge summaryBridge(PacketBridge.ProcessStarter capture, Map<String, String> vendors) {
         return new PacketBridge(builder -> {
             if (builder.command().getFirst().equals("sudo")) throw new IOException("Simulated unavailable retune");

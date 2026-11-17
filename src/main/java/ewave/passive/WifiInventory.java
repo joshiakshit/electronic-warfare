@@ -4,6 +4,8 @@ import ewave.decoder.CapabilityDecoder;
 import ewave.decoder.Dot11Frame;
 
 import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -39,12 +41,13 @@ public final class WifiInventory {
     void observe(Dot11Frame frame, String id, boolean local, String signature, boolean directed, boolean wps) {
         Entry entry = entries.computeIfAbsent(id, key -> new Entry(oui.registration(frame.addr2()).orElse(null)));
         if (entries.size() > LIMIT) entries.pollFirstEntry();
+        entry.cachedSnapshot = null;
         entry.local = local;
         entry.packetCount++;
         entry.first = Math.min(entry.first, frame.timestamp());
         entry.last = Math.max(entry.last, frame.timestamp());
         String band = band(frame.frequencyMhz());
-        if (band != null) entry.bands.add(band);
+        if (band != null && entry.bands.add(band)) entry.bandSnapshot = null;
         if (Double.isFinite(frame.rssi())) {
             if (entry.rssi.size() == SIGNAL_LIMIT) entry.rssi.removeFirst();
             entry.rssi.addLast(frame.rssi());
@@ -81,6 +84,7 @@ public final class WifiInventory {
     void confirmClient(String id, String mac, long time) {
         Entry entry = entries.computeIfAbsent(id, key -> new Entry(oui.registration(mac).orElse(null)));
         if (entries.size() > LIMIT) entries.pollFirstEntry();
+        entry.cachedSnapshot = null;
         entry.local = (Integer.parseInt(mac.substring(0, 2), 16) & 2) != 0;
         entry.first = Math.min(entry.first, time);
         entry.last = Math.max(entry.last, time);
@@ -91,9 +95,16 @@ public final class WifiInventory {
 
     void purge(long cutoff) { entries.values().removeIf(entry -> entry.last < cutoff); }
 
+    List<Device> prepareSnapshot() {
+        var result = new ArrayList<Device>(entries.size());
+        for (var row : entries.entrySet()) result.add(row.getValue().snapshot(row.getKey()));
+        return result;
+    }
+
     List<Device> snapshot() {
-        return entries.entrySet().stream().map(row -> row.getValue().snapshot(row.getKey()))
-                .sorted(Comparator.comparing(Device::id)).toList();
+        var result = prepareSnapshot();
+        result.sort(Comparator.comparing(Device::id));
+        return List.copyOf(result);
     }
 
     Detail detail(String id, long cutoff) {
@@ -160,6 +171,8 @@ public final class WifiInventory {
         int beacon;
         String signature;
         long first = Long.MAX_VALUE, last, packetCount, directed, wildcard;
+        List<String> bandSnapshot = List.of();
+        Device cachedSnapshot;
 
         Entry(OuiLookup.Registration vendor) { this.vendor = vendor; }
 
@@ -191,16 +204,31 @@ public final class WifiInventory {
         }
 
         Device snapshot(String id) {
-            List<Double> samples = rssi.stream().sorted().toList();
+            if (cachedSnapshot != null) return cachedSnapshot;
+            Double min = null, med = null, max = null;
+            int n = rssi.size();
+            if (n == 1) {
+                double only = rssi.peekFirst();
+                min = med = max = only;
+            } else if (n > 1) {
+                double[] samples = new double[n];
+                int idx = 0;
+                for (double v : rssi) samples[idx++] = v;
+                Arrays.sort(samples);
+                min = samples[0];
+                max = samples[n - 1];
+                med = (samples[n / 2] + samples[(n - 1) / 2]) / 2.0;
+            }
+            if (bandSnapshot == null) bandSnapshot = List.copyOf(bands);
             String label = finding != null ? finding.family() : vendor != null ? vendor.vendor() : "UNCLASSIFIED";
             double confidence = finding != null ? finding.confidence() : vendor != null ? 0.3 : local ? 0.1 : 0;
-            return new Device(id, role, vendor == null ? null : vendor.prefix(),
+            cachedSnapshot = new Device(id, role, vendor == null ? null : vendor.prefix(),
                     local ? "Locally administered" : vendor == null ? "Unknown" : vendor.vendor(),
-                    local, List.copyOf(bands), capabilities, pm, signature, order, beacon, first, last, packetCount,
-                    samples.isEmpty() ? null : samples.getFirst(), samples.isEmpty() ? null : median(samples),
-                    samples.isEmpty() ? null : samples.getLast(), label, finding == null ? null : finding.osHint(),
+                    local, bandSnapshot, capabilities, pm, signature, order, beacon, first, last, packetCount,
+                    min, med, max, label, finding == null ? null : finding.osHint(),
                     confidence, directed, wildcard, local && (directed + wildcard > 0), wps,
                     finding == null ? null : new FingerprintHint(finding.family(), finding.osHint(), finding.confidence()));
+            return cachedSnapshot;
         }
     }
 

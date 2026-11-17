@@ -340,6 +340,57 @@ class PassiveWifiSessionTest {
                 .findFirst().orElseThrow().hiddenSsidEvidence());
     }
 
+    @Test void distinguishesQbssAdvertisedStationCountFromObservedClientLinksAndExpiresOldLinks() throws Exception {
+        var clock = new java.util.concurrent.atomic.AtomicLong(10_000L);
+        var session = PassiveWifiSession.forReplay(new DeviceProfiler(), MyNetworkProfile.EMPTY, clock::get);
+        String apId = session.addressId(AP);
+        String clientId = session.addressId(CLIENT);
+
+        // Beacon advertising QBSS Load stationCount=26 with zero observed client frames.
+        byte[] qbss = ByteBuffer.allocate(5).order(ByteOrder.LITTLE_ENDIAN)
+                .putShort((short) 26).put((byte) 40).putShort((short) 1000).array();
+        session.observe(decode(join(beacon(8, AP, "BusyLab".getBytes(StandardCharsets.UTF_8), 1), ie(11, qbss)),
+                clock.get()));
+        var beaconOnly = session.topology();
+        assertEquals(1, beaconOnly.accessPoints().size());
+        var apSummary = beaconOnly.accessPoints().getFirst();
+        assertEquals(apId, apSummary.bssid());
+        assertEquals(26, apSummary.stationCount());
+        assertTrue(apSummary.clients().isEmpty());
+        assertTrue(beaconOnly.edges().isEmpty());
+
+        // Failed association response (status code 1) must not establish a client link.
+        byte[] fixedAssocFail = ByteBuffer.allocate(6).order(ByteOrder.LITTLE_ENDIAN)
+                .putShort((short) 1).putShort((short) 1).putShort((short) 1).array();
+        byte[] assocFail = join(header(0x10, 0, CLIENT, AP, AP, 10), fixedAssocFail);
+        session.observe(decode(assocFail, clock.addAndGet(100)));
+        assertTrue(session.topology().edges().isEmpty());
+
+        // Successful association response (status code 0) plus a duplicate retry (FC retry=0x0800) count once.
+        byte[] fixedAssocOk = ByteBuffer.allocate(6).order(ByteOrder.LITTLE_ENDIAN)
+                .putShort((short) 1).putShort((short) 0).putShort((short) 1).array();
+        byte[] assocOk = join(header(0x10, 0, CLIENT, AP, AP, 11), fixedAssocOk);
+        byte[] assocRetry = join(header(0x10, 0x08, CLIENT, AP, AP, 11), fixedAssocOk);
+        session.observe(decode(assocOk, clock.addAndGet(100)));
+        session.observe(decode(assocRetry, clock.addAndGet(20)));
+        var linked = session.topology();
+        assertEquals(1, linked.edges().size());
+        var edge = linked.edges().getFirst();
+        assertEquals(apId, edge.bssid());
+        assertEquals(clientId, edge.clientId());
+        assertEquals("ASSOC", edge.source());
+        assertEquals(1, edge.evidenceCount());
+        assertEquals(List.of(clientId), linked.accessPoints().getFirst().clients());
+        assertEquals(26, linked.accessPoints().getFirst().stationCount());
+
+        // Link expiry removes the edge when no new evidence arrives.
+        long expiryDelay = edge.expiresAt() - clock.get() + 1;
+        clock.addAndGet(expiryDelay);
+        var expired = session.topology();
+        assertTrue(expired.edges().isEmpty());
+        assertTrue(expired.accessPoints().getFirst().clients().isEmpty());
+    }
+
     private static Dot11Frame clockBeacon(String source, long time, long receiver, long tsf) {
         byte[] wifi = beacon(8, source, new byte[0], tsf);
         byte[] packet = ByteBuffer.allocate(20 + wifi.length).order(ByteOrder.LITTLE_ENDIAN)

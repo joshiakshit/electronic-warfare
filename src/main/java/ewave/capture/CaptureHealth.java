@@ -11,8 +11,11 @@ import java.util.regex.Pattern;
 /** Monitor capture counters. Packet content is never retained. */
 public final class CaptureHealth {
     private static final int WINDOW_SECONDS = 10;
+    private static final int DIAGNOSTIC_LIMIT = 200;
     private static final String[] TYPES = {"management", "control", "data", "other", "unclassified"};
     private static final Pattern DROPS = Pattern.compile("(?:^|\\s)([0-9]+) packets? dropped by kernel");
+    private static final Pattern ROUTINE = Pattern.compile(
+            "(?i)^(?:tcpdump:\\s*)?(?:listening on\\b|verbose output suppressed\\b|[0-9]+ packets? (?:captured|received by filter)\\b)");
     private final long[] totals = new long[TYPES.length];
     private final long[][] buckets = new long[WINDOW_SECONDS][TYPES.length];
     private final long[] bucketTimes = new long[WINDOW_SECONDS];
@@ -20,6 +23,7 @@ public final class CaptureHealth {
     private Long lastPacketAt, lastReceivedAt, kernelDrops, dropStatsAt;
     private int observedFrequencyMhz;
     private RadioStatus.Settings radio;
+    private String diagnosticError;
 
     public record Report(String mode, String source, boolean running, String replayState, String error,
                          Long referenceTime, Long lastPacketAt, Long sinceLastFrameMs, RadioStatus.Settings radio,
@@ -53,16 +57,36 @@ public final class CaptureHealth {
 
     void updateRadio(RadioStatus.Settings value) { radio = value; }
     int observedChannel() { return Dot11FrameDecoder.channel(observedFrequencyMhz); }
+    int observedFrequencyMhz() { return observedFrequencyMhz; }
+    String diagnosticError() { return diagnosticError; }
     boolean hasFrames() { return lastPacketAt != null; }
 
     boolean diagnostics(String line, long now) {
         var matcher = DROPS.matcher(line);
-        if (!matcher.find()) return false;
-        try {
-            kernelDrops = Long.parseLong(matcher.group(1));
-            dropStatsAt = now;
-        } catch (NumberFormatException ignored) { /* Leave the previous sample intact. */ }
-        return true;
+        if (matcher.find()) {
+            try {
+                kernelDrops = Long.parseLong(matcher.group(1));
+                dropStatsAt = now;
+            } catch (NumberFormatException ignored) { /* Leave the previous sample intact. */ }
+            return true;
+        }
+        String cleaned = sanitize(line);
+        if (!cleaned.isEmpty() && !ROUTINE.matcher(cleaned).find() && diagnosticError == null) {
+            diagnosticError = cleaned.length() > DIAGNOSTIC_LIMIT
+                    ? cleaned.substring(0, DIAGNOSTIC_LIMIT) + "…"
+                    : cleaned;
+        }
+        return false;
+    }
+
+    private static String sanitize(String line) {
+        if (line == null) return "";
+        var text = new StringBuilder(line.length());
+        for (int i = 0; i < line.length(); i++) {
+            char ch = line.charAt(i);
+            if (!Character.isISOControl(ch)) text.append(ch);
+        }
+        return text.toString().strip();
     }
 
     Report snapshot(String mode, String source, boolean running, String replayState, String error,

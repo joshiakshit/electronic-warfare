@@ -85,46 +85,59 @@ public final class ProbeAuditAggregator {
         names.removeIf(name -> name.time < cutoff);
     }
 
-    Report snapshot(long now, long retention) {
-        purge(now, retention);
-        var local = new HashSet<String>();
-        var signatures = new HashSet<String>();
-        var directed = new HashMap<String, Integer>();
-        int wps = 0, directedProbes = 0;
-        for (Probe probe : probes) {
-            directed.merge(probe.id, probe.directed ? 1 : 0, Integer::sum);
-            if (probe.directed) directedProbes++;
-            if (probe.local) {
-                local.add(probe.id);
-                signatures.add(probe.signature);
+    record PendingReport(int minutes, boolean deviceDetails, long now, boolean sampleLimitReached,
+                         List<Probe> probes, List<Name> names) {
+        Report build() {
+            var local = new HashSet<String>();
+            var signatures = new HashSet<String>();
+            var directed = new HashMap<String, Integer>();
+            int wps = 0, directedProbes = 0;
+            for (Probe probe : probes) {
+                directed.merge(probe.id, probe.directed ? 1 : 0, Integer::sum);
+                if (probe.directed) directedProbes++;
+                if (probe.local) {
+                    local.add(probe.id);
+                    signatures.add(probe.signature);
+                }
+                if (probe.uuidE) wps++;
             }
-            if (probe.uuidE) wps++;
+            var histogram = new LinkedHashMap<>(Map.of("0", 0, "1", 0, "2-3", 0, "4-9", 0, "10+", 0));
+            for (int count : directed.values())
+                histogram.merge(count < 2 ? Integer.toString(count) : count < 4 ? "2-3" : count < 10 ? "4-9" : "10+", 1, Integer::sum);
+            var distinct = new HashMap<String, Name>();
+            for (Name name : names) distinct.put(name.hash, name);
+            var counts = new LinkedHashMap<String, Long>();
+            var tokens = new LinkedHashMap<String, List<String>>();
+            for (Exposure kind : Exposure.values()) {
+                var group = distinct.values().stream().filter(name -> name.exposure == kind)
+                        .map(name -> name.reveal == null ? name.hash : name.reveal).sorted().toList();
+                counts.put(kind.name(), (long) group.size());
+                tokens.put(kind.name(), group);
+            }
+            long timelineStart = Math.floorDiv(now, 30_000) * 30_000 - 19 * 30_000;
+            int[] timeline = new int[20];
+            for (Probe probe : probes) count(timeline, timelineStart, probe.time);
+            List<Ssid> corpus = corpus(names, deviceDetails, timelineStart);
+            int total = directed.size();
+            return new Report(minutes, total, probes.size(), directedProbes, percent(local.size(), total),
+                    percent(total - histogram.get("0"), total), distinct.size(), Map.copyOf(histogram),
+                    percent(wps, probes.size()), signatures.size(), Map.copyOf(counts), Map.copyOf(tokens),
+                    sampleLimitReached, deviceDetails, corpus, timelineStart, boxed(timeline));
         }
-        var histogram = new LinkedHashMap<>(Map.of("0", 0, "1", 0, "2-3", 0, "4-9", 0, "10+", 0));
-        for (int count : directed.values())
-            histogram.merge(count < 2 ? Integer.toString(count) : count < 4 ? "2-3" : count < 10 ? "4-9" : "10+", 1, Integer::sum);
-        var distinct = new HashMap<String, Name>();
-        for (Name name : names) distinct.put(name.hash, name);
-        var counts = new LinkedHashMap<String, Long>();
-        var tokens = new LinkedHashMap<String, List<String>>();
-        for (Exposure kind : Exposure.values()) {
-            var group = distinct.values().stream().filter(name -> name.exposure == kind)
-                    .map(name -> name.reveal == null ? name.hash : name.reveal).sorted().toList();
-            counts.put(kind.name(), (long) group.size());
-            tokens.put(kind.name(), group);
-        }
-        long timelineStart = Math.floorDiv(now, 30_000) * 30_000 - 19 * 30_000;
-        int[] timeline = new int[20];
-        for (Probe probe : probes) count(timeline, timelineStart, probe.time);
-        List<Ssid> corpus = corpus(timelineStart);
-        int total = directed.size();
-        return new Report(minutes, total, probes.size(), directedProbes, percent(local.size(), total),
-                percent(total - histogram.get("0"), total), distinct.size(), Map.copyOf(histogram),
-                percent(wps, probes.size()), signatures.size(), Map.copyOf(counts), Map.copyOf(tokens),
-                overflow >= 0 && overflow >= cutoff(now, retention), deviceDetails, corpus, timelineStart, boxed(timeline));
     }
 
-    private List<Ssid> corpus(long timelineStart) {
+    PendingReport prepareSnapshot(long now, long retention) {
+        purge(now, retention);
+        return new PendingReport(minutes, deviceDetails, now,
+                overflow >= 0 && overflow >= cutoff(now, retention),
+                List.copyOf(probes), List.copyOf(names));
+    }
+
+    Report snapshot(long now, long retention) {
+        return prepareSnapshot(now, retention).build();
+    }
+
+    private static List<Ssid> corpus(List<Name> names, boolean deviceDetails, long timelineStart) {
         var entries = new HashMap<String, SsidSamples>();
         for (Name name : names) entries.computeIfAbsent(name.hash, key -> new SsidSamples(name)).add(name, timelineStart);
         return entries.values().stream().sorted(Comparator.comparingLong((SsidSamples row) -> row.last).reversed()

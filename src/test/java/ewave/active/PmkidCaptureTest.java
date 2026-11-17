@@ -138,6 +138,12 @@ class PmkidCaptureTest {
             return new NeverFinishes();
         });
         assertThrows(TimeoutException.class, () -> slow.run(words.toString(), 1));
+
+        var failed = new PmkidCapture("wlo1", directory.toString(),
+                builder -> new CompletedProcess("permission denied\n", 1));
+        var exitError = assertThrows(IOException.class, () -> failed.run(words.toString(), 1));
+        assertTrue(exitError.getMessage().contains("PMKID capture failed (exit 1)"));
+        assertTrue(exitError.getMessage().contains("permission denied"));
     }
 
     private static final class NeverFinishes extends Process {

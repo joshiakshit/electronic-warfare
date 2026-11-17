@@ -86,7 +86,7 @@ public final class PassiveRfServer implements AutoCloseable {
     private volatile PmkidCapture latestPmkid;
     private volatile BeaconFlood latestBeacon;
     private volatile EvilTwin latestEvilTwin;
-    private boolean closing;
+    private volatile boolean closing;
     private Thread eventThread;
     private ScheduledExecutorService scannerEvents;
     private final Map<Integer, Instant> reconnectWatches = new ConcurrentHashMap<>();
@@ -242,22 +242,44 @@ public final class PassiveRfServer implements AutoCloseable {
             if (detail == null) throw new NotFoundResponse("No retained Wi-Fi device matches this ID");
             ctx.json(detail);
         });
-        app.get("/api/fingerprint-samples", ctx -> ctx.json(wifi.fingerprintSamples()));
-        app.post("/api/fingerprint-samples", ctx -> {
+        app.get("/api/fingerprint-samples", ctx -> {
             try {
-                var change = mapper.readValue(ctx.body(), MyNetworkProfile.SampleChange.class);
-                ctx.json(wifi.saveFingerprintSample(change));
+                ctx.json(wifi.fingerprintSamples());
+            } catch (java.io.IOException failure) {
+                LOG.log(System.Logger.Level.WARNING, "Could not read fingerprint samples", failure);
+                ctx.status(500).json(Map.of("error", "Could not read the local My Network profile"));
+            }
+        });
+        app.post("/api/fingerprint-samples", ctx -> {
+            final MyNetworkProfile.SampleChange change;
+            try {
+                change = mapper.readValue(ctx.body(), MyNetworkProfile.SampleChange.class);
             } catch (JsonProcessingException invalid) {
                 ctx.status(400).json(Map.of("error", "Invalid fingerprint sample request"));
+                return;
+            }
+            try {
+                ctx.json(wifi.saveFingerprintSample(change));
             } catch (IllegalArgumentException invalid) {
                 ctx.status(400).json(Map.of("error", invalid.getMessage()));
+            } catch (java.io.IOException failure) {
+                LOG.log(System.Logger.Level.WARNING, "Could not save fingerprint sample", failure);
+                ctx.status(500).json(Map.of("error", "Could not save the local My Network profile"));
             }
         });
         app.delete("/api/fingerprint-samples/{id}", ctx -> {
+            final UUID id;
             try {
-                ctx.json(wifi.removeFingerprintSample(UUID.fromString(ctx.pathParam("id"))));
+                id = UUID.fromString(ctx.pathParam("id"));
             } catch (IllegalArgumentException invalid) {
                 ctx.status(400).json(Map.of("error", "Invalid fingerprint sample ID"));
+                return;
+            }
+            try {
+                ctx.json(wifi.removeFingerprintSample(id));
+            } catch (java.io.IOException failure) {
+                LOG.log(System.Logger.Level.WARNING, "Could not update fingerprint samples", failure);
+                ctx.status(500).json(Map.of("error", "Could not save the local My Network profile"));
             }
         });
         app.get("/api/probe-audit", ctx -> {
@@ -946,13 +968,15 @@ public final class PassiveRfServer implements AutoCloseable {
     }
 
     private void consumeEvents() {
-        while (!Thread.currentThread().isInterrupted()) {
+        while (!closing && !Thread.currentThread().isInterrupted()) {
             try {
-                broadcast(events.take());
+                EwaveEvent event = events.take();
+                if (closing) break;
+                broadcast(event);
             } catch (InterruptedException interrupted) {
                 Thread.currentThread().interrupt();
             } catch (RuntimeException failure) {
-                LOG.log(System.Logger.Level.WARNING, "Could not broadcast event", failure);
+                if (!closing) LOG.log(System.Logger.Level.WARNING, "Could not broadcast event", failure);
             }
         }
     }
@@ -981,6 +1005,7 @@ public final class PassiveRfServer implements AutoCloseable {
         reconnectWatches.clear();
         try {
             app.stop();
+            eventThread.interrupt();
             eventThread.join(2_000);
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();

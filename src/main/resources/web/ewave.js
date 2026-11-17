@@ -266,7 +266,9 @@
     renderMap();
     try {
       const result = await api('/api/attack/uncloak', { bssid, interface: monitorInterface() });
-      state.uncloak = { bssid, running: false, message: result.message + ' Target ' + result.targetClient, error: false };
+      state.uncloak = { bssid, running: false,
+        message: 'Deauth command sent to ' + result.targetClient + ' (disconnect not verified). ' + result.message,
+        error: false };
     } catch (error) {
       state.uncloak = { bssid, running: false, message: error.message, error: true };
     }
@@ -284,8 +286,9 @@
     window.EwaveGraph.update(topology, wifi.filter(device => !outside.has(device.id)), focus, state.selected);
     const evidence = $('map-evidence');
     const item = wifi.find(device => device.id === state.selected);
-    const linked = (topology.edges || []).some(edge => edge.clientId === state.selected);
-    const panel = linked || item ? linkEvidence(state.selected, item) : null;
+    const linked = (topology.edges || []).some(edge => edge.clientId === state.selected || edge.bssid === state.selected);
+    const isAp = (topology.accessPoints || []).some(ap => ap.bssid === state.selected);
+    const panel = linked || isAp || item ? linkEvidence(state.selected, item) : null;
     evidence.hidden = !panel;
     evidence.replaceChildren(...(panel ? [panel] : []));
   }
@@ -346,10 +349,64 @@
     const aps = new Map((state.topology.accessPoints || []).map(ap => [ap.bssid, ap]));
     const labels = new Map((state.profile?.accessPoints || []).map(ap => [ap.token, ap.label]));
     const now = observationNow();
+    const apNode = aps.get(id);
+    if (apNode || item?.details?.role === 'AP') {
+      const apLinks = (state.topology.edges || []).filter(edge => edge.bssid === id
+        && (edge.expiresAt == null || edge.expiresAt > now))
+        .sort((a, b) => b.lastSeen - a.lastSeen || a.clientId.localeCompare(b.clientId));
+      const section = element('section', null, 'link-evidence');
+      section.append(element('h2', 'Observed client links'));
+      if (apNode?.stationCount != null) {
+        section.append(element('p',
+          'AP beacon advertises ' + number(apNode.stationCount)
+            + (apNode.stationCount === 1 ? ' station' : ' stations') + ' (QBSS Load) · '
+            + number(apLinks.length) + ' observed client ' + (apLinks.length === 1 ? 'link' : 'links') + '.',
+          'caption'));
+      }
+      if (!apLinks.length) {
+        section.append(element('strong', '0 observed client links', 'evidence-tag amber-text'));
+        section.append(element('p',
+          apNode?.stationCount > 0
+            ? 'Beacons advertise ' + number(apNode.stationCount)
+              + ' stations, but no client association responses or qualifying data frames were observed in this capture.'
+            : 'No client association responses or qualifying data frames (3+ frames) were observed for this AP.',
+          'caption'));
+        return section;
+      }
+      const clientNames = new Map((state.profile?.devices || []).map(entry => [entry.token, entry.label]));
+      for (const link of apLinks) {
+        const assoc = link.associationSeen != null;
+        const sourceLabel = link.source === 'REASSOC' ? 'Reassociation observed'
+          : assoc ? 'Association observed' : 'Data evidence';
+        const card = element('article', null, 'link-card');
+        const title = element('div', null, 'link-card-title');
+        title.append(element('strong', clientNames.get(link.clientId) || 'Client ' + link.clientId.slice(0, 8)),
+          element('span', sourceLabel, 'evidence-tag'));
+        card.append(title);
+        const facts = element('dl', null, 'facts');
+        const remaining = link.expiresAt == null ? null : Math.max(0, Math.ceil((link.expiresAt - now) / 1000));
+        const channel = link.channel || apNode?.channel;
+        const freq = link.frequencyMhz ? ' · ' + link.frequencyMhz + ' MHz' : '';
+        const values = [
+          ['Evidence frames', number(link.evidenceCount)],
+          ['Channel', channel ? channel + freq : unavailable],
+          ['Last evidence', clock(link.lastSeen)],
+          ['Last data frame', clock(link.lastDataSeen)],
+          ...(assoc ? [[link.source === 'REASSOC' ? 'Reassociation response' : 'Association response', clock(link.associationSeen)]] : []),
+          ['Uplink / downlink', number(link.uplink) + ' / ' + number(link.downlink)],
+          ['Evidence expires', remaining == null ? unavailable : clock(link.expiresAt) + ' · in '
+            + Math.floor(remaining / 60) + 'm ' + (remaining % 60) + 's']
+        ];
+        for (const [label, value] of values) facts.append(element('dt', label), element('dd', value));
+        card.append(facts);
+        section.append(card);
+      }
+      return section;
+    }
+
     const links = (state.topology.edges || []).filter(edge => edge.clientId === id
       && (edge.expiresAt == null || edge.expiresAt > now))
       .sort((a, b) => b.lastSeen - a.lastSeen || a.bssid.localeCompare(b.bssid));
-    if (!links.length && (item?.details?.role === 'AP' || aps.has(id))) return null;
 
     const section = element('section', null, 'link-evidence');
     section.append(element('h2', 'Client link evidence'));
@@ -367,19 +424,22 @@
       const name = ap ? window.EwaveGraph.apLabel({ ...ap, label: labels.get(link.bssid), channel: 0 })
         : labels.get(link.bssid) || 'AP ' + link.bssid.slice(0, 8);
       const assoc = link.associationSeen != null;
+      const sourceLabel = link.source === 'REASSOC' ? 'Reassociation observed'
+        : assoc ? 'Association observed' : 'Data evidence';
       const card = element('article', null, 'link-card');
       const title = element('div', null, 'link-card-title');
-      title.append(element('strong', name), element('span', assoc ? 'Association observed' : 'Data evidence',
-        'evidence-tag'));
+      title.append(element('strong', name), element('span', sourceLabel, 'evidence-tag'));
       card.append(title);
       const facts = element('dl', null, 'facts');
       const remaining = link.expiresAt == null ? null : Math.max(0, Math.ceil((link.expiresAt - now) / 1000));
       const channel = link.channel || ap?.channel;
       const freq = link.frequencyMhz ? ' · ' + link.frequencyMhz + ' MHz' : '';
       const values = [
+        ['Evidence frames', number(link.evidenceCount)],
         ['Channel', channel ? channel + freq : unavailable],
+        ['Last evidence', clock(link.lastSeen)],
         ['Last data frame', clock(link.lastDataSeen)],
-        ...(assoc ? [['Association response', clock(link.associationSeen)]] : []),
+        ...(assoc ? [[link.source === 'REASSOC' ? 'Reassociation response' : 'Association response', clock(link.associationSeen)]] : []),
         ['Uplink / downlink', number(link.uplink) + ' / ' + number(link.downlink)],
         ['Evidence expires', remaining == null ? unavailable : clock(link.expiresAt) + ' · in '
           + Math.floor(remaining / 60) + 'm ' + (remaining % 60) + 's']
@@ -452,11 +512,14 @@
   function advertisedWifi(item) {
     const caps = item.details.capabilities;
     const ap = (state.topology.accessPoints || []).find(ap => ap.bssid === item.id);
-    if (!caps && !ap?.security) return null;
+    if (!caps && !ap?.security && ap?.stationCount == null) return null;
     const section = element('section', null, 'link-evidence');
     section.append(element('h2', 'Advertised Wi-Fi capabilities'));
     const facts = element('dl', null, 'facts');
     const values = [];
+    if (ap?.stationCount != null) {
+      values.push(['QBSS Load station count (AP claim)', number(ap.stationCount)]);
+    }
     if (caps) {
       const features = [[caps.sgi, 'Short GI'], [caps.ldpc, 'LDPC'], [caps.stbcTx, 'STBC TX'],
         [caps.stbcRx, 'STBC RX'], [caps.suBeamformee, 'SU beamformee'], [caps.muBeamformee, 'MU beamformee'],
@@ -750,12 +813,18 @@
         : age >= 10000 ? 'Capture running · quiet' : 'Capture running';
     const fullTime = value => value == null ? unavailable : new Date(value).toLocaleString();
     const frames = Object.entries(health.frameCounts);
+    const totalReceived = frames.reduce((sum, [, count]) => sum + count, 0);
     const fps = Object.values(health.framesPerSecond).reduce((sum, rate) => sum + rate, 0);
-    $('health-total').textContent = number(frames.reduce((sum, [, count]) => sum + count, 0));
+    const windowLabel = 'Frames / sec (last ' + health.rateWindowSeconds + (replay ? ' capture s)' : ' s)');
+    $('health-total').textContent = number(totalReceived);
     $('health-fps').textContent = fps.toFixed(1);
+    $('health-fps-label').textContent = windowLabel;
+    $('health-rate-col').textContent = windowLabel;
     $('health-rejects').textContent = number(health.rejected);
-    $('health-drops').textContent = number(health.kernelDrops);
-    $('health-drops').title = health.dropStatsAt == null ? 'Waiting for tcpdump statistics' : fullTime(health.dropStatsAt);
+    $('health-drops').textContent = health.kernelDrops == null ? 'Unknown' : number(health.kernelDrops);
+    $('health-drops').title = health.dropStatsAt == null
+      ? (replay ? 'Kernel drops are not available in offline replay' : 'Waiting for tcpdump statistics')
+      : fullTime(health.dropStatsAt);
 
     const radio = health.radio;
     const tuned = radio?.channel ? radio.channel + ' · ' + radio.frequencyMhz + ' MHz' : unavailable;
@@ -772,14 +841,19 @@
       ['Last decoded radio channel', observed],
       ['Last packet timestamp', fullTime(health.lastPacketAt)]
     ]);
-    $('health-window').textContent = 'Last ' + health.rateWindowSeconds + (replay ? ' capture seconds' : ' seconds');
+    $('health-window').textContent = 'Cumulative counts · rate over last ' + health.rateWindowSeconds
+      + (replay ? ' capture seconds' : ' seconds');
     const types = ['management', 'data', 'control', 'other', 'unclassified'];
     $('health-frames').replaceChildren(...types.map(type =>
       row([type[0].toUpperCase() + type.slice(1), number(health.frameCounts[type]),
         (health.framesPerSecond[type] || 0).toFixed(1)])));
     rows('health-decoder', [
-      ['Decoded frames', number(health.decoded)], ['Unsupported frame types', number(health.unsupported)],
-      ['Truncated captures', number(health.truncated)], ['Kernel stats sampled', fullTime(health.dropStatsAt)]
+      ['Total frames received', number(totalReceived)],
+      ['Successfully decoded', number(health.decoded)],
+      ['Unsupported frame types', number(health.unsupported)],
+      ['Truncated captures', number(health.truncated)],
+      ['Kernel drops', health.kernelDrops == null ? 'Unknown' : number(health.kernelDrops)],
+      ['Kernel stats sampled', health.dropStatsAt == null ? (replay ? 'Unavailable in replay' : 'Waiting for sample') : fullTime(health.dropStatsAt)]
     ]);
   }
 
@@ -1108,7 +1182,7 @@
       apBssid: ap.bssid, clientMac: $('client-target').value || null,
       count: $('deauth-count').valueAsNumber, interface: $('deauth-interface').value.trim()
     }, result => {
-      const text = result.success ? 'Deauth process completed' : 'Deauth failed';
+      const text = result.success ? 'Deauth command completed (client disconnect not verified)' : 'Deauth failed';
       $('deauth-status').textContent = text;
       if (result.channelWarning) log(result.channelWarning, 'amber-text');
       log(text + '\n' + (result.output || ''));
@@ -1132,9 +1206,15 @@
       const found = !!(result.handshakeDetected ?? result.handshakeFound);
       const captureFile = result.capFilePath || result.captureFile;
       const outcome = result.outcome || (found ? 'COMPLETE' : 'CAPTURE_ENDED');
-      const text = found ? 'Handshake captured' : String(outcome).replaceAll('_', ' ');
+      const msgs = Array.isArray(result.messages) && result.messages.length ? result.messages.join(', ') : null;
+      const text = found ? 'Handshake captured (4-way EAPOL verified)'
+        : outcome === 'PARTIAL' ? 'Partial EAPOL exchange (' + (msgs ? 'messages ' + msgs : 'incomplete') + ' of 4) — handshake incomplete'
+        : outcome === 'TARGET_NOT_SEEN' ? 'Target AP beacon not seen — no handshake captured'
+        : outcome === 'NO_EAPOL' ? 'AP beacon seen, no EAPOL observed'
+        : 'Capture ended without handshake';
       $('handshake-status').textContent = text + (captureFile ? '\n' + captureFile : '');
-      stages(4, found ? 'done' : 'failed');
+      const stageIdx = found ? 4 : outcome === 'TARGET_NOT_SEEN' ? 1 : (outcome === 'NO_EAPOL' || outcome === 'PARTIAL') ? 2 : 3;
+      stages(stageIdx, found ? 'done' : 'failed');
       if (captureFile) $('capture-path').value = captureFile;
       if (found) ops.handshakeFound = true;
       $('verify-jump').hidden = !ops.handshakeFound;
@@ -1190,7 +1270,7 @@
         const status = await api('/api/attack/beacon/status');
         if (status.tool) $('beacon-tool').textContent = status.tool + ' · ' + (status.command || '');
         if (status.running) {
-          $('beacon-status').textContent = 'Running · ' + status.command;
+          $('beacon-status').textContent = 'Helper running · ' + status.command + ' (over-the-air reception not verified)';
           return;
         }
         $('beacon-status').textContent = status.error || 'Stopped';
@@ -1229,7 +1309,7 @@
         updateStatus();
         return;
       }
-      $('beacon-status').textContent = 'Running · ' + status.command;
+      $('beacon-status').textContent = 'Helper running · ' + status.command + ' (over-the-air reception not verified)';
       log('Beacon flood started with ' + status.tool + '\n' + status.command);
       if (beaconTimer) clearInterval(beaconTimer);
       beaconTimer = setInterval(pollBeacon, 2000);
@@ -1244,11 +1324,12 @@
 
   function renderEvilTwin(status) {
     const running = !!status.running;
-    $('evil-twin-status').textContent = running ? 'Portal active · ' + status.stage
+    $('evil-twin-status').textContent = running
+      ? 'Helpers running (' + status.stage + ') · requires 10.0.0.1/24 on AP interface'
       : status.error || status.stage || 'Stopped';
     $('evil-twin-status').classList.toggle('red', !running && !!status.error);
     $('evil-twin-portal').textContent = status.portalUrl
-      ? 'Portal ' + status.portalUrl + ' · log ' + status.credentialsFile : '';
+      ? 'Proposed gateway ' + status.portalUrl + ' (portal binds 0.0.0.0) · log ' + status.credentialsFile : '';
     const captured = status.credentials || [];
     $('evil-twin-rows').replaceChildren(...captured.map(entry => row([
       clock(entry.time), entry.client,
@@ -1558,6 +1639,7 @@
     try {
       const matches = await api('/api/my-network/find', { ssid: $('find-ssid').value });
       await refreshMyNetwork();
+      if (!$('network-dialog').open) return;
       apMatches = new Set(matches);
       const first = nearbyAccessPoints().find(ap => apMatches.has(ap.token));
       renderNetworkDialog(first?.token || '');
@@ -1584,7 +1666,6 @@
     saveMyNetwork({ action: 'scope', restricted: $('restrict-network').checked }));
   $('all-observations').addEventListener('click', () => {
     state.scope = 'all';
-    setRadio('all');
     state.intelLimit = intelPageSize;
     switchView('intel');
   });
@@ -1623,8 +1704,8 @@
       if (!message || typeof message.type !== 'string') return;
       const { type, channel, reason, deviation, deviceHint } = message;
       if (type === 'eapol_window') {
-        log('Channel ' + channel + ' activity rose after deauth (' + reason
-          + '). Possible reconnect. EAPOL was not verified.', 'amber-text');
+        log('Channel ' + channel + ' occupancy rose after deauth (' + reason
+          + '). Unverified channel activity — could be unrelated traffic or a reconnect; EAPOL was not verified.', 'amber-text');
         const field = $('handshake-channel');
         if (!field.value && selectedAp()?.channel === channel) field.value = channel;
       }

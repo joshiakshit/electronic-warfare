@@ -11,6 +11,7 @@ import ewave.model.ProbeRequest;
 
 import java.io.IOException;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.LinkedHashSet;
@@ -18,6 +19,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.regex.Pattern;
 
 /** Session-local, MAC-keyed observations. Guesses and distance estimates are not verified facts.
  * Only transmitters contribute signal readings. Rotating addresses are never correlated.
@@ -25,10 +28,18 @@ import java.util.concurrent.ConcurrentHashMap;
 public final class DeviceProfiler {
     public static final int UNKNOWN_RSSI = 127;
     public static final int DEFAULT_TX_POWER = -59;
+    public static final int PROFILE_LIMIT = 4096;
+    public static final int PROBED_SSID_LIMIT = 512;
+    private static final Pattern MAC_PATTERN = Pattern.compile("(?i)[0-9a-f]{2}(:[0-9a-f]{2}){5}");
     private final ConcurrentHashMap<String, DeviceProfile> profiles = new ConcurrentHashMap<>();
     private final OuiLookup oui;
+    private final int profileLimit;
+    private final AtomicLong evictedProfiles = new AtomicLong();
 
-    public void clear() { profiles.clear(); }
+    public void clear() {
+        profiles.clear();
+        evictedProfiles.set(0);
+    }
 
     public record DeviceProfile(String mac, String vendor, String guessedType,
                                 List<String> probedSsids,
@@ -56,8 +67,18 @@ public final class DeviceProfiler {
     OuiLookup ouiLookup() { return oui; }
 
     public DeviceProfiler(OuiLookup oui) {
-        this.oui = Objects.requireNonNull(oui);
+        this(oui, PROFILE_LIMIT);
     }
+
+    DeviceProfiler(OuiLookup oui, int profileLimit) {
+        if (profileLimit < 1) throw new IllegalArgumentException("profileLimit must be positive");
+        this.oui = Objects.requireNonNull(oui);
+        this.profileLimit = profileLimit;
+    }
+
+    public int profileLimit() { return profileLimit; }
+
+    public long evictedCount() { return evictedProfiles.get(); }
 
     public void observe(PacketEvent event) {
         Objects.requireNonNull(event);
@@ -98,9 +119,13 @@ public final class DeviceProfiler {
                 : Math.clamp(Math.pow(10.0, (DEFAULT_TX_POWER - rssi) / 20.0), 0.5, 50.0);
         Instant seen = Instant.ofEpochMilli(timestamp);
         boolean randomMac = (Integer.parseInt(key.substring(0, 2), 16) & 0x02) != 0;
+        boolean[] inserted = new boolean[1];
         profiles.compute(key, (address, previous) -> {
-            if (previous == null) return new DeviceProfile(address, oui.lookup(address), "Unknown",
-                    ssids, rssi, meters, seen, seen, 1, randomMac);
+            if (previous == null) {
+                inserted[0] = true;
+                return new DeviceProfile(address, oui.lookup(address), "Unknown",
+                        ssids, rssi, meters, seen, seen, 1, randomMac);
+            }
             boolean newest = !seen.isBefore(previous.lastSeen());
             return new DeviceProfile(address, previous.vendor(), previous.guessedType(),
                     merge(previous.probedSsids(), ssids),
@@ -111,12 +136,31 @@ public final class DeviceProfiler {
                     previous.packetCount() == Integer.MAX_VALUE ? Integer.MAX_VALUE : previous.packetCount() + 1,
                     randomMac);
         });
+        if (inserted[0] && profiles.size() > profileLimit) evictOldest(key);
+    }
+
+    private void evictOldest(String keepKey) {
+        synchronized (profiles) {
+            while (profiles.size() > profileLimit) {
+                String oldestKey = null;
+                Instant oldestSeen = Instant.MAX;
+                for (var entry : profiles.entrySet()) {
+                    if (entry.getKey().equals(keepKey)) continue;
+                    Instant seen = entry.getValue().lastSeen();
+                    if (oldestKey == null || seen.isBefore(oldestSeen)) {
+                        oldestSeen = seen;
+                        oldestKey = entry.getKey();
+                    }
+                }
+                if (oldestKey == null) break;
+                if (profiles.remove(oldestKey) != null) evictedProfiles.incrementAndGet();
+            }
+        }
     }
 
     private static String normalize(String mac) {
-        if (mac == null || !mac.matches("(?i)[0-9a-f]{2}(:[0-9a-f]{2}){5}")) return null;
-        String key = mac.toUpperCase(Locale.ROOT);
-        return key;
+        if (mac == null || !MAC_PATTERN.matcher(mac).matches()) return null;
+        return mac.toUpperCase(Locale.ROOT);
     }
 
     private static boolean isUnicast(String mac) {
@@ -126,8 +170,11 @@ public final class DeviceProfiler {
     }
 
     private static List<String> merge(List<String> previous, List<String> added) {
+        if (added.isEmpty()) return previous;
         var result = new LinkedHashSet<>(previous);
         result.addAll(added);
-        return List.copyOf(result);
+        if (result.size() <= PROBED_SSID_LIMIT) return List.copyOf(result);
+        var list = new ArrayList<>(result);
+        return List.copyOf(list.subList(list.size() - PROBED_SSID_LIMIT, list.size()));
     }
 }

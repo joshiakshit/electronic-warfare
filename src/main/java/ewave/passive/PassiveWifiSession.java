@@ -7,6 +7,7 @@ import ewave.decoder.IeSignature;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.Comparator;
 import java.util.HexFormat;
 import java.util.LinkedHashSet;
 import java.util.LinkedHashMap;
@@ -80,6 +81,7 @@ public final class PassiveWifiSession {
         inventory.clear();
         topology.clear();
         audit.clear();
+        observedClients.clear();
         return true;
     }
 
@@ -197,14 +199,38 @@ public final class PassiveWifiSession {
 
     public String addressId(String mac) { return ids.id("wifi", mac.toLowerCase(Locale.ROOT)); }
 
-    public synchronized List<WifiInventory.Device> inventory() { purge(clock.getAsLong()); return inventory.snapshot(); }
+    public List<WifiInventory.Device> inventory() {
+        List<WifiInventory.Device> snapshot;
+        synchronized (this) {
+            purge(clock.getAsLong());
+            snapshot = inventory.prepareSnapshot();
+        }
+        snapshot.sort(Comparator.comparing(WifiInventory.Device::id));
+        return List.copyOf(snapshot);
+    }
+
     public synchronized WifiInventory.Detail inventoryDetail(String id) {
         long now = clock.getAsLong();
         purge(now);
         return inventory.detail(id, now - retention);
     }
-    public synchronized ProbeAuditAggregator.Report audit() { return audit.snapshot(clock.getAsLong(), retention); }
-    public synchronized TopologyBuilder.Snapshot topology() { purge(clock.getAsLong()); return topology.snapshot(retention); }
+
+    public ProbeAuditAggregator.Report audit() {
+        ProbeAuditAggregator.PendingReport pending;
+        synchronized (this) {
+            pending = audit.prepareSnapshot(clock.getAsLong(), retention);
+        }
+        return pending.build();
+    }
+
+    public TopologyBuilder.Snapshot topology() {
+        TopologyBuilder.PendingSnapshot pending;
+        synchronized (this) {
+            purge(clock.getAsLong());
+            pending = topology.prepareSnapshot(retention);
+        }
+        return pending.build();
+    }
 
     public synchronized void purge() { purge(clock.getAsLong()); }
 

@@ -1,7 +1,6 @@
 package ewave.capture;
 
 import ewave.core.AdaptiveScanner;
-import ewave.decoder.Dot11Frame;
 import ewave.decoder.Dot11FrameDecoder;
 import ewave.model.DeviceRecord;
 import ewave.model.PacketEvent;
@@ -36,12 +35,12 @@ import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
-import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.regex.Matcher;
+import java.util.function.Function;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
@@ -64,7 +63,8 @@ import java.util.stream.Stream;
  * to the single-threaded scanner is synchronized on the scanner; callers sharing
  * it must use the same monitor. The optional packet retention queue is bounded
  * and evicts the oldest packets; overflow is counted by {@link #getDroppedPackets()}.
- * The event queue is unbounded and should be drained.
+ * The event queue is bounded and evicts the oldest events when full; overflow is
+ * counted by {@link #getDroppedEvents()}.
  */
 public final class PacketBridge implements AutoCloseable {
     private static final System.Logger LOG = System.getLogger(PacketBridge.class.getName());
@@ -96,24 +96,33 @@ public final class PacketBridge implements AutoCloseable {
     private final Map<String, DeviceRecord> deviceView = Collections.unmodifiableMap(devices);
     /** Default cap for the diagnostic packet queue; production does not drain it. */
     public static final int PACKET_QUEUE_CAPACITY = 1024;
+    /** Default cap for the WebSocket/UI event queue; oldest events are evicted if unconsumed. */
+    public static final int EVENT_QUEUE_CAPACITY = 1024;
+    /** Maximum number of retained summary/probe device records in {@link #getDevices()}. */
+    public static final int DEVICE_LIMIT = 4096;
+    private static final int MAX_CAPTURE_ERROR = 256;
     private final BlockingQueue<PacketEvent> packetQueue;
     private final int packetCapacity;
+    private final int eventCapacity;
     private final AtomicLong droppedPackets = new AtomicLong();
-    private final BlockingQueue<EwaveEvent> eventQueue = new LinkedBlockingQueue<>();
+    private final AtomicLong droppedEvents = new AtomicLong();
+    private final AtomicLong evictedDevices = new AtomicLong();
+    private final BlockingQueue<EwaveEvent> eventQueue;
     public static final int RECENT_PROBE_LIMIT = 256;
     private final ArrayDeque<ProbeRequest> recentProbes = new ArrayDeque<>();
     private final Map<String, String> vendors;
     private final ProcessStarter processStarter;
+    private final Function<String, RadioStatus.Settings> radioSettings;
     private final DeviceProfiler profiler;
     private volatile int channel;
     // Guarded by this, including every session's counters and pending packets.
-    private Session session;
+    private volatile Session session;
     private long tick;
     private long probeCount;
     private String captureMode = "packets";
     private String captureInterface;
     private String captureError;
-    private PassiveWifiSession passiveWifi;
+    private volatile PassiveWifiSession passiveWifi;
     private PassiveApWatch apWatch;
     private CaptureHealth health;
     private Replay replay;
@@ -132,7 +141,8 @@ public final class PacketBridge implements AutoCloseable {
     }
 
     public PacketBridge(int tickMs, DeviceProfiler profiler) {
-        this(ProcessBuilder::start, loadBundledVendors(), profiler, tickMs);
+        this(ProcessBuilder::start, loadBundledVendors(), profiler, tickMs, PACKET_QUEUE_CAPACITY,
+                EVENT_QUEUE_CAPACITY, RadioStatus::read);
     }
 
     @FunctionalInterface
@@ -155,12 +165,27 @@ public final class PacketBridge implements AutoCloseable {
 
     PacketBridge(ProcessStarter processStarter, Map<String, String> vendors, DeviceProfiler profiler, int tickMs,
                  int packetCapacity) {
+        this(processStarter, vendors, profiler, tickMs, packetCapacity, EVENT_QUEUE_CAPACITY);
+    }
+
+    PacketBridge(ProcessStarter processStarter, Map<String, String> vendors, DeviceProfiler profiler, int tickMs,
+                 int packetCapacity, int eventCapacity) {
+        this(processStarter, vendors, profiler, tickMs, packetCapacity, eventCapacity, iface -> null);
+    }
+
+    private PacketBridge(ProcessStarter processStarter, Map<String, String> vendors, DeviceProfiler profiler,
+                         int tickMs, int packetCapacity, int eventCapacity,
+                         Function<String, RadioStatus.Settings> radioSettings) {
+        this.radioSettings = radioSettings;
         if (tickMs < 10 || tickMs > 2000) throw new IllegalArgumentException("--tick-ms must be 10..2000");
         if (packetCapacity < 1) throw new IllegalArgumentException("packetCapacity must be positive");
+        if (eventCapacity < 1) throw new IllegalArgumentException("eventCapacity must be positive");
         this.tickMs = tickMs;
         tickNanos = TimeUnit.MILLISECONDS.toNanos(tickMs);
         this.packetCapacity = packetCapacity;
+        this.eventCapacity = eventCapacity;
         this.packetQueue = new ArrayBlockingQueue<>(packetCapacity);
+        this.eventQueue = new ArrayBlockingQueue<>(eventCapacity);
         this.processStarter = Objects.requireNonNull(processStarter);
         this.vendors = Map.copyOf(vendors);
         this.profiler = Objects.requireNonNull(profiler);
@@ -234,7 +259,7 @@ public final class PacketBridge implements AutoCloseable {
                 replay == null ? monotonicMillis() : replay.now());
     }
 
-    public synchronized PassiveWifiSession getPassiveWifi() { return passiveWifi; }
+    public PassiveWifiSession getPassiveWifi() { return passiveWifi; }
 
     public synchronized MyNetworkProfile.View myNetwork() throws IOException {
         return networkView(myNetwork.get());
@@ -343,7 +368,8 @@ public final class PacketBridge implements AutoCloseable {
             if (reports != null) {
                 started.timer.scheduleAtFixedRate(reports::purge, 1, 1, TimeUnit.MINUTES);
                 started.timer.scheduleWithFixedDelay(() -> sampleMonitor(started, iface), 0, 5, TimeUnit.SECONDS);
-                Thread.ofPlatform().daemon().name("ewave-monitor-diagnostics").start(() -> readDiagnostics(started));
+                started.diagnostics = Thread.ofPlatform().daemon().name("ewave-monitor-diagnostics")
+                        .start(() -> readDiagnostics(started));
             }
             started.reader.start();
         } catch (RuntimeException | Error failure) {
@@ -372,6 +398,12 @@ public final class PacketBridge implements AutoCloseable {
     /** Device lifecycle and decoded-probe events, with immutable payloads. */
     public BlockingQueue<EwaveEvent> getEventQueue() { return eventQueue; }
 
+    /** Capacity of the bounded event queue. */
+    public int getEventQueueCapacity() { return eventCapacity; }
+
+    /** Events discarded because the bounded event queue was full; cumulative across stop/start. */
+    public long getDroppedEvents() { return droppedEvents.get(); }
+
     /** Most recent requests, oldest first, bounded across stop/start. */
     public synchronized List<ProbeRequest> getProbeRequests() { return List.copyOf(recentProbes); }
 
@@ -390,6 +422,10 @@ public final class PacketBridge implements AutoCloseable {
         status.put("recentProbeLimit", RECENT_PROBE_LIMIT);
         status.put("packetQueueCapacity", packetCapacity);
         status.put("packetsDropped", droppedPackets.get());
+        status.put("eventQueueCapacity", eventCapacity);
+        status.put("eventsDropped", droppedEvents.get());
+        status.put("profileLimit", profiler.profileLimit());
+        status.put("profilesEvicted", profiler.evictedCount());
         if (captureError != null) status.put("captureError", captureError);
         if (passiveWifi != null) {
             status.put("scopedBssidCount", passiveWifi.scopedBssidCount());
@@ -516,22 +552,24 @@ public final class PacketBridge implements AutoCloseable {
         try (InputStream input = current.process.getInputStream()) {
             MonitorPcapReader.readRecords(input, (packet, link, timestamp, complete) -> {
                 var frame = complete ? Dot11FrameDecoder.decodeAny(packet, link, timestamp) : null;
+                int control = Dot11FrameDecoder.frameControl(packet, link);
                 synchronized (this) {
                     if (session != current) return;
                     long now = System.currentTimeMillis();
-                    current.health.record(Dot11FrameDecoder.frameControl(packet, link), complete, frame,
-                            timestamp, now, monotonicMillis());
+                    current.health.record(control, complete, frame, timestamp, now, monotonicMillis());
                     if (frame == null) return;
                     if (current.scanner != null) {
                         advanceTicks(current, System.nanoTime());
                         int observedChannel = Dot11FrameDecoder.channel(frame.frequencyMhz());
-                        if (observedChannel >= 1 && observedChannel <= 13) {
+                        if (observedChannel >= 1 && observedChannel <= 13
+                                && Integer.valueOf(frame.frequencyMhz()).equals(channelFrequencyMhz(observedChannel))) {
                             current.counts[observedChannel]++;
-                            if (current.survey != null && frame.frequencyMhz() == channelFrequencyMhz(observedChannel)) {
+                            if (current.survey != null) {
                                 int band = observedChannel - 1;
                                 current.lastFrameAtMs[band] = Math.max(current.lastFrameAtMs[band], frame.timestamp());
                                 if (!current.tuning && current.tunedChannel == observedChannel
                                         && current.lastTuneAtMs[band] != 0 && frame.timestamp() >= current.lastTuneAtMs[band]) {
+                                    current.survey.frame(System.nanoTime(), observedChannel);
                                     current.lastFrameWhileTunedAtMs[band] = Math.max(
                                             current.lastFrameWhileTunedAtMs[band], frame.timestamp());
                                 }
@@ -539,17 +577,27 @@ public final class PacketBridge implements AutoCloseable {
                         }
                     }
                     if (current.watchAllowed && apWatch != null) apWatch.observe(frame);
-                    var observed = recordMonitorFrame(frame, reports, collectLabTargets);
+                }
+                var observed = reports.observe(frame);
+                if (collectLabTargets && observed.inventory()) {
+                    profiler.observe(new PacketEvent(frame.addr2(), frame.addr1(),
+                            Dot11FrameDecoder.channel(frame.frequencyMhz()), frame.rssi(), frame.frameLength(),
+                            "802.11", frame.timestamp(), null));
+                }
+                long now = System.currentTimeMillis();
+                synchronized (this) {
+                    if (session != current) return;
+                    if (observed.probe()) probeCount++;
                     if (observed.inventory() && now >= current.nextDeviceEvent) {
                         current.nextDeviceEvent = now + 1000;
-                        eventQueue.add(new EwaveEvent("WIFI_DEVICE_SEEN", now, null));
+                        publishEvent(new EwaveEvent("WIFI_DEVICE_SEEN", now, null));
                     }
                     if (observed.probe() && now >= current.nextProbeEvent) {
                         current.nextProbeEvent = now + 1000;
-                        eventQueue.add(new EwaveEvent("PROBE_RECEIVED", now, null));
+                        publishEvent(new EwaveEvent("PROBE_RECEIVED", now, null));
                     }
                 }
-            });
+            }, () -> session != current);
             reportProbeFailure(current, "Monitor capture ended");
         } catch (IOException | RuntimeException failure) {
             reportProbeFailure(current, Objects.toString(failure.getMessage(), "Monitor capture failed"));
@@ -558,29 +606,26 @@ public final class PacketBridge implements AutoCloseable {
         }
     }
 
-    private PassiveWifiSession.Observation recordMonitorFrame(Dot11Frame frame, PassiveWifiSession reports,
-                                                                boolean collectLabTargets) {
-        var observed = reports.observe(frame);
-        if (collectLabTargets && observed.inventory()) profiler.observe(new PacketEvent(frame.addr2(), frame.addr1(),
-                Dot11FrameDecoder.channel(frame.frequencyMhz()), frame.rssi(), frame.frameLength(),
-                "802.11", frame.timestamp(), null));
-        if (observed.probe()) probeCount++;
-        return observed;
-    }
-
     private void readReplay(Replay current, PassiveWifiSession reports) {
         String error = null;
         try (var input = current.input) {
             MonitorPcapReader.readRecords(input, (packet, link, timestamp, complete) -> {
                 var frame = complete ? Dot11FrameDecoder.decodeAny(packet, link, timestamp) : null;
+                int control = Dot11FrameDecoder.frameControl(packet, link);
                 synchronized (this) {
                     if (replay != current || !current.running()) return;
                     current.timestamp = Math.max(current.timestamp, timestamp);
-                    current.health.record(Dot11FrameDecoder.frameControl(packet, link), complete, frame,
+                    current.health.record(control, complete, frame,
                             timestamp, System.currentTimeMillis(), timestamp);
-                    if (frame != null) recordMonitorFrame(frame, reports, false);
+                    if (frame == null) return;
                 }
-            });
+                var observed = reports.observe(frame);
+                if (observed.probe()) {
+                    synchronized (this) {
+                        if (replay == current && current.running()) probeCount++;
+                    }
+                }
+            }, () -> !current.running());
         } catch (IOException | RuntimeException failure) {
             error = Objects.toString(failure.getMessage(), "PCAP replay failed");
         } finally {
@@ -594,7 +639,7 @@ public final class PacketBridge implements AutoCloseable {
     }
 
     private void sampleMonitor(Session current, String iface) {
-        var settings = RadioStatus.read(iface);
+        var settings = radioSettings.apply(iface);
         synchronized (this) {
             if (session != current) return;
             if (settings != null) current.health.updateRadio(settings);
@@ -624,7 +669,14 @@ public final class PacketBridge implements AutoCloseable {
         try (var reader = new BufferedReader(new InputStreamReader(current.process.getErrorStream(), StandardCharsets.UTF_8))) {
             for (String line; (line = reader.readLine()) != null;) {
                 boolean stats;
-                synchronized (this) { stats = current.health.diagnostics(line, System.currentTimeMillis()); }
+                synchronized (this) {
+                    if (health != current.health) return;
+                    stats = current.health.diagnostics(line, System.currentTimeMillis());
+                    String diag = current.health.diagnosticError();
+                    if (diag != null && captureError != null) {
+                        captureError = formatCaptureError(exitCodeOrNull(current.process), diag, captureError);
+                    }
+                }
                 if (!stats) System.err.println(line);
             }
         } catch (IOException closed) {
@@ -655,24 +707,39 @@ public final class PacketBridge implements AutoCloseable {
     }
 
     private void reportProbeFailure(Session current, String fallback) {
-        // Never hold the bridge lock while waiting for the child to exit.
+        // Never hold the bridge lock while waiting for the child or diagnostics stream to finish.
         try {
             current.process.waitFor(250, TimeUnit.MILLISECONDS);
+            if (current.diagnostics != null && current.diagnostics != Thread.currentThread()) {
+                current.diagnostics.join(250);
+            }
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
         }
-        String error = fallback;
-        try {
-            int exit = current.process.exitValue();
-            if (exit != 0) error = "tcpdump exited with code " + exit + ": " + fallback;
-        } catch (IllegalThreadStateException running) {
-            // A read failure can occur while tcpdump is still running.
-        }
+        Integer exitCode = exitCodeOrNull(current.process);
         synchronized (this) {
             if (session != current) return;
-            captureError = error;
-            LOG.log(System.Logger.Level.WARNING, error);
+            String diag = current.health == null ? null : current.health.diagnosticError();
+            captureError = formatCaptureError(exitCode, diag, fallback);
+            LOG.log(System.Logger.Level.WARNING, captureError);
         }
+    }
+
+    private static Integer exitCodeOrNull(Process process) {
+        try {
+            return process.exitValue();
+        } catch (IllegalThreadStateException running) {
+            // A read failure can occur while tcpdump is still running.
+            return null;
+        }
+    }
+
+    private static String formatCaptureError(Integer exitCode, String diagnostic, String fallback) {
+        String message = diagnostic != null && !diagnostic.isBlank() ? diagnostic : fallback;
+        String text = exitCode != null && exitCode != 0
+                ? "tcpdump exited with code " + exitCode + ": " + message
+                : message;
+        return text.length() > MAX_CAPTURE_ERROR ? text.substring(0, MAX_CAPTURE_ERROR - 1) + "…" : text;
     }
 
     private void recordProbe(ProbeRequest probe) {
@@ -681,7 +748,8 @@ public final class PacketBridge implements AutoCloseable {
         recentProbes.addLast(probe);
         probeCount++;
         DeviceRecord previous = devices.get(probe.sourceMac());
-        var ssids = profiler.get(probe.sourceMac()).probedSsids();
+        var profile = profiler.get(probe.sourceMac());
+        var ssids = profile == null ? List.of(probe.ssid()) : profile.probedSsids();
         var metadata = new HashMap<>(previous == null ? Map.<String, String>of() : previous.metadata());
         metadata.put("probeRequests", Long.toString(Long.parseLong(metadata.getOrDefault("probeRequests", "0")) + 1));
         metadata.put("macAddressType", probe.locallyAdministered() ? "locally administered" : "globally administered");
@@ -693,9 +761,9 @@ public final class PacketBridge implements AutoCloseable {
                 previous == null ? DeviceRecord.DeviceType.UNKNOWN : previous.type(), rssi,
                 previous == null ? probe.timestamp() : Math.min(previous.firstSeen(), probe.timestamp()),
                 previous == null ? probe.timestamp() : Math.max(previous.lastSeen(), probe.timestamp()), ssids, metadata);
-        devices.put(probe.sourceMac(), updated);
-        eventQueue.add(previous == null ? EwaveEvent.deviceAppeared(updated) : EwaveEvent.deviceUpdated(updated));
-        eventQueue.add(EwaveEvent.probeRequest(probe));
+        putDevice(probe.sourceMac(), updated);
+        publishEvent(previous == null ? EwaveEvent.deviceAppeared(updated) : EwaveEvent.deviceUpdated(updated));
+        publishEvent(EwaveEvent.probeRequest(probe));
     }
 
     private void onTimer(Session current, String iface) {
@@ -710,8 +778,10 @@ public final class PacketBridge implements AutoCloseable {
                 current.lastDecisionTick = tick;
                 var survey = current.survey;
                 if (survey != null && current.retunePending) return;
-                int chosen = survey == null ? 0 : survey.channel(now);
-                if (chosen == 0) {
+                int chosen;
+                if (survey != null) {
+                    chosen = survey.channel(now);
+                } else {
                     synchronized (current.scanner) {
                         chosen = current.scanner.choose(tick, 1).bands()[0] + 1;
                     }
@@ -754,7 +824,10 @@ public final class PacketBridge implements AutoCloseable {
         } catch (InterruptedException stopped) {
             Thread.currentThread().interrupt();
         } finally {
-            if (tuning != null && tuning.isAlive()) tuning.destroyForcibly();
+            if (tuning != null && tuning.isAlive()) {
+                destroyDescendants(tuning, true);
+                tuning.destroyForcibly();
+            }
             synchronized (this) {
                 if (session == current) {
                     long completed = System.nanoTime();
@@ -773,7 +846,7 @@ public final class PacketBridge implements AutoCloseable {
                         current.failedRetunes++;
                         current.tunedChannel = 0;
                     }
-                    if (current.survey != null) current.survey.tuneFinished(completed, chosen, succeeded);
+                    if (current.survey != null) current.survey.tuneFinished(completed, chosen, succeeded, completed - started);
                 }
                 current.retunePending = false;
                 current.tuning = false;
@@ -787,7 +860,8 @@ public final class PacketBridge implements AutoCloseable {
                 for (int band = 1; band <= 13; band++) {
                     boolean detected = current.counts[band] > 0;
                     // A monitor radio cannot report quiet observations on channels it did not sample.
-                    boolean valid = current.health == null || detected || !current.tuning && current.tunedChannel == band;
+                    boolean valid = current.health == null || detected || !current.tuning && current.tunedChannel == band
+                            && current.nextBoundary - current.dwellStarted >= tickNanos;
                     current.scanner.observe(band - 1, tick, detected, valid);
                 }
             }
@@ -818,6 +892,34 @@ public final class PacketBridge implements AutoCloseable {
         }
     }
 
+    private void publishEvent(EwaveEvent event) {
+        if (eventQueue.offer(event)) return;
+        if (eventQueue.poll() != null) recordEventDrop();
+        if (!eventQueue.offer(event)) recordEventDrop();
+    }
+
+    private void recordEventDrop() {
+        if (droppedEvents.incrementAndGet() == 1) {
+            LOG.log(System.Logger.Level.WARNING,
+                    "Event queue reached capacity " + eventCapacity + "; oldest events are being discarded.");
+        }
+    }
+
+    private void putDevice(String mac, DeviceRecord updated) {
+        if (!devices.containsKey(mac) && devices.size() >= DEVICE_LIMIT) {
+            String oldestKey = null;
+            long oldestTime = Long.MAX_VALUE;
+            for (var entry : devices.entrySet()) {
+                if (entry.getValue().lastSeen() < oldestTime) {
+                    oldestTime = entry.getValue().lastSeen();
+                    oldestKey = entry.getKey();
+                }
+            }
+            if (oldestKey != null && devices.remove(oldestKey) != null) evictedDevices.incrementAndGet();
+        }
+        devices.put(mac, updated);
+    }
+
     private void updateDevice(String mac, PacketEvent packet, boolean transmitter) {
         // Broadcast/multicast addresses identify groups, not individual devices.
         if ((Integer.parseInt(mac.substring(0, 2), 16) & 1) != 0 || mac.equals("00:00:00:00:00:00")) return;
@@ -830,8 +932,8 @@ public final class PacketBridge implements AutoCloseable {
                 : new DeviceRecord(mac, previous.vendor(), previous.hostname(), previous.type(), rssi,
                         Math.min(previous.firstSeen(), packet.timestamp()), Math.max(previous.lastSeen(), packet.timestamp()),
                         previous.probedSsids(), previous.metadata());
-        devices.put(mac, updated);
-        eventQueue.add(previous == null ? EwaveEvent.deviceAppeared(updated) : EwaveEvent.deviceUpdated(updated));
+        putDevice(mac, updated);
+        publishEvent(previous == null ? EwaveEvent.deviceAppeared(updated) : EwaveEvent.deviceUpdated(updated));
     }
 
     private void endSession(Session current) {
@@ -848,10 +950,13 @@ public final class PacketBridge implements AutoCloseable {
         current.timer.shutdownNow();
         if (current.retuner != null) current.retuner.shutdownNow();
         if (current.reader != null && current.reader != Thread.currentThread()) current.reader.interrupt();
+        if (current.diagnostics != null && current.diagnostics != Thread.currentThread()) current.diagnostics.interrupt();
+        destroyDescendants(current.process, false);
         current.process.destroy();
         boolean interrupted = false;
         try {
             if (!current.process.waitFor(500, TimeUnit.MILLISECONDS)) {
+                destroyDescendants(current.process, true);
                 current.process.destroyForcibly();
                 if (!current.process.waitFor(500, TimeUnit.MILLISECONDS)) {
                     LOG.log(System.Logger.Level.WARNING, "tcpdump did not exit after forced termination");
@@ -859,19 +964,34 @@ public final class PacketBridge implements AutoCloseable {
             }
         } catch (InterruptedException failure) {
             interrupted = true;
+            destroyDescendants(current.process, true);
             current.process.destroyForcibly();
         }
         closeStream(current.process.getInputStream());
         closeStream(current.process.getOutputStream());
         closeStream(current.process.getErrorStream());
-        if (current.reader != null && current.reader != Thread.currentThread()) {
-            try {
-                current.reader.join(1_000);
-            } catch (InterruptedException failure) {
-                interrupted = true;
-            }
-        }
+        interrupted |= joinThread(current.reader);
+        interrupted |= joinThread(current.diagnostics);
         if (interrupted) Thread.currentThread().interrupt();
+    }
+
+    private static boolean joinThread(Thread thread) {
+        if (thread == null || thread == Thread.currentThread()) return false;
+        try {
+            thread.join(1_000);
+            return false;
+        } catch (InterruptedException failure) {
+            return true;
+        }
+    }
+
+    private static void destroyDescendants(Process process, boolean forcible) {
+        try {
+            process.descendants().toList().reversed()
+                    .forEach(forcible ? ProcessHandle::destroyForcibly : ProcessHandle::destroy);
+        } catch (UnsupportedOperationException ignored) {
+            // Fake Process implementations in tests may lack handles.
+        }
     }
 
     private static void closeStream(Closeable stream) {
@@ -1020,6 +1140,9 @@ public final class PacketBridge implements AutoCloseable {
             long[] dwell = dwellNanos.clone();
             if (!tuning && tunedChannel != 0) dwell[tunedChannel - 1] += System.nanoTime() - dwellStarted;
             int observed = health == null ? 0 : health.observedChannel();
+            if (health != null && !Objects.equals(channelFrequencyMhz(observed), health.observedFrequencyMhz())) {
+                observed = 0;
+            }
             return new RadioTelemetry(tunedChannel == 0 ? null : tunedChannel, observed == 0 ? null : observed,
                     tuning, successfulRetunes,
                     failedRetunes, successfulRetunes == 0 ? null : retuneNanos / (successfulRetunes * 1_000_000.0),
@@ -1044,13 +1167,14 @@ public final class PacketBridge implements AutoCloseable {
         });
         long nextBoundary = System.nanoTime() + tickNanos;
         Thread reader;
+        Thread diagnostics;
 
         Session(Process process, AdaptiveScanner scanner, CaptureHealth health, boolean watchAllowed) {
             this.process = process;
             this.scanner = scanner;
             this.health = health;
             this.watchAllowed = watchAllowed;
-            survey = watchAllowed && scanner != null ? new PassiveChannelSurvey(System.nanoTime(), tickNanos) : null;
+            survey = watchAllowed && scanner != null ? new PassiveChannelSurvey() : null;
             // Serialize commands and keep only the latest pending choice if iw is slow.
             retuner = scanner == null ? null : new ThreadPoolExecutor(1, 1, 0, TimeUnit.MILLISECONDS,
                     new ArrayBlockingQueue<>(1),
@@ -1064,7 +1188,7 @@ public final class PacketBridge implements AutoCloseable {
         final CaptureHealth health = new CaptureHealth();
         InputStream input;
         volatile long timestamp = -1;
-        String state = "RUNNING";
+        volatile String state = "RUNNING";
 
         Replay(String filename) { this.filename = filename; }
         long now() { return Math.max(0, timestamp); }

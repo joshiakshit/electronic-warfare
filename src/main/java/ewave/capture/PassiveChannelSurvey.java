@@ -2,37 +2,52 @@ package ewave.capture;
 
 import java.util.concurrent.TimeUnit;
 
-/** Reserves listening windows for channels the score-driven selector might skip. */
-final class PassiveChannelSurvey {
-    private static final long MIN_LISTEN_NANOS = TimeUnit.MILLISECONDS.toNanos(250);
-    private final long intervalNanos;
-    private long nextSurveyAt;
-    private long listenUntil;
+/** Receive-only discovery across channels 1..13. The owner serializes calls.
+ * Times are monotonic. Only confirmed tune completions and frames heard during
+ * that visit can extend the listening window.
+ */
+public final class PassiveChannelSurvey {
+    private static final long MIN_LISTEN = TimeUnit.MILLISECONDS.toNanos(100);
+    private static final long HIT_GRACE = TimeUnit.MILLISECONDS.toNanos(200);
+    private final long busyLimit;
+    private int channel;
     private int nextChannel = 1;
-    private int surveyChannel;
+    private long arrived, minimum, lastHit;
+    private boolean heard;
 
-    PassiveChannelSurvey(long now, long tickNanos) {
-        intervalNanos = Math.max(TimeUnit.SECONDS.toNanos(1), 2 * tickNanos);
-        nextSurveyAt = now + intervalNanos;
+    public PassiveChannelSurvey() {
+        this(1200);
     }
 
-    /** Returns zero when the normal score-based selection should run. */
-    int channel(long now) {
-        if (surveyChannel != 0 && now - listenUntil < 0) return surveyChannel;
-        surveyChannel = 0;
-        if (now - nextSurveyAt < 0) return 0;
-
-        surveyChannel = nextChannel;
-        nextChannel = nextChannel % 13 + 1;
-        nextSurveyAt = now + intervalNanos;
-        listenUntil = now + MIN_LISTEN_NANOS;
-        return surveyChannel;
+    /** Maximum busy dwell in milliseconds, for offline policy comparisons. */
+    public PassiveChannelSurvey(int busyLimitMs) {
+        if (busyLimitMs <= 0) throw new IllegalArgumentException("Expected positive busy dwell");
+        busyLimit = TimeUnit.MILLISECONDS.toNanos(busyLimitMs);
     }
 
-    /** A survey's listening time starts after tuning, even when the command runs slowly. */
-    void tuneFinished(long now, int channel, boolean succeeded) {
-        if (surveyChannel != channel) return;
-        if (succeeded) listenUntil = now + MIN_LISTEN_NANOS;
-        else surveyChannel = 0;
+    public int channel(long now) {
+        if (channel != 0) {
+            long dwell = now - arrived;
+            if (dwell < minimum || heard && now - lastHit < HIT_GRACE && dwell < busyLimit) {
+                return channel;
+            }
+        }
+        return nextChannel;
+    }
+
+    public void frame(long now, int observedChannel) {
+        if (channel == observedChannel) {
+            heard = true;
+            lastHit = now;
+        }
+    }
+
+    public void tuneFinished(long now, int requested, boolean succeeded, long elapsed) {
+        nextChannel = requested % 13 + 1;
+        channel = succeeded ? requested : 0;
+        arrived = now;
+        heard = false;
+        // Amortize a slow command, while bounding its impact on coverage.
+        minimum = Math.max(MIN_LISTEN, 2 * Math.min(elapsed, TimeUnit.MILLISECONDS.toNanos(250)));
     }
 }

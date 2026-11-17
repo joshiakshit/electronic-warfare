@@ -92,6 +92,14 @@ class BeaconFloodTest {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
         while (flood.status().running() && System.nanoTime() < deadline) Thread.sleep(10);
         assertFalse(flood.status().running());
+        assertNull(flood.status().error());
         assertTrue(flood.status().output().contains("exited"));
+
+        var failed = new BeaconFlood("wlo1", builder -> new ewave.fixtures.CompletedProcess("failed\n", 2));
+        failed.start("lab", 6, 100);
+        deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+        while (failed.status().running() && System.nanoTime() < deadline) Thread.sleep(10);
+        assertFalse(failed.status().running());
+        assertEquals("mdk4 exited with code 2", failed.status().error());
     }
 }

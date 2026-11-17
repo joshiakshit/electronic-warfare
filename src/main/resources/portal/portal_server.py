@@ -28,8 +28,9 @@ def main():
     parser.add_argument("--creds", required=True)
     args = parser.parse_args()
     try:
-        with open(args.creds, "w", encoding="utf-8"):
-            pass
+        fd = os.open(args.creds, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        os.close(fd)
+        os.chmod(args.creds, 0o600)
     except OSError:
         pass
     with open(os.path.join(args.root, "portal.html"), "rb") as portal_file:
@@ -61,10 +62,15 @@ def main():
             username = clean((form.get("username") or [""])[0])
             password = clean((form.get("password") or [""])[0])
             client = clean(self.client_address[0])
-            with open(args.creds, "a", encoding="utf-8") as log:
+            fd = os.open(args.creds, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            with os.fdopen(fd, "a", encoding="utf-8") as log:
                 log.write("%s\t%s\t%s\t%s\n" % (time.strftime("%Y-%m-%dT%H:%M:%S"), client,
                                                 username, password))
                 log.flush()
+            try:
+                os.chmod(args.creds, 0o600)
+            except OSError:
+                pass
             self.send_page(success)
 
         def log_message(self, fmt, *values):

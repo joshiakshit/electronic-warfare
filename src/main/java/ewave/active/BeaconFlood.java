@@ -5,13 +5,13 @@ import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CancellationException;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Pattern;
 
@@ -92,7 +92,8 @@ public final class BeaconFlood {
     }
 
     private Status launchMdk3(String ssid, int channel, int rate) throws IOException {
-        Path file = Files.createTempFile("ewave-beacon-", ".txt");
+        Path file = Files.createTempFile("ewave-beacon-", ".txt",
+                PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")));
         Files.writeString(file, ssid + System.lineSeparator(), StandardCharsets.UTF_8);
         ssidFile = file;
         tool = "mdk3";
@@ -128,6 +129,9 @@ public final class BeaconFlood {
         } finally {
             synchronized (this) {
                 if (process == source) {
+                    if (!terminated && !source.isAlive() && source.exitValue() != 0 && error == null) {
+                        error = tool + " exited with code " + source.exitValue();
+                    }
                     process = null;
                     running = false;
                     processes.remove(source);

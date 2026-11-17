@@ -31,7 +31,11 @@ public final class MonitorPcapReader {
     }
 
     static void readRecords(InputStream input, RecordConsumer consumer) throws IOException {
-        read(input, consumer, null, () -> false);
+        readRecords(input, consumer, () -> false);
+    }
+
+    static void readRecords(InputStream input, RecordConsumer consumer, BooleanSupplier stopping) throws IOException {
+        read(input, consumer, null, stopping);
     }
 
     /** Forwards complete records so a stop in the middle of a packet leaves a readable file. */
@@ -41,10 +45,15 @@ public final class MonitorPcapReader {
 
     private static void read(InputStream input, RecordConsumer consumer, OutputStream output, BooleanSupplier stopping)
             throws IOException {
-        byte[] header = input.readNBytes(24);
-        if (header.length == 0)
+        byte[] header = readBytes(input, 24, stopping);
+        if (header.length == 0) {
+            if (stopping.getAsBoolean()) return;
             throw new EOFException("No PCAP data received; check the capture interface and tcpdump permissions");
-        if (header.length < 24) throw new EOFException("Truncated PCAP header (" + header.length + " of 24 bytes)");
+        }
+        if (header.length < 24) {
+            if (stopping.getAsBoolean()) return;
+            throw new EOFException("Truncated PCAP header (" + header.length + " of 24 bytes)");
+        }
         int magic = ByteBuffer.wrap(header).getInt();
         boolean nanos = magic == 0xa1b23c4d || magic == 0x4d3cb2a1;
         ByteOrder order = switch (magic) {

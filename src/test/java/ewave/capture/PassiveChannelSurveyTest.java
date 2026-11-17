@@ -6,35 +6,42 @@ import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 class PassiveChannelSurveyTest {
-    @Test void revisitsEveryChannelEvenWhenScoreSelectionKeepsChoosingChannelOne() {
-        var survey = new PassiveChannelSurvey(0, MILLISECONDS.toNanos(500));
-        assertEquals(0, survey.channel(MILLISECONDS.toNanos(500)));
-        for (int visit = 1; visit <= 14; visit++) {
-            long start = MILLISECONDS.toNanos(1000L * visit);
-            int channel = (visit - 1) % 13 + 1;
-            assertEquals(channel, survey.channel(start));
-            survey.tuneFinished(start + MILLISECONDS.toNanos(40), channel, true);
-            assertEquals(0, survey.channel(start + MILLISECONDS.toNanos(500)));
+    private static long ms(int time) { return MILLISECONDS.toNanos(time); }
+
+    @Test void sweepsInOrderEvenWhenEveryChannelStaysBusy() {
+        var survey = new PassiveChannelSurvey();
+        int time = 0;
+        for (int visit = 0; visit < 26; visit++) {
+            int channel = visit % 13 + 1;
+            assertEquals(channel, survey.channel(ms(time)));
+            time += 25;
+            survey.tuneFinished(ms(time), channel, true, ms(25));
+            for (int elapsed = 0; elapsed < 1200; elapsed += 100) {
+                survey.frame(ms(time + elapsed), channel);
+                assertEquals(channel, survey.channel(ms(time + elapsed)));
+            }
+            time += 1200;
         }
     }
 
-    @Test void holdsTheChannelAfterASlowTuneAndMovesOnAfterFailure() {
-        var survey = new PassiveChannelSurvey(0, MILLISECONDS.toNanos(100));
-        assertEquals(1, survey.channel(MILLISECONDS.toNanos(1000)));
-        survey.tuneFinished(MILLISECONDS.toNanos(1850), 1, true);
-        assertEquals(1, survey.channel(MILLISECONDS.toNanos(2000)));
-        assertEquals(2, survey.channel(MILLISECONDS.toNanos(2100)));
-        survey.tuneFinished(MILLISECONDS.toNanos(2200), 2, false);
-        assertEquals(0, survey.channel(MILLISECONDS.toNanos(2300)));
-        assertEquals(3, survey.channel(MILLISECONDS.toNanos(3100)));
+    @Test void listensAfterCompletionAndMovesOnAfterFailure() {
+        var survey = new PassiveChannelSurvey();
+        survey.tuneFinished(ms(800), 13, true, ms(300));
+        assertEquals(13, survey.channel(ms(1299)));
+        assertEquals(1, survey.channel(ms(1300)));
+        survey.tuneFinished(ms(1700), 1, false, ms(400));
+        assertEquals(2, survey.channel(ms(1700)));
     }
 
-    @Test void leavesTimeForScoreBasedSelectionAtSlowTickRates() {
-        var survey = new PassiveChannelSurvey(0, MILLISECONDS.toNanos(2000));
-        assertEquals(0, survey.channel(MILLISECONDS.toNanos(2000)));
-        assertEquals(1, survey.channel(MILLISECONDS.toNanos(4000)));
-        survey.tuneFinished(MILLISECONDS.toNanos(4050), 1, true);
-        assertEquals(0, survey.channel(MILLISECONDS.toNanos(6000)));
-        assertEquals(2, survey.channel(MILLISECONDS.toNanos(8000)));
+    @Test void extendsOnlyForRecentActivityOnTheConfirmedChannel() {
+        var survey = new PassiveChannelSurvey();
+        survey.tuneFinished(0, 4, true, ms(25));
+        assertEquals(4, survey.channel(ms(99)));
+        survey.frame(ms(80), 4);
+        assertEquals(4, survey.channel(ms(279)));
+        survey.frame(ms(279), 3);
+        assertEquals(5, survey.channel(ms(280)));
+        survey.tuneFinished(ms(305), 5, true, ms(25));
+        assertEquals(6, survey.channel(ms(405)));
     }
 }

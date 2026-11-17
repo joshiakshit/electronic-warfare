@@ -92,8 +92,13 @@ class HandshakeAnalyzerTest {
                 var result = pending.get(3, TimeUnit.SECONDS);
                 assertFalse(result.handshakeDetected());
                 assertEquals(beaconSeen ? Outcome.PARTIAL : Outcome.TARGET_NOT_SEEN, result.outcome());
+                assertEquals(beaconSeen ? "Partial EAPOL exchange (2 of 4 messages)" : "Target AP beacon not seen",
+                        analyzer.status().stage());
                 assertEquals(beaconSeen ? List.of(2, 3) : List.of(), result.messages());
-                assertArrayEquals(HEADER, Files.readAllBytes(Path.of(result.capFilePath())));
+                Path capPath = Path.of(result.capFilePath());
+                assertArrayEquals(HEADER, Files.readAllBytes(capPath));
+                assertEquals("rw-------",
+                        java.nio.file.attribute.PosixFilePermissions.toString(Files.getPosixFilePermissions(capPath)));
             } finally { analyzer.terminate(); }
         }
     }

@@ -370,6 +370,152 @@ class PassiveRfCaptureTest {
                 PassiveCommandGuard.monitor("-bad"), "-bad"));
     }
 
+    @Test void ignoresSixGhzChannelOneInTwoFourGhzScannerWhilePreservingInventoryHealthAndFiveGhzReplay(@TempDir Path dir)
+            throws Exception {
+        var capture = new StreamingCaptureProcess();
+        var tunes = new LinkedBlockingQueue<List<String>>();
+        try (var wifi = new PacketBridge(builder -> {
+            if (builder.command().getFirst().equals("tcpdump")) return capture;
+            tunes.add(List.copyOf(builder.command()));
+            return new ewave.fixtures.CompletedProcess("", 0);
+        }, Map.of());
+             var server = new PassiveRfServer(wifi).start(0);
+             var client = HttpClient.newHttpClient()) {
+            var scanner = new AdaptiveScanner(AdaptiveScanner.Config.defaults(13, 128, 71));
+            wifi.startPassive("lab0mon", false, scanner);
+
+            byte[] sixGhz = beacon("001122334455", "SixGhz Lab");
+            ByteBuffer.wrap(sixGhz).order(ByteOrder.LITTLE_ENDIAN).putShort(8, (short) 5955);
+            capture.write(timedPcap(sixGhz));
+            await(() -> wifi.getCaptureHealth().decoded() == 1);
+
+            var mapper = new ObjectMapper();
+            var firstChannels = mapper.readTree(get(client, server, "/api/channels").body());
+            assertEquals(0L, firstChannels.path("counts").get(0).asLong());
+            assertTrue(firstChannels.at("/radio/lastObservedChannel").isNull());
+            assertTrue(firstChannels.at("/radio/coverage/0/lastFrameAtMs").isNull());
+            assertEquals(1, wifi.getPassiveWifi().inventory().size());
+            var sixHealth = wifi.getCaptureHealth();
+            assertEquals(5955, sixHealth.observedFrequencyMhz());
+            assertEquals(1, sixHealth.observedChannel());
+
+            byte[] twoFourGhz = beacon("001122334466", "TwoFourGhz Lab");
+            ByteBuffer.wrap(twoFourGhz).order(ByteOrder.LITTLE_ENDIAN).putShort(8, (short) 2412);
+            byte[] nextRecord = timedPcap(twoFourGhz);
+            capture.write(java.util.Arrays.copyOfRange(nextRecord, 24, nextRecord.length));
+            await(() -> wifi.getChannelSnapshot().scanner().counts()[0] == 1);
+
+            var secondChannels = mapper.readTree(get(client, server, "/api/channels").body());
+            assertEquals(1L, secondChannels.path("counts").get(0).asLong());
+            assertEquals(1, secondChannels.at("/radio/lastObservedChannel").asInt());
+            assertTrue(secondChannels.at("/radio/coverage/0/lastFrameAtMs").isNumber());
+
+            wifi.stop();
+            byte[] fiveGhz = beacon("001122334477", "FiveGhz Lab");
+            ByteBuffer.wrap(fiveGhz).order(ByteOrder.LITTLE_ENDIAN).putShort(8, (short) 5500);
+            Path fiveGhzPcap = dir.resolve("5ghz.pcap");
+            Files.write(fiveGhzPcap, timedPcap(fiveGhz));
+            wifi.startReplay(fiveGhzPcap);
+            await(() -> !wifi.isRunning());
+            assertEquals(5500, wifi.getCaptureHealth().observedFrequencyMhz());
+            assertEquals(100, wifi.getCaptureHealth().observedChannel());
+        }
+    }
+
+    @Test void enforcesOriginHandlesProfileErrorsClearsClientsOnScopeChangeAndStopsReplayCleanly(@TempDir Path temp)
+            throws Exception {
+        Path profileDir = Files.createDirectories(temp.resolve("cfg"));
+        Path profile = profileDir.resolve("my-network.json");
+        String previous = System.getProperty("rf.networkProfile");
+        System.setProperty("rf.networkProfile", profile.toString());
+        try {
+            // 1. Corrupt profile JSON fails cleanly over HTTP without uncaught crashes.
+            Files.writeString(profile, "{corrupt json");
+            try (var wifi = new PacketBridge();
+                 var server = new PassiveRfServer(wifi).start(0);
+                 var client = HttpClient.newHttpClient()) {
+                assertEquals(500, get(client, server, "/api/my-network").statusCode());
+                assertEquals(500, get(client, server, "/api/fingerprint-samples").statusCode());
+                var badOrigin = client.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + server.port() + "/api/my-network"))
+                        .header("Origin", "https://foreign.example").GET().build(), HttpResponse.BodyHandlers.ofString());
+                assertEquals(403, badOrigin.statusCode());
+            }
+
+            // 2. Old profile format without fingerprintSamples loads; failed save preserves usable state;
+            //    mid-session scope change clears previously observed client associations.
+            Files.writeString(profile, "{\"accessPoints\":[],\"devices\":[],\"restrictCapture\":false}");
+            var process = new StreamingCaptureProcess();
+            var mapper = new ObjectMapper();
+            try (var wifi = new PacketBridge(builder -> process, Map.of());
+                 var server = new PassiveRfServer(wifi).start(0);
+                 var client = HttpClient.newHttpClient()) {
+                wifi.startPassive("lab0mon");
+                byte[] home = beacon("001122334455", "Scope Home");
+                byte[] nearby = beacon("00aabbccddee", "Scope Nearby");
+                byte[] assoc = assocResponse("00aabbccddee", "021122334455");
+                byte[] initialPcap = timedPcap(home);
+                process.write(initialPcap);
+                byte[] rec2 = timedPcap(nearby);
+                byte[] rec3 = timedPcap(assoc);
+                process.write(java.util.Arrays.copyOfRange(rec2, 24, rec2.length));
+                process.write(java.util.Arrays.copyOfRange(rec3, 24, rec3.length));
+                await(() -> wifi.getPassiveWifi().observedClient(wifi.getPassiveWifi().addressId("02:11:22:33:44:55")) != null);
+                String clientToken = wifi.getPassiveWifi().addressId("02:11:22:33:44:55");
+
+                String homeToken = wifi.getPassiveWifi().addressId("00:11:22:33:44:55");
+                assertEquals(200, post(client, server, "/api/my-network",
+                        "{\"action\":\"save-ap\",\"observedId\":\"" + homeToken + "\",\"label\":\"My Home\"}").statusCode());
+                assertEquals(200, post(client, server, "/api/my-network",
+                        "{\"action\":\"scope\",\"restricted\":true}").statusCode());
+                assertNull(wifi.getPassiveWifi().observedClient(clientToken));
+
+                // Block directory writes to simulate save failure and confirm previous usable state remains.
+                Files.setPosixFilePermissions(profileDir, java.nio.file.attribute.PosixFilePermissions.fromString("r-x------"));
+                try {
+                    var failedSave = post(client, server, "/api/my-network",
+                            "{\"action\":\"scope\",\"restricted\":false}");
+                    assertEquals(500, failedSave.statusCode());
+                    assertFalse(mapper.readTree(failedSave.body()).path("error").asText().isBlank());
+                    var current = mapper.readTree(get(client, server, "/api/my-network").body());
+                    assertTrue(current.path("restrictCapture").asBoolean());
+                    assertEquals("My Home", current.at("/accessPoints/0/label").asText());
+                } finally {
+                    Files.setPosixFilePermissions(profileDir, java.nio.file.attribute.PosixFilePermissions.fromString("rwx------"));
+                }
+
+                // 3. Stopping replay mid-stream yields STOPPED state cleanly without error.
+                byte[] samplePacket = ProbeFrames.radiotap(ProbeFrames.frame("Bulk"));
+                byte[] oneRec = timedPcap(samplePacket);
+                byte[] recordOnly = java.util.Arrays.copyOfRange(oneRec, 24, oneRec.length);
+                Path bulkPcap = temp.resolve("bulk.pcap");
+                try (var out = Files.newOutputStream(bulkPcap)) {
+                    out.write(java.util.Arrays.copyOf(oneRec, 24));
+                    for (int i = 0; i < 60_000; i++) out.write(recordOnly);
+                }
+                wifi.stop();
+                wifi.startReplay(bulkPcap);
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+                while (wifi.getCaptureHealth().decoded() == 0 && System.nanoTime() < deadline) Thread.onSpinWait();
+                wifi.stop();
+                var stopped = wifi.getCaptureHealth();
+                assertFalse(wifi.isRunning());
+                assertEquals("STOPPED", stopped.replayState());
+                assertNull(stopped.error());
+            }
+        } finally {
+            restoreProperty("rf.networkProfile", previous);
+        }
+    }
+
+    private static byte[] assocResponse(String ap, String client) {
+        byte[] apMac = HexFormat.of().parseHex(ap), cliMac = HexFormat.of().parseHex(client);
+        var frame = ByteBuffer.allocate(30).order(ByteOrder.LITTLE_ENDIAN);
+        frame.putShort((short) 0x0010).putShort((short) 0)
+                .put(cliMac).put(apMac).put(apMac)
+                .putShort((short) 0x0010).putShort((short) 1).putShort((short) 0).putShort((short) 1);
+        return ProbeFrames.radiotap(frame.array());
+    }
+
     private static HttpResponse<String> get(HttpClient client, PassiveRfServer server, String path) throws Exception {
         var uri = URI.create("http://127.0.0.1:" + server.port() + path);
         return client.send(HttpRequest.newBuilder(uri).build(), HttpResponse.BodyHandlers.ofString());

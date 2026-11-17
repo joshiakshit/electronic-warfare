@@ -133,6 +133,24 @@ class DeviceProfilerTest {
         }
     }
 
+    @Test void boundsRetainedProfilesAndProbedSsidsAcrossManyTransmitters() {
+        var bounded = new DeviceProfiler(new OuiLookup(new ByteArrayInputStream(new byte[0])), 8);
+        assertEquals(8, bounded.profileLimit());
+        for (int i = 0; i < 20; i++) {
+            String src = String.format("02:11:22:33:44:%02x", i);
+            bounded.observe(new PacketEvent(src, MAC, 6, -59, 100, "WiFi", 1_000L + i, ""));
+        }
+        assertEquals(8, bounded.all().size());
+        assertEquals(12L, bounded.evictedCount());
+        assertNull(bounded.get("02:11:22:33:44:00"));
+        assertNotNull(bounded.get("02:11:22:33:44:13"));
+
+        for (int i = 0; i < DeviceProfiler.PROBED_SSID_LIMIT + 50; i++) {
+            bounded.observeProbe("02:aa:bb:cc:dd:ee", "Ssid-" + i);
+        }
+        assertEquals(DeviceProfiler.PROBED_SSID_LIMIT, bounded.get("02:aa:bb:cc:dd:ee").probedSsids().size());
+    }
+
     private static PacketEvent packet(double rssi, long timestamp) {
         return new PacketEvent(MAC, "00:11:22:33:44:55", 6, rssi, 100, "WiFi", timestamp, "");
     }

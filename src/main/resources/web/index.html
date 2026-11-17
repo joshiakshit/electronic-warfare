@@ -138,8 +138,8 @@
       <dl class="glossary">
         <dt>SSID / BSSID</dt><dd>An SSID is the network name people see. A BSSID is the radio’s address; the same name can have several.</dd>
         <dt>Probe request</dt><dd>A request a device broadcasts while looking for networks. It can name a network or ask for any nearby network.</dd>
-        <dt>RSSI</dt><dd>Received signal strength in dBm. Values closer to 0 are stronger: roughly −30 is very near, −90 is far or blocked.</dd>
-        <dt>Randomized address</dt><dd>A phone rotating its Wi-Fi address. The device can look new each time, and the vendor guess may be unknown.</dd>
+        <dt>RSSI</dt><dd>Received signal strength in dBm. Values closer to 0 are stronger: roughly −30 is very near, −90 is far or blocked. Distance estimates are rough hints only.</dd>
+        <dt>Randomized address</dt><dd>A locally administered Wi-Fi address (<code>[RND]</code>), commonly used for address rotation (not proof of rotation). The device can look new each time, and the vendor guess may be unknown.</dd>
         <dt>Channel</dt><dd>The 2.4 GHz slice being observed. Overlapping channels share airtime and interfere with each other.</dd>
         <dt>Frames/s, rejects, drops</dt><dd>Capture health metrics. Rejects are frames the decoder could not use; kernel drops are frames the radio missed.</dd>
         <dt>Confidence / period</dt><dd>How regular a channel’s activity looks and how confident the fit is. Repeated patterns score higher.</dd>
@@ -184,9 +184,9 @@
       <summary>How to read Devices</summary>
       <dl class="glossary compact">
         <dt>RSSI</dt><dd>Signal strength in dBm. Closer to 0 is stronger; distance is only a rough hint.</dd>
-        <dt>Randomized</dt><dd>The device rotated its Wi-Fi address, so the vendor may show as locally administered or unknown.</dd>
+        <dt>Randomized</dt><dd>Locally administered Wi-Fi address (<code>[RND]</code>), commonly used for MAC rotation (not proof of rotation); vendor shows as locally administered or unknown.</dd>
         <dt>Frames</dt><dd>Frames observed for this address. More frames make the profile and signal history more trustworthy.</dd>
-        <dt>Est. dist</dt><dd>An estimate from signal strength, not a measured distance.</dd>
+        <dt>Est. dist</dt><dd>An illustrative estimate from signal strength assuming fixed transmit power, not a measured distance.</dd>
       </dl>
     </details>
     <div class="stats" aria-label="Inventory totals">
@@ -283,7 +283,7 @@
       <summary>How to read the network map</summary>
       <dl class="glossary compact">
         <dt>Nodes</dt><dd>Access points are squares; clients use a shape for phone, laptop, or other Wi-Fi.</dd>
-        <dt>Lines</dt><dd>Observed traffic between a client and an AP. Weak or old evidence is drawn fainter.</dd>
+        <dt>Lines</dt><dd>Observed association responses or qualifying data traffic between a client and an AP. Weak or old evidence is drawn fainter; an AP’s advertised station count can differ from observed links.</dd>
         <dt>Hidden names</dt><dd>Beacons without a name, and later frames that reveal it. Evidence is shown with its source.</dd>
       </dl>
     </details>
@@ -325,8 +325,9 @@
     <details class="view-help">
       <summary>How to read Capture health</summary>
       <dl class="glossary compact">
-        <dt>Frames received</dt><dd>Frames decoded in this capture. Zero usually means the radio, interface, or permissions need attention.</dd>
-        <dt>Decoder rejects / kernel drops</dt><dd>Frames the decoder could not use, and frames the kernel discarded before decoding.</dd>
+        <dt>Frames received</dt><dd>Cumulative PCAP records received across all frame types in this session. Compare with <b>Successfully decoded</b> in the breakdown to see how many frames were usable.</dd>
+        <dt>Frames / sec</dt><dd>Recent reception rate over the trailing 10-second window (or the final 10 capture seconds in offline replay), while frame counts are cumulative.</dd>
+        <dt>Decoder rejects / kernel drops</dt><dd>Malformed frames rejected by the decoder, and frames the kernel reported dropping before capture. Kernel drops show as <b>Unknown</b> in offline replay or until <code>tcpdump</code> reports statistics.</dd>
         <dt>Capture readiness</dt><dd>Adapter mode, interface, and recent reception checks. An address on the interface does not guarantee monitor mode.</dd>
       </dl>
     </details>
@@ -339,8 +340,8 @@
     </article>
     <div id="health-metrics" hidden>
       <div class="stats" aria-label="Capture health totals">
-        <div class="panel"><span>Frames received</span><strong id="health-total">—</strong></div>
-        <div class="panel"><span>Frames per second</span><strong id="health-fps">—</strong></div>
+        <div class="panel"><span>Frames received (total)</span><strong id="health-total">—</strong></div>
+        <div class="panel"><span id="health-fps-label">Frames / sec (last 10 s)</span><strong id="health-fps">—</strong></div>
         <div class="panel"><span>Decoder rejects</span><strong id="health-rejects">—</strong></div>
         <div class="panel"><span>Kernel drops</span><strong id="health-drops">—</strong></div>
       </div>
@@ -351,7 +352,7 @@
         </article>
         <article class="panel">
           <header><h2>Frame breakdown</h2><span id="health-window" class="caption"></span></header>
-          <div class="table-wrap"><table><thead><tr><th>Frame type</th><th>Count</th><th>Frames / sec</th></tr></thead>
+          <div class="table-wrap"><table><thead><tr><th>Frame type</th><th>Total count</th><th id="health-rate-col">Frames / sec (last 10 s)</th></tr></thead>
             <tbody id="health-frames"></tbody></table></div>
           <div class="body"><dl id="health-decoder" class="facts"></dl>
             <p class="caption">Live capture filters for management and data. Replay counts every frame type present in the file.</p></div>
@@ -373,7 +374,7 @@
     <details class="view-help">
       <summary>How to read Spectrum</summary>
       <dl class="glossary compact">
-        <dt>Channel score</dt><dd>Expected activity and fit quality combined. It steers adaptive tuning; it is not a quality rating for your network.</dd>
+        <dt>Channel score</dt><dd>Estimated activity and uncertainty from receiver observations. Passive discovery extends a visit when the receiver hears frames.</dd>
         <dt>Period fit</dt><dd>How regular a channel’s activity looks. Confidence rises when the pattern repeats.</dd>
         <dt>Dwell</dt><dd>Time actually spent listening on a channel, excluding retune time and unconfirmed intervals.</dd>
         <dt>Alerts</dt><dd>Changes such as new activity or a broken period. Treat them as prompts to inspect, not conclusions.</dd>
@@ -530,7 +531,7 @@
 
   <section id="ops" class="view" hidden>
     <h1>Lab ops</h1>
-    <p class="view-lede">Authorized lab actions. This page is disabled unless ewave was launched with <code>--ops</code>; every operation here can transmit frames.</p>
+    <p class="view-lede">Authorized lab actions. Passive RF and replay disable this page unless launched with <code>--passive-rf --ops</code>; the standard live launcher also enables it. Every operation here can transmit frames.</p>
     <details class="view-help">
       <summary>How to use Lab ops safely</summary>
       <dl class="glossary compact">
@@ -539,7 +540,7 @@
         <dt>Console</dt><dd>Live output from the helper process. Stop every operation before changing interfaces or shutting down.</dd>
       </dl>
     </details>
-    <p id="ops-notice" class="banner amber" hidden>Lab operations are disabled. Launch with <code>--ops</code> alongside <code>--passive-rf</code> to enable them.</p>
+    <p id="ops-notice" class="banner amber" hidden>Lab operations are disabled. Launch with <code>--passive-rf --ops</code> to enable them.</p>
     <div class="ops-grid">
       <article class="panel">
         <header><h2>Targets</h2></header>
@@ -596,6 +597,7 @@
           <label>Monitor interface<input id="pmkid-interface" value="wlo1" required></label>
           <label>Wordlist path<input id="pmkid-wordlist" value="/usr/share/wordlists/rockyou.txt" required spellcheck="false"></label>
           <div class="controls"><button class="primary" type="submit">Start PMKID capture</button><button type="button" data-stop>Stop</button></div>
+          <p class="caption">Runs <code>hcxdumptool</code> on the monitor interface without a target BSSID filter; only interface and duration bound the capture.</p>
           <p id="pmkid-status" class="op-status" role="status">Idle</p>
           <p id="pmkid-result" class="caption" role="status"></p>
         </form>
@@ -614,6 +616,7 @@
           <label>Channel<input id="evil-twin-channel" type="number" min="1" max="233" value="6" required></label>
           <label>Portal port<input id="evil-twin-port" type="number" min="1" max="65535" value="80" required></label>
           <div class="controls"><button class="primary" type="submit">Start evil twin</button><button type="button" data-stop>Stop</button></div>
+          <p class="caption">Starts open-AP <code>hostapd</code>, <code>dnsmasq</code> (proposing gateway <code>10.0.0.1</code>), and the Python portal (binding <code>0.0.0.0</code>, logging to <code>/tmp/ewave-portal-creds.txt</code>). Pre-configure <code>10.0.0.1/24</code> on the AP interface in the lab.</p>
           <p id="evil-twin-status" class="op-status" role="status">Idle</p>
           <p id="evil-twin-portal" class="caption"></p>
           <div class="table-wrap" tabindex="0" role="region" aria-label="Captured portal credentials">

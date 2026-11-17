@@ -97,7 +97,11 @@ window.EwaveGraph = (() => {
         const limit = expanded.get(ap.bssid) || clientsPerGroup;
         const visible = members.slice(0, limit);
         const slots = Math.min(6, Math.max(3, Math.floor((lane - 20) / 64)));
-        headings.push({ key: ap.bssid, x: center, y: apY + 49, text: members.length + ' observed clients' });
+        headings.push({
+          key: ap.bssid, x: center, y: apY + 49,
+          text: members.length + ' observed ' + (members.length === 1 ? 'client' : 'clients')
+            + (ap.stationCount != null ? ' · ' + ap.stationCount + ' advertised' : '')
+        });
 
         visible.forEach((edge, index) => {
           const col = index % slots;

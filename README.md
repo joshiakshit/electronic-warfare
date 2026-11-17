@@ -97,12 +97,14 @@ beacons and a named response from one of those access points.
 Open **Spectrum** and select **Run comparison**. This works in offline replay
 with the bundled JAR. All three policies start on channel 6 and receive the same
 12-second scripted scenario, with frame bursts on channels 6, 11, and 1.
-The adaptive run uses the scanner's scoring model with a fixed seed and a
-simulated 25 ms channel-change delay. Round-robin advances one channel per
+The adaptive run uses the live passive discovery policy and a simulated
+25 ms channel-change delay. Round-robin advances one channel per
 100 ms tick with the same retune cost. The fixed run stays on channel 6.
 Compare the first captured frame per burst, listening time, and missed frames.
 The missed-frame counts come from the fixture's known transmissions.
 **Compare listening policies** in Probe Lab opens this separate benchmark.
+See the [offline evaluation](tools/passive-scanner.md) for the before-and-after
+results, per-burst delays, and commands to repeat the experiments.
 
 ### Repeat the comparison on a lab radio
 
@@ -145,10 +147,11 @@ channels where the radio confirmed a tune and no newer frame was decoded.
 The router's channel changes are a hardware analogue of the scripted
 bursts. The fixture delay is a model input, while the live dashboard
 reports elapsed time for successful tune commands. Live passive adaptive mode
-also revisits channels 1–13 in order. A survey starts about once per second
-at the default tick rate and listens for at least 250 ms after a successful
-tune. The scores steer the receiver between surveys. Slower ticks and
-retune delays can lengthen the sweep. Stop each trial with Ctrl+C.
+visits channels 1–13 in order. After tuning, it listens for at least 100 ms
+and gives slower tune commands a longer minimum dwell (up to 500 ms).
+Recent decoded frames extend the visit up to 1.2 seconds, checked at the
+next timer tick. The Spectrum view still displays model scores. Slower
+ticks and retune delays can lengthen the sweep. Stop each trial with Ctrl+C.
 
 ## Live capture
 
@@ -166,15 +169,22 @@ java -jar target/ewave-0.1.0-SNAPSHOT.jar --passive-rf --iface wlo1
 
 | Mode | Arguments after the JAR path |
 | --- | --- |
-| Wi-Fi summary and spectrum | `--iface wlo1` |
+| Wi-Fi summary and spectrum (with Ops) | `--iface wlo1` |
 | Passive Wi-Fi inventory and probe audit | `--passive-rf --iface wlo1` |
 | Live device inventory and adaptive Spectrum on a monitor interface | `--passive-rf --adaptive --iface wlo1` |
+| Passive Wi-Fi with authorized lab operations | `--passive-rf --ops --iface wlo1` |
+| Text probe-request stream (with Ops) on a monitor interface | `--probes --iface wlo1` |
+| Offline 802.11 PCAP replay | `--replay <file>` |
 
 Wi-Fi summary mode uses the current interface configuration and requests 2.4 GHz
 channel changes through `sudo iw` as the adaptive scanner selects channels.
-Run the JAR with `--help` for all launcher options. Passive RF mode disables lab operations
-by default. The standard live launcher enables the Ops controls. Use these
-controls only on networks and devices you are authorized to test.
+Run the JAR with `--help` for all launcher options. Passive RF and replay modes
+disable lab operations by default (`--passive-rf --ops` enables them on passive
+monitor capture), while the standard live and `--probes` modes enable the Ops
+controls. Contradictory mode flag combinations (such as `--probes --passive-rf`,
+`--probes --adaptive`, `--adaptive --ops`, or `--replay --iface`) fail before
+capture starts. Use these controls only on networks and devices you are
+authorized to test.
 
 ### Restoring networking after a live session
 
@@ -233,7 +243,7 @@ default build, package from a fresh checkout.
 | `src/main/java/ewave/` | Launcher, scanner, capture, decoders, device profiling, lab operations, and HTTP server |
 | `src/main/resources/` | Dashboard assets and classification rules |
 | `src/test/` | Java tests and checked-in synthetic and numerical fixtures |
-| `tools/` | Numerical comparison tools |
+| `tools/` | Offline benchmarks, scanner trials, and their results |
 
 ## Development
 

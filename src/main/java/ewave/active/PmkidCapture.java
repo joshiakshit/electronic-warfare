@@ -5,6 +5,7 @@ import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Instant;
 import java.util.HashSet;
 import java.util.HexFormat;
@@ -73,6 +74,8 @@ public final class PmkidCapture {
         String command = "";
         try {
             Files.createDirectories(captureDir);
+            try { Files.setPosixFilePermissions(captureDir, PosixFilePermissions.fromString("rwx------")); }
+            catch (UnsupportedOperationException ignored) { /* Non-POSIX filesystem. */ }
             pcapng = Files.createTempFile(captureDir, "pmkid-", ".pcapng");
             Files.deleteIfExists(pcapng);
             hash = captureDir.resolve(pcapng.getFileName().toString().replaceFirst("\\.pcapng$", "") + ".22000");
@@ -91,6 +94,9 @@ public final class PmkidCapture {
             }
             captureReader.join(1_000);
             checkCancelled();
+            if (captured && capture.exitValue() != 0 && (!Files.exists(pcapng) || Files.size(pcapng) == 0)) {
+                throw new IOException("PMKID capture failed (exit " + capture.exitValue() + "): " + outputText().strip());
+            }
             if (!Files.exists(pcapng) || Files.size(pcapng) == 0) {
                 stage = "Capture complete";
                 return result(false, false, null, pcapng, hash, command);
@@ -108,6 +114,9 @@ public final class PmkidCapture {
             }
             convertReader.join(1_000);
             checkCancelled();
+            if (convert.exitValue() != 0 && (!Files.exists(hash) || Files.size(hash) == 0)) {
+                throw new IOException("PMKID conversion failed (exit " + convert.exitValue() + "): " + outputText().strip());
+            }
             if (!Files.exists(hash) || Files.size(hash) == 0) {
                 stage = "Capture complete";
                 return result(false, false, null, pcapng, hash, command);

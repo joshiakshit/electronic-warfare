@@ -6,6 +6,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.util.ArrayDeque;
 import java.util.HashSet;
 import java.util.List;
@@ -79,6 +80,7 @@ public final class EvilTwin {
         if (!used.compareAndSet(false, true)) throw new IllegalStateException("This evil twin has already been used");
         try {
             Files.createDirectories(workDir);
+            setPermissions(workDir, "rwx------");
             Files.createDirectories(credentialsFile.getParent());
             try { Files.deleteIfExists(credentialsFile); }
             catch (IOException ignored) {
@@ -161,7 +163,8 @@ public final class EvilTwin {
 
     private void writeHostapdConfig() throws IOException {
         String mode = channel <= 14 ? "g" : "a";
-        Files.writeString(workDir.resolve("hostapd.conf"), String.join("\n",
+        Path path = workDir.resolve("hostapd.conf");
+        Files.writeString(path, String.join("\n",
                 "interface=" + apInterface,
                 "driver=nl80211",
                 "ssid=" + ssid,
@@ -171,10 +174,12 @@ public final class EvilTwin {
                 "wmm_enabled=1",
                 "ignore_broadcast_ssid=0",
                 ""), StandardCharsets.UTF_8);
+        setPermissions(path, "rw-------");
     }
 
     private void writeDnsmasqConfig() throws IOException {
-        Files.writeString(workDir.resolve("dnsmasq.conf"), String.join("\n",
+        Path path = workDir.resolve("dnsmasq.conf");
+        Files.writeString(path, String.join("\n",
                 "interface=" + apInterface,
                 "bind-interfaces",
                 "dhcp-range=10.0.0.10,10.0.0.100,12h",
@@ -186,6 +191,13 @@ public final class EvilTwin {
                 "log-queries",
                 "log-dhcp",
                 ""), StandardCharsets.UTF_8);
+        setPermissions(path, "rw-------");
+    }
+
+    private static void setPermissions(Path path, String mode) throws IOException {
+        try {
+            Files.setPosixFilePermissions(path, PosixFilePermissions.fromString(mode));
+        } catch (UnsupportedOperationException ignored) { /* Non-POSIX filesystem. */ }
     }
 
     private Process launch(List<String> command) throws IOException {

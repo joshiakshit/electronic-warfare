@@ -2,6 +2,7 @@ package ewave.capture;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import ewave.Ewave;
 import ewave.core.AdaptiveScanner;
 import ewave.fixtures.StreamingCaptureProcess;
 import ewave.model.DeviceRecord;
@@ -17,7 +18,10 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Instant;
+import org.junit.jupiter.api.io.TempDir;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -68,8 +72,8 @@ class ConsolidatedServerTest {
             assertEquals(6, demo.path("fixedChannel").asInt());
             assertEquals(0, demo.at("/fixed/detections/0/delayMs").asInt(-1));
             assertTrue(demo.at("/fixed/detections/1/delayMs").isNull());
-            assertEquals(1350, demo.at("/adaptive/detections/1/delayMs").asInt());
-            assertEquals(950, demo.at("/adaptive/detections/2/delayMs").asInt());
+            assertEquals(50, demo.at("/adaptive/detections/1/delayMs").asInt());
+            assertEquals(850, demo.at("/adaptive/detections/2/delayMs").asInt());
             assertEquals(450, demo.at("/roundRobin/detections/1/delayMs").asInt());
             assertEquals(1150, demo.at("/roundRobin/detections/2/delayMs").asInt());
             assertEquals(13, demo.at("/roundRobin/channelsVisited").asInt());
@@ -237,6 +241,73 @@ class ConsolidatedServerTest {
             } finally {
                 socket.abort();
             }
+        }
+    }
+
+    @Test void parsesLaunchModesRejectsContradictoryFlagsAndDispatchesExpectedCommands(@TempDir Path dir) throws Exception {
+        assertEquals(new Ewave.LaunchPlan(Ewave.Mode.HELP, "wlo1", 7070, 13, 100, false, false, null),
+                Ewave.parse("--help"));
+        assertEquals(new Ewave.LaunchPlan(Ewave.Mode.PACKETS, "wlo1", 7070, 13, 100, true, true, null),
+                Ewave.parse());
+        assertEquals(new Ewave.LaunchPlan(Ewave.Mode.PROBES, "mon0", 7070, 13, 100, false, true, null),
+                Ewave.parse("--probes", "--iface", "mon0"));
+        assertEquals(new Ewave.LaunchPlan(Ewave.Mode.PASSIVE_RF, "mon0", 7070, 13, 100, false, false, null),
+                Ewave.parse("--passive-rf", "--iface", "mon0"));
+        assertEquals(new Ewave.LaunchPlan(Ewave.Mode.PASSIVE_RF, "mon0", 7070, 13, 100, true, false, null),
+                Ewave.parse("--passive-rf", "--adaptive", "--iface", "mon0"));
+        assertEquals(new Ewave.LaunchPlan(Ewave.Mode.PASSIVE_RF, "mon0", 7070, 13, 100, false, true, null),
+                Ewave.parse("--passive-rf", "--ops", "--iface", "mon0"));
+        assertEquals(new Ewave.LaunchPlan(Ewave.Mode.REPLAY, "wlo1", 7070, 13, 100, false, false, Path.of("sample.pcap")),
+                Ewave.parse("--replay", "sample.pcap"));
+
+        for (String[] invalid : List.of(
+                new String[]{"--probes", "--passive-rf"},
+                new String[]{"--probes", "--adaptive", "--passive-rf"},
+                new String[]{"--probes", "--ops"},
+                new String[]{"--replay", "sample.pcap", "--passive-rf"},
+                new String[]{"--replay", "sample.pcap", "--iface", "wlo1"},
+                new String[]{"--replay", "sample.pcap", "--probes"},
+                new String[]{"--adaptive"},
+                new String[]{"--ops"},
+                new String[]{"--passive-rf", "--adaptive", "--ops"},
+                new String[]{"--bands", "12"},
+                new String[]{"--tick-ms", "5"},
+                new String[]{"--tick-ms", "2001"},
+                new String[]{"--port", "70000"},
+                new String[]{"--iface", "  "},
+                new String[]{"--unknown"}
+        )) {
+            assertThrows(IllegalArgumentException.class, () -> Ewave.parse(invalid), String.join(" ", invalid));
+        }
+
+        List<List<String>> launched = new java.util.concurrent.CopyOnWriteArrayList<>();
+        try (var bridge = new PacketBridge(builder -> {
+            launched.add(List.copyOf(builder.command()));
+            return new StreamingCaptureProcess();
+        }, Map.of())) {
+            Ewave.startCapture(Ewave.parse("--probes", "--iface", "mon0"), bridge);
+            assertEquals(List.of("sudo", "tcpdump", "-i", "mon0", "-e", "-l", "-s", "256", "type mgt subtype probe-req"),
+                    launched.getFirst());
+            bridge.stop();
+            launched.clear();
+
+            Ewave.startCapture(Ewave.parse("--passive-rf", "--iface", "mon0"), bridge);
+            assertTrue(launched.stream().anyMatch(cmd -> cmd.getFirst().equals("tcpdump") && cmd.contains("IEEE802_11_RADIO")),
+                    () -> "Launched: " + launched);
+            bridge.stop();
+            launched.clear();
+
+            Ewave.startCapture(Ewave.parse("--iface", "mon0"), bridge);
+            assertTrue(launched.stream().anyMatch(cmd -> cmd.equals(List.of("tcpdump", "-i", "mon0", "-e", "-l", "-n", "-tt"))),
+                    () -> "Launched: " + launched);
+            bridge.stop();
+            launched.clear();
+
+            Path tempPcap = dir.resolve("cli-replay.pcap");
+            byte[] header = ewave.fixtures.ProbeFrames.pcap(java.nio.ByteOrder.LITTLE_ENDIAN, false, 127);
+            Files.write(tempPcap, header);
+            Ewave.startCapture(Ewave.parse("--replay", tempPcap.toString()), bridge);
+            assertTrue(launched.isEmpty());
         }
     }
 

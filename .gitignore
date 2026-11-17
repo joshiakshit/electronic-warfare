@@ -9,6 +9,7 @@ __pycache__/
 # IDE and editor files
 .vscode/
 .idea/
+*.iml
 *.swp
 *.swo
 *~
@@ -34,6 +35,19 @@ logs/
 .env
 .env.*
 !.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+.aws/
+.ssh/
+
+# Local profiling, logs, and machine-specific audit notes
+*.jfr
+*.hprof
+*.log
+/tools/stabilization-report.md
+/docs/SET-LAB-REVIEW.md
 
 # Synthetic capture fixtures used by tests and offline replay
 !/src/test/resources/probes/probe-requests.pcap
