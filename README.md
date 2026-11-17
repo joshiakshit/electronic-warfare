@@ -7,6 +7,38 @@ to loopback.
 
 ## Quick start
 
+The repository includes a single launcher. Install JDK 21 or newer and Maven,
+then run:
+
+```sh
+./ewave                     # Build if needed, then open the offline demo
+./ewave replay capture.pcap # Replay your own classic 802.11 PCAP
+./ewave doctor              # Report dependencies and wireless interfaces
+./ewave live wlan0mon       # Passive capture on a prepared monitor interface
+./ewave live wlan0mon --adaptive # Add 2.4 GHz channel hopping
+```
+
+Open the loopback URL printed at startup; press Ctrl+C to stop. Add `--port 0`
+to choose an available port. Live capture requires Linux, `tcpdump`, capture
+permissions, and a monitor-capable adapter already configured in monitor mode.
+Channel hopping also requires `iw` and permission to run `sudo iw`. The launcher
+does not install tools or change the adapter mode. `doctor` reports tool
+availability; it does not verify capture permissions or successful reception.
+
+The launcher runs `mvn package` when the JAR is missing or source files are newer.
+An up-to-date build needs only Java to replay. Use `./ewave build` to force a
+build, or `./ewave --help` for shortcuts and advanced flag passthrough. For
+example, `./ewave --probes --iface wlan0mon` retains the text probe mode and
+`./ewave live wlan0mon --ops` enables authorized lab operations.
+
+To mask network names in replay:
+
+```sh
+JAVA_TOOL_OPTIONS=-Daudit.revealSsids=false ./ewave replay capture.pcap
+```
+
+You can also build and run the JAR directly:
+
 Install Java 21 or newer and Maven, then build the runnable JAR.
 
 ```sh

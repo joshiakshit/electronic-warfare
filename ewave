@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+JAR="$ROOT/target/ewave-0.1.0-SNAPSHOT.jar"
+
+die() { printf 'ewave: %s\n' "$*" >&2; exit 1; }
+
+help() {
+    cat <<'EOF'
+Usage: ./ewave [demo|replay FILE|live INTERFACE|doctor|build] [launcher options]
+
+  demo              Replay the bundled example (also the default).
+  replay FILE       Open a classic 802.11 PCAP in the dashboard.
+  live INTERFACE    Passive capture on a prepared monitor interface.
+                    Add --adaptive for channel hopping or --ops for lab Ops.
+  doctor            Report build and capture dependencies; change nothing.
+  build             Build the runnable JAR and run tests.
+  --help            Show this help.
+
+Other Java launcher flags can be passed directly, e.g.:
+  ./ewave --probes --iface wlan0mon
+  ./ewave --iface wlan0
+
+Builds automatically when the JAR is missing or sources have changed.
+Dashboard port defaults to 7070; add --port 0 for an available port.
+Replay names can be masked with JAVA_TOOL_OPTIONS=-Daudit.revealSsids=false.
+EOF
+}
+
+check_java() {
+    command -v java >/dev/null 2>&1 || die 'Java 21 or newer is required.'
+    local version major
+    version=$(java -version 2>&1) || die 'Unable to run Java.'
+    major=$(printf '%s\n' "$version" | sed -nE 's/.*version "([0-9]+).*/\1/p' | head -n 1)
+    [[ "$major" =~ ^[0-9]+$ ]] && (( major >= 21 )) || die 'Java 21 or newer is required.'
+}
+
+build() {
+    check_java
+    local compiler=javac compilerVersion compilerMajor
+    if [[ -n "${JAVA_HOME:-}" ]]; then compiler="$JAVA_HOME/bin/javac"; fi
+    compilerVersion=$("$compiler" -version 2>&1) || die 'Building requires a full JDK 21+. Set JAVA_HOME to its directory and add its bin directory to PATH.'
+    compilerMajor=$(printf '%s\n' "$compilerVersion" | sed -nE 's/^javac ([0-9]+).*/\1/p')
+    [[ "$compilerMajor" =~ ^[0-9]+$ ]] && (( compilerMajor >= 21 )) || die 'Building requires JDK 21 or newer. Check JAVA_HOME and PATH.'
+    command -v mvn >/dev/null 2>&1 || die 'Maven is required to build. Install Maven, then rerun this command.'
+    (cd "$ROOT" && mvn package)
+}
+
+mode=${1:-demo}
+if (( $# )); then shift; fi
+case "$mode" in
+    help|--help|-h) help; exit 0 ;;
+    doctor)
+        printf 'Java: '; if (check_java); then java -version 2>&1 | head -n 1; fi
+        printf 'OS: %s (live capture requires Linux)\n' "$(uname -s)"
+        for tool in mvn javac tcpdump iw sudo; do
+            if command -v "$tool" >/dev/null 2>&1; then
+                printf 'Available: %s\n' "$tool"
+            else
+                printf 'Missing: %s\n' "$tool"
+            fi
+        done
+        printf 'Build: JDK 21+ and Maven. Replay: Java 21+. Live: Linux, tcpdump, capture permissions.\n'
+        printf 'Monitor mode must be prepared separately; channel hopping also requires sudo iw.\n'
+        if command -v iw >/dev/null 2>&1; then
+            iw dev || printf 'Could not inspect wireless interfaces in this environment.\n'
+        fi
+        exit 0 ;;
+    build)
+        (( $# == 0 )) || die 'Usage: ./ewave build'
+        build; exit 0 ;;
+    demo)
+        args=(--replay "$ROOT/src/test/resources/probes/probe-requests.pcap" "$@") ;;
+    replay)
+        (( $# )) || die 'Usage: ./ewave replay FILE [launcher options]'
+        [[ -f "$1" && -r "$1" ]] || die "Replay file is not readable: $1"
+        args=(--replay "$1"); shift; args+=("$@") ;;
+    live)
+        (( $# )) && [[ "$1" != -* ]] || die 'Usage: ./ewave live INTERFACE [--adaptive | --ops] [launcher options]'
+        args=(--passive-rf --iface "$1"); shift; args+=("$@") ;;
+    --*) args=("$mode" "$@") ;;
+    *) die "Unknown command: $mode. Run ./ewave --help." ;;
+esac
+
+check_java
+offline=false
+for arg in "${args[@]}"; do
+    if [[ "$arg" == --replay ]]; then offline=true; fi
+done
+if [[ "$offline" == false ]]; then
+    [[ "$(uname -s)" == Linux ]] || die 'Live capture requires Linux. Use ./ewave demo for offline replay.'
+    command -v tcpdump >/dev/null 2>&1 || die 'Live capture requires tcpdump on PATH. Run ./ewave doctor.'
+fi
+
+if [[ ! -f "$JAR" ]] || [[ "$ROOT/pom.xml" -nt "$JAR" ]] ||
+    [[ -n "$(find "$ROOT/src" -type f -newer "$JAR" -print -quit 2>/dev/null)" ]]; then
+    build
+fi
+exec java -jar "$JAR" "${args[@]}"
