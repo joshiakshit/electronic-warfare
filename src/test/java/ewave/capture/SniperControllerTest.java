@@ -1,0 +1,254 @@
+package ewave.capture;
+
+import ewave.core.AdaptiveScanner;
+import ewave.decoder.Dot11Frame;
+import ewave.decoder.Dot11InformationElements;
+import ewave.fixtures.CompletedProcess;
+import ewave.fixtures.ProbeFrames;
+import ewave.fixtures.StreamingCaptureProcess;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BooleanSupplier;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+@Timeout(15)
+class SniperControllerTest {
+    private static final String AP1 = "00:11:22:33:44:55";
+    private static final String AP2 = "00:11:22:33:44:66";
+    private static final int PCAP_HEADER_BYTES = 24;
+
+    @Test void completesFullInitialSweepBeforeAutoLockingSoleMatchAndPromptsWhenMultipleMatch() {
+        var mono = new AtomicLong(1_000_000_000L);
+        var wall = new AtomicLong(10_000L);
+        var sniper = new SniperController(mono::get, wall::get);
+
+        byte[] ssid = "ewave lab".getBytes(StandardCharsets.UTF_8);
+        sniper.startBySsid(ssid, "ewave lab");
+        assertEquals(SniperController.State.SEARCHING, sniper.state());
+        assertTrue(sniper.needsSweep());
+        assertNull(sniper.desiredFrequencyMhz());
+
+        // Hearing one matching AP on channel 1 must NOT lock before all 13 channels are swept.
+        sniper.observeFrame(beacon(AP1, ssid, 1, 2412, 100, wall.get()), "ap-1", AP1, ssid, "ewave lab");
+        for (int ch = 1; ch <= 12; ch++) {
+            sniper.sweepChannelFinished(ch);
+            assertEquals(SniperController.State.SEARCHING, sniper.state(), "Locked too early on channel " + ch);
+        }
+        sniper.sweepChannelFinished(13);
+        var locked = sniper.snapshot();
+        assertEquals(SniperController.State.LOCKED, locked.state());
+        assertEquals("ap-1", locked.lockedApId());
+        assertEquals(1, locked.lockedChannel());
+        assertEquals(2412, locked.lockedFrequencyMhz());
+        assertTrue(locked.initialSweepComplete());
+
+        // When two BSSIDs advertise the same SSID across channels, sweep finishes and enters SELECTING.
+        sniper.startBySsid(ssid, "ewave lab");
+        sniper.observeFrame(beacon(AP1, ssid, 1, 2412, 100, wall.get()), "ap-1", AP1, ssid, "ewave lab");
+        sniper.observeFrame(beacon(AP2, ssid, 11, 2462, 100, wall.get()), "ap-2", AP2, ssid, "ewave lab");
+        for (int ch = 1; ch <= 13; ch++) sniper.sweepChannelFinished(ch);
+        var selecting = sniper.snapshot();
+        assertEquals(SniperController.State.SELECTING, selecting.state());
+        assertFalse(sniper.needsSweep());
+        assertEquals(2, selecting.candidates().size());
+
+        var chosen = sniper.selectCandidate("ap-2");
+        assertEquals(SniperController.State.LOCKED, chosen.state());
+        assertEquals("ap-2", chosen.lockedApId());
+        assertEquals(11, chosen.lockedChannel());
+        assertEquals(2462, chosen.lockedFrequencyMhz());
+    }
+
+    @Test void convertsBeaconIntervalTuSuspendsSilenceDuringOpsAndReacquiresSameOrMovedChannel() {
+        var mono = new AtomicLong(0L);
+        var wall = new AtomicLong(1_000L);
+        var sniper = new SniperController(mono::get, wall::get);
+
+        // 300 TU * 20 * 1.024 ms = 6144 ms (> 3000 ms floor).
+        assertEquals(TimeUnit.MICROSECONDS.toNanos(6_144_000L), SniperController.silenceThresholdNanos(300));
+        assertEquals(TimeUnit.MILLISECONDS.toNanos(3_000L), SniperController.silenceThresholdNanos(100));
+
+        byte[] ssid = "ewave lab".getBytes(StandardCharsets.UTF_8);
+        sniper.startByAp("ap-1", AP1, ssid, "ewave lab", 6, 2437, 300, wall.get());
+        assertEquals(SniperController.State.LOCKED, sniper.state());
+
+        // Pausing for Ops for 20 seconds must NOT trigger silence loss.
+        sniper.setOpsPaused(true);
+        mono.addAndGet(TimeUnit.SECONDS.toNanos(20));
+        wall.addAndGet(20_000L);
+        assertFalse(sniper.tick());
+        assertEquals(SniperController.State.LOCKED, sniper.state());
+        sniper.setOpsPaused(false);
+        assertFalse(sniper.tick());
+
+        // After Ops resumes, silence <= 6144 ms stays LOCKED; exceeding 6144 ms enters LOST_SEARCHING.
+        mono.addAndGet(TimeUnit.MILLISECONDS.toNanos(6_100));
+        wall.addAndGet(6_100L);
+        assertFalse(sniper.tick());
+        mono.addAndGet(TimeUnit.MILLISECONDS.toNanos(100));
+        wall.addAndGet(100L);
+        assertTrue(sniper.tick());
+        assertEquals(SniperController.State.LOST_SEARCHING, sniper.state());
+        assertTrue(sniper.needsSweep());
+
+        // Reacquiring on the ORIGINAL channel 6 resumes LOCKED WITHOUT recording a false ChannelMove.
+        wall.addAndGet(200L);
+        mono.addAndGet(TimeUnit.MILLISECONDS.toNanos(200));
+        sniper.observeFrame(beacon(AP1, ssid, 6, 2437, 300, wall.get()), "ap-1", AP1, ssid, "ewave lab");
+        assertEquals(SniperController.State.LOCKED, sniper.state());
+        assertEquals(0, sniper.snapshot().moves().size());
+
+        // Losing it again and finding it on channel 11 DOES record a ChannelMove; adjacent bleed is ignored.
+        mono.addAndGet(TimeUnit.MILLISECONDS.toNanos(6_200));
+        wall.addAndGet(6_200L);
+        assertTrue(sniper.tick());
+        assertEquals(SniperController.State.LOST_SEARCHING, sniper.state());
+
+        // Adjacent bleed (received on 2412 while DS advertises 6) must be ignored.
+        sniper.observeFrame(beacon(AP1, ssid, 6, 2412, 300, wall.get() + 50), "ap-1", AP1, ssid, "ewave lab");
+        assertEquals(SniperController.State.LOST_SEARCHING, sniper.state());
+
+        sniper.tuneConfirmed(11, 2462, wall.get() + 100);
+        wall.addAndGet(150L);
+        mono.addAndGet(TimeUnit.MILLISECONDS.toNanos(150));
+        sniper.observeFrame(beacon(AP1, ssid, 11, 2462, 300, wall.get()), "ap-1", AP1, ssid, "ewave lab");
+        var moved = sniper.snapshot();
+        assertEquals(SniperController.State.LOCKED, moved.state());
+        assertEquals(11, moved.lockedChannel());
+        assertEquals(1, moved.moves().size());
+        assertEquals(6, moved.moves().getFirst().fromChannel());
+        assertEquals(11, moved.moves().getFirst().toChannel());
+        assertEquals(wall.get(), moved.moves().getFirst().rediscoveredAtMs());
+    }
+
+    @Test void allowsCancellationAtEveryStage() {
+        var sniper = new SniperController();
+        byte[] ssid = "ewave lab".getBytes(StandardCharsets.UTF_8);
+
+        sniper.startBySsid(ssid, "ewave lab");
+        assertEquals(SniperController.State.IDLE, sniper.cancel().state());
+        assertFalse(sniper.needsSweep());
+
+        sniper.startBySsid(ssid, "ewave lab");
+        sniper.observeFrame(beacon(AP1, ssid, 1, 2412, 100, 1000L), "ap-1", AP1, ssid, "ewave lab");
+        sniper.observeFrame(beacon(AP2, ssid, 6, 2437, 100, 1000L), "ap-2", AP2, ssid, "ewave lab");
+        for (int ch = 1; ch <= 13; ch++) sniper.sweepChannelFinished(ch);
+        assertEquals(SniperController.State.SELECTING, sniper.state());
+        assertEquals(SniperController.State.IDLE, sniper.cancel().state());
+
+        sniper.startByAp("ap-1", AP1, ssid, "ewave lab", 6, 2437, 100, 1000L);
+        assertEquals(SniperController.State.IDLE, sniper.cancel().state());
+        assertNull(sniper.desiredFrequencyMhz());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void integratesWithPacketBridgeToSweepAndLockOnSoleSsidMatch(boolean alreadyTunedToFirstChannel) throws Exception {
+        var capture = new StreamingCaptureProcess();
+        try (var bridge = new PacketBridge(builder -> builder.command().getFirst().equals("tcpdump")
+                ? capture : new CompletedProcess("", 0), Map.of(), new ewave.passive.DeviceProfiler(), 20)) {
+            bridge.startPassive("lab0mon", false);
+            if (alreadyTunedToFirstChannel) bridge.tuneChannel(2412);
+            bridge.startSniperBySsid("ewave lab");
+            assertEquals(SniperController.State.SEARCHING, bridge.sniperState().run().state());
+
+            // Emit a beacon on channel 6 while sweeping; Sniper must finish sweeping 1..13 before locking 2437.
+            byte[] ssid = "ewave lab".getBytes(StandardCharsets.UTF_8);
+            capture.write(beaconCapture(ssid, 6));
+
+            await(() -> bridge.sniperState().run().state() == SniperController.State.LOCKED, "initial lock");
+            var locked = bridge.sniperState().run();
+            assertEquals(SniperController.State.LOCKED, locked.state());
+            assertTrue(locked.initialSweepComplete());
+            assertEquals(13, locked.channelsSwept());
+            assertEquals(6, locked.lockedChannel());
+            assertEquals(2437, locked.lockedFrequencyMhz());
+
+            bridge.stopSniper();
+            assertEquals(SniperController.State.IDLE, bridge.sniperState().run().state());
+        }
+    }
+
+    @Test void bridgeSweepsAndFollowsAnAccessPointAfterItChangesChannel() throws Exception {
+        var capture = new StreamingCaptureProcess();
+        var scanner = new AdaptiveScanner(AdaptiveScanner.Config.defaults(13, 128, 71));
+        try (var bridge = new PacketBridge(builder -> builder.command().getFirst().equals("tcpdump")
+                ? capture : new CompletedProcess("", 0), Map.of(), new ewave.passive.DeviceProfiler(), 20)) {
+            bridge.startPassive("lab0mon", false, scanner);
+            byte[] ssid = "ewave lab".getBytes(StandardCharsets.UTF_8);
+            capture.write(beaconCapture(ssid, 6));
+            String apId = bridge.getPassiveWifi().addressId(AP1);
+            await(() -> bridge.getPassiveWifi().observedAp(apId) != null, "observation of the target AP");
+            var initial = bridge.startSniperByApId(apId).run();
+            assertEquals(SniperController.State.LOCKED, initial.state());
+            assertEquals(6, initial.lockedChannel());
+
+            await(() -> bridge.sniperState().run().state() == SniperController.State.LOST_SEARCHING, "loss of the target");
+            await(() -> Integer.valueOf(11).equals(bridge.getChannelSnapshot().radio().lastConfirmedChannel()),
+                    "the sweep to reach channel 11");
+            byte[] movedBeacon = beaconCapture(ssid, 11);
+            capture.write(Arrays.copyOfRange(movedBeacon, PCAP_HEADER_BYTES, movedBeacon.length));
+
+            await(() -> bridge.sniperState().run().state() == SniperController.State.LOCKED, "reacquisition");
+            var recovered = bridge.sniperState().run();
+            assertEquals(initial.id(), recovered.id());
+            assertEquals(apId, recovered.lockedApId());
+            assertEquals(2462, recovered.lockedFrequencyMhz());
+            assertEquals(1, recovered.moves().size());
+            var move = recovered.moves().getFirst();
+            assertEquals(6, move.fromChannel());
+            assertEquals(11, move.toChannel());
+            assertNotNull(move.tunedAtMs());
+            assertTrue(move.tunedAtMs() <= move.rediscoveredAtMs());
+            assertTrue(bridge.isRunning());
+        }
+    }
+
+    private static void await(BooleanSupplier condition, String evidence) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(6);
+        while (!condition.getAsBoolean() && System.nanoTime() < deadline) Thread.sleep(10);
+        assertTrue(condition.getAsBoolean(), "Timed out waiting for " + evidence);
+    }
+
+    private static byte[] beaconCapture(byte[] ssid, int channel) {
+        byte[] frame = ProbeFrames.radiotap(rawBeacon(AP1, ssid, channel));
+        ByteBuffer.wrap(frame).order(ByteOrder.LITTLE_ENDIAN).putShort(8, PacketBridge.channelFrequencyMhz(channel).shortValue());
+        byte[] pcap = ProbeFrames.pcap(ByteOrder.LITTLE_ENDIAN, false, 127, frame);
+        long now = System.currentTimeMillis();
+        ByteBuffer.wrap(pcap).order(ByteOrder.LITTLE_ENDIAN).position(PCAP_HEADER_BYTES)
+                .putInt((int) (now / 1000)).putInt((int) (now % 1000) * 1000);
+        return pcap;
+    }
+
+    private static Dot11Frame beacon(String bssid, byte[] ssid, int advertisedChannel, int rxFreqMhz,
+                                     int beaconTu, long atMs) {
+        var ssidIe = new Dot11InformationElements.Element(0, ssid);
+        var dsIe = new Dot11InformationElements.Element(3, new byte[]{(byte) advertisedChannel});
+        return new Dot11Frame(0, 8, 0, 0, -1, "ff:ff:ff:ff:ff:ff", bssid, bssid, null,
+                atMs, rxFreqMhz, -40, null, 48, new Dot11InformationElements(List.of(ssidIe, dsIe)),
+                0L, beaconTu, 1, null, 0, 0);
+    }
+
+    private static byte[] rawBeacon(String bssid, byte[] ssid, int dsChannel) {
+        byte[] mac = java.util.HexFormat.ofDelimiter(":").parseHex(bssid);
+        byte[] bcast = java.util.HexFormat.of().parseHex("ffffffffffff");
+        var buf = ByteBuffer.allocate(24 + 12 + 2 + ssid.length + 3).order(ByteOrder.LITTLE_ENDIAN);
+        buf.putShort((short) 0x0080).putShort((short) 0).put(bcast).put(mac).put(mac).putShort((short) 0);
+        buf.putLong(0L).putShort((short) 100).putShort((short) 1);
+        buf.put((byte) 0).put((byte) ssid.length).put(ssid);
+        buf.put((byte) 3).put((byte) 1).put((byte) dsChannel);
+        return buf.array();
+    }
+}

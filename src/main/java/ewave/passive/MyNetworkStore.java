@@ -26,11 +26,13 @@ public final class MyNetworkStore {
     public void save(MyNetworkProfile profile) throws IOException {
         Path directory = file.getParent();
         Files.createDirectories(directory, PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")));
+        FileOwnership.restoreSudoOwner(directory);
         Path pending = Files.createTempFile(directory, ".my-network-", ".json",
                 PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")));
         try {
             mapper.writeValue(pending.toFile(), profile);
             Files.move(pending, file, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            FileOwnership.restoreSudoOwner(file);
             cached = profile;
         } finally {
             Files.deleteIfExists(pending);

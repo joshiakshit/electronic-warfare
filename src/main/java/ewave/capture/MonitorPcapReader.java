@@ -34,6 +34,11 @@ public final class MonitorPcapReader {
         readRecords(input, consumer, () -> false);
     }
 
+    /** Validates the full recording with the same format checks used during replay. */
+    public static void validateRecording(InputStream input) throws IOException {
+        readRecords(input, (packet, linkType, timestamp, complete) -> { });
+    }
+
     static void readRecords(InputStream input, RecordConsumer consumer, BooleanSupplier stopping) throws IOException {
         read(input, consumer, null, stopping);
     }

@@ -4,8 +4,8 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
-import tempfile
 import unittest
+import tempfile
 
 
 class LauncherTest(unittest.TestCase):
@@ -23,7 +23,7 @@ class LauncherTest(unittest.TestCase):
         binaries = self.root / "bin"
         binaries.mkdir()
         stub = '''#!/usr/bin/env python3
-import json, os, pathlib, subprocess, sys
+import json, os, pathlib, subprocess, sys, time
 name = pathlib.Path(sys.argv[0]).name
 args = sys.argv[1:]
 with open(os.environ["COMMAND_LOG"], "a") as log:
@@ -39,28 +39,42 @@ elif name == "iw" and "managed" in args and os.environ.get("FAIL_MANAGED"):
     sys.exit(1)
 elif name == "iw":
     state = pathlib.Path(os.environ["COMMAND_LOG"]).with_name("radio-mode")
-    if args[-1:] == ["info"]:
+    if args == ["dev"]:
+        if os.environ.get("IW_DEV_LIST"):
+            print(os.environ["IW_DEV_LIST"])
+    elif args[-1:] == ["info"]:
         mode = state.read_text() if state.exists() else os.environ.get("INITIAL_MODE", "managed")
-        print("Interface lab0mon\\n\\ttype " + mode + "\\n\\tchannel 1 (2412 MHz), width: 20 MHz")
+        freq = os.environ.get("INITIAL_FREQ", "2412")
+        ch = os.environ.get("INITIAL_CH", "1")
+        print(f"Interface lab0mon\\n\\ttype {mode}\\n\\tchannel {ch} ({freq} MHz), width: 20 MHz")
     elif "type" in args:
         mode = args[-1]
         if mode == "monitor" and os.environ.get("FAIL_MONITOR"): sys.exit(1)
         if not os.environ.get("IGNORE_MODE_CHANGE"): state.write_text(mode)
 elif name == "ip" and args[:2] == ["-o", "link"]:
-    print("3: lab0mon: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500")
+    flags = os.environ.get("INITIAL_LINK_FLAGS", "BROADCAST,MULTICAST,UP,LOWER_UP")
+    print(f"3: lab0mon: <{flags}> mtu 1500")
 elif name == "nmcli" and args[:2] == ["-g", "GENERAL.NM-MANAGED"]:
-    print("yes")
+    print(os.environ.get("INITIAL_NM_MANAGED", "yes"))
+elif name == "nmcli" and args[:2] == ["-g", "GENERAL.CONNECTION"]:
+    print(os.environ.get("INITIAL_CONNECTION", ""))
 elif name == "mvn":
     if os.environ.get("FAIL_BUILD"): sys.exit(1)
     pathlib.Path("target/ewave-0.1.0-SNAPSHOT.jar").touch()
+elif name == "node":
+    if os.environ.get("FAIL_FRONTEND"):
+        print("Vite failed", file=sys.stderr)
+        sys.exit(1)
+    print("  ➜  Local:   http://127.0.0.1:5174/", flush=True)
+    time.sleep(30)
 '''
-        for name in ("java", "javac", "mvn", "sudo", "tcpdump", "iw", "ip", "nmcli", "systemctl", "uname"):
+        for name in ("java", "javac", "mvn", "sudo", "tcpdump", "iw", "ip", "nmcli", "systemctl", "uname", "npm", "node"):
             path = binaries / name
             path.write_text(stub)
             path.chmod(0o755)
         self.log = self.root / "commands.jsonl"
         self.env = dict(os.environ, PATH=str(binaries) + os.pathsep + os.environ["PATH"],
-                        COMMAND_LOG=str(self.log))
+                        COMMAND_LOG=str(self.log), TMPDIR=str(self.root))
         self.env.pop("JAVA_HOME", None)
 
     def run_launcher(self, *args, input=""):
@@ -70,152 +84,159 @@ elif name == "mvn":
     def commands(self):
         return [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
 
+    def install_fake_frontend(self):
+        vite = self.root / "frontend/node_modules/vite/bin/vite.js"
+        vite.parent.mkdir(parents=True)
+        vite.touch()
+
     def test_default_menu_and_exit_do_not_start_capture(self):
         result = self.run_launcher(input="invalid\n0\n")
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertIn("Live Wi-Fi", result.stdout)
-        self.assertIn("Restore Wi-Fi", result.stdout)
+        self.assertIn("Replay a recording", result.stdout)
+        self.assertIn("Setup and diagnostics", result.stdout)
         self.assertEqual([], self.commands())
 
-    def test_menu_routes_each_live_mode(self):
+    def test_dashboard_only_starts_idle_api_without_sudo_or_adapter_changes(self):
+        result = self.run_launcher(input="4\n")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual([["java", "-version"], ["java", "-jar", str(self.root / "target/ewave-0.1.0-SNAPSHOT.jar")]],
+                         self.commands())
+
+    def test_live_wifi_discovers_adapter_ignores_non_netdev_and_starts_unified_backend(self):
         self.env["INITIAL_MODE"] = "monitor"
-        for selection, expected in (
-                ("1\n1", ["--passive-rf", "--iface", "lab0mon"]),
-                ("1\n2", ["--passive-rf", "--adaptive", "--iface", "lab0mon"]),
-                ("1\n3", ["--passive-rf", "--ops", "--iface", "lab0mon"]),
-                ("4\n3", ["--probes", "--iface", "lab0mon"]),
-                ("4\n4", ["--iface", "lab0mon"])):
-            with self.subTest(selection=selection):
-                self.log.unlink(missing_ok=True)
-                freq_prompt = "\n" if selection in ("1\n1", "1\n3") else ""
-                result = self.run_launcher(input=f"{selection}\nlab0mon\n{freq_prompt}0\n")
-                self.assertEqual(0, result.returncode, result.stderr)
-                java = [c for c in self.commands() if c[:2] == ["java", "-jar"]]
-                self.assertEqual(expected, java[0][3:])
-
-    def test_watch_tunes_requested_frequency_before_launch(self):
-        for mode in ("managed", "monitor"):
-            with self.subTest(mode=mode):
-                self.env["INITIAL_MODE"] = mode
-                self.log.unlink(missing_ok=True)
-                (self.root / "radio-mode").unlink(missing_ok=True)
-                result = self.run_launcher("watch", "lab0mon", "--freq", "2457", input="monitor\n")
-                self.assertEqual(0, result.returncode, result.stderr)
-                commands = self.commands()
-                tune = ["iw", "dev", "lab0mon", "set", "freq", "2457"]
-                java = next(c for c in commands if c[:2] == ["java", "-jar"])
-                self.assertLess(commands.index(tune), commands.index(java))
-
-    def test_replay_without_file_opens_bundled_recording(self):
-        result = self.run_launcher("replay", "--port", "0")
+        self.env["IW_DEV_LIST"] = (
+            "phy#0\n"
+            "\tUnnamed/non-netdev interface\n"
+            "\t\ttype P2P-device\n"
+            "\tInterface lab0mon\n"
+            "\t\tssid LabNet\n"
+            "\t\ttype monitor\n"
+            "\t\tchannel 1 (2412 MHz), width: 20 MHz\n"
+        )
+        result = self.run_launcher(input="1\n1\n")
         self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("1) lab0mon", result.stdout)
+        self.assertNotIn("P2P-device", result.stdout)
         java = next(c for c in self.commands() if c[:2] == ["java", "-jar"])
-        self.assertEqual(["--replay", str(self.root / "src/test/resources/probes/probe-requests.pcap"),
-                          "--port", "0"], java[3:])
-
-    def test_replay_preserves_spaces_in_path(self):
-        capture = self.root / "example capture.pcap"
-        capture.touch()
-        result = self.run_launcher(input=f"2\n{capture}\n0\n")
-        self.assertEqual(0, result.returncode, result.stderr)
-        self.assertIn(["java", "-jar", str(self.root / "target/ewave-0.1.0-SNAPSHOT.jar"),
-                       "--replay", str(capture)], self.commands())
+        self.assertEqual(["--iface", "lab0mon", "--adaptive", "--ops"], java[3:])
 
     @unittest.skipIf(os.geteuid() == 0, "Root invocation bypasses sudo")
-    def test_all_api_server_modes_elevate_only_after_build(self):
-        for args in (("demo",), ("--iface", "lab0mon"), ("live", "lab0mon"),
-                     ("--probes", "--iface", "lab0mon")):
-            with self.subTest(args=args):
-                self.log.unlink(missing_ok=True)
-                (self.root / "target/ewave-0.1.0-SNAPSHOT.jar").unlink()
-                result = self.run_launcher(*args)
-                self.assertEqual(0, result.returncode, result.stderr)
-                commands = self.commands()
-                elevated = next(c for c in commands if c[0] == "sudo")
-                self.assertEqual(["sudo", "-H", "--preserve-env=JAVA_TOOL_OPTIONS", "--",
-                                  str(self.root / "bin/java"), "-jar"], elevated[:6])
-                self.assertLess(commands.index(["mvn", "package"]), commands.index(elevated))
-                self.assertEqual(1, sum(c[0] == "sudo" for c in commands))
-
-    @unittest.skipIf(os.geteuid() == 0, "Root invocation bypasses sudo")
-    def test_denied_elevation_does_not_start_java_application(self):
-        self.env["DENY_SUDO"] = "1"
-        result = self.run_launcher("demo")
-        self.assertNotEqual(0, result.returncode)
-        self.assertFalse(any(c[:2] == ["java", "-jar"] for c in self.commands()))
-
-    def test_build_does_not_request_elevation(self):
-        self.assertEqual(0, self.run_launcher("build").returncode)
-        self.assertFalse(any(c[0] == "sudo" for c in self.commands()))
-
-    def test_full_prepares_and_verifies_monitor_before_starting_inventory(self):
-        result = self.run_launcher("full", "lab0mon", "--port", "0", input="monitor\n")
+    def test_live_wifi_managed_adapter_prepares_monitor_launches_after_build_and_restores_once(self):
+        self.env["IW_DEV_LIST"] = "phy#0\n\tInterface lab0mon\n\t\ttype managed\n"
+        (self.root / "target/ewave-0.1.0-SNAPSHOT.jar").unlink()
+        result = self.run_launcher(input="1\n1\nmonitor\n")
         self.assertEqual(0, result.returncode, result.stderr)
         commands = self.commands()
         release = ["nmcli", "device", "set", "lab0mon", "managed", "no"]
         down = ["ip", "link", "set", "lab0mon", "down"]
         mode = ["iw", "dev", "lab0mon", "set", "type", "monitor"]
         up = ["ip", "link", "set", "lab0mon", "up"]
+        restore_managed = ["iw", "dev", "lab0mon", "set", "type", "managed"]
+        restore_nm = ["nmcli", "device", "set", "lab0mon", "managed", "yes"]
         java = next(c for c in commands if c[:2] == ["java", "-jar"])
+        elevated = next(c for c in commands if c[0] == "sudo" and any("java" in arg for arg in c))
+        self.assertEqual(["sudo", "-H", "--preserve-env=JAVA_TOOL_OPTIONS", "--",
+                          str(self.root / "bin/java"), "-jar"], elevated[:6])
+        self.assertLess(commands.index(["mvn", "package"]), commands.index(release))
         self.assertLess(commands.index(release), commands.index(down))
         self.assertLess(commands.index(down), commands.index(mode))
         self.assertLess(commands.index(mode), commands.index(up))
         self.assertLess(commands.index(up), commands.index(java))
+        self.assertLess(commands.index(java), commands.index(restore_managed))
+        self.assertLess(commands.index(restore_managed), commands.index(restore_nm))
+        self.assertEqual(1, commands.count(restore_managed))
+        self.assertEqual(1, commands.count(restore_nm))
         self.assertIn(["iw", "dev", "lab0mon", "set", "freq", "2412"], commands)
-        self.assertEqual(["--passive-rf", "--ops", "--iface", "lab0mon", "--port", "0"], java[3:])
+        self.assertEqual(["--iface", "lab0mon", "--adaptive", "--ops"], java[3:])
         self.assertNotIn(["systemctl", "stop", "NetworkManager"], commands)
 
-    def test_full_cancellation_never_changes_network_or_launches_api_server(self):
-        for answer in ("no\n", ""):
+    def test_live_wifi_preserves_original_monitor_mode_on_exit(self):
+        self.env["INITIAL_MODE"] = "monitor"
+        self.env["INITIAL_LINK_FLAGS"] = "BROADCAST,MULTICAST"
+        self.env["IW_DEV_LIST"] = "phy#0\n\tInterface lab0mon\n\t\ttype monitor\n"
+        result = self.run_launcher(input="1\n1\n")
+        self.assertEqual(0, result.returncode, result.stderr)
+        commands = self.commands()
+        self.assertFalse(any(c[0] in ("ip", "nmcli") for c in commands))
+        self.assertNotIn(["iw", "dev", "lab0mon", "set", "type", "managed"], commands)
+
+    def test_live_wifi_cancellation_build_failure_and_setup_failure_safety(self):
+        self.env["IW_DEV_LIST"] = "phy#0\n\tInterface lab0mon\n\t\ttype managed\n"
+        for answer in ("no\n0\n", "\n0\n"):
             self.log.unlink(missing_ok=True)
-            result = self.run_launcher("full", "lab0mon", input=answer)
+            result = self.run_launcher(input=f"1\n1\n{answer}")
             self.assertEqual(0, result.returncode, result.stderr)
             self.assertFalse(any(c[0] == "sudo" or c[:2] == ["java", "-jar"] for c in self.commands()))
 
-    def test_full_build_failure_does_not_disconnect_wifi(self):
+        self.log.unlink(missing_ok=True)
         self.env["FAIL_BUILD"] = "1"
         (self.root / "target/ewave-0.1.0-SNAPSHOT.jar").unlink()
-        result = self.run_launcher("full", "lab0mon", input="monitor\n")
+        result = self.run_launcher(input="1\n1\n")
         self.assertNotEqual(0, result.returncode)
-        self.assertFalse(any(c[0] in ("sudo", "iw", "ip", "nmcli") for c in self.commands()))
+        self.assertFalse(any(c[0] in ("sudo", "ip", "nmcli") or (c[0] == "iw" and "set" in c) for c in self.commands()))
+        del self.env["FAIL_BUILD"]
+        (self.root / "target/ewave-0.1.0-SNAPSHOT.jar").touch()
 
-    def test_full_failed_setup_rolls_back_and_does_not_launch(self):
+        self.log.unlink(missing_ok=True)
+        self.env["DENY_SUDO"] = "1"
+        result = self.run_launcher(input="1\n1\nmonitor\n")
+        self.assertNotEqual(0, result.returncode)
+        self.assertFalse(any(c[:2] == ["java", "-jar"] for c in self.commands()))
+        del self.env["DENY_SUDO"]
+
+        self.log.unlink(missing_ok=True)
         self.env["FAIL_MONITOR"] = "1"
-        result = self.run_launcher("full", "lab0mon", input="monitor\n")
+        result = self.run_launcher(input="1\n1\nmonitor\n")
         self.assertNotEqual(0, result.returncode)
         commands = self.commands()
-        self.assertIn(["iw", "dev", "lab0mon", "set", "type", "managed"], commands)
-        self.assertIn(["ip", "link", "set", "lab0mon", "up"], commands)
-        self.assertIn(["nmcli", "device", "set", "lab0mon", "managed", "yes"], commands)
+        self.assertEqual(1, commands.count(["iw", "dev", "lab0mon", "set", "type", "managed"]))
+        self.assertEqual(1, commands.count(["nmcli", "device", "set", "lab0mon", "managed", "yes"]))
         self.assertFalse(any(c[:2] == ["java", "-jar"] for c in commands))
+        del self.env["FAIL_MONITOR"]
 
-    def test_full_refuses_to_launch_when_driver_does_not_remain_in_monitor_mode(self):
+        self.log.unlink(missing_ok=True)
         self.env["IGNORE_MODE_CHANGE"] = "1"
-        result = self.run_launcher("full", "lab0mon", input="monitor\n")
+        result = self.run_launcher(input="1\n1\nmonitor\n")
         self.assertNotEqual(0, result.returncode)
         self.assertFalse(any(c[:2] == ["java", "-jar"] for c in self.commands()))
 
-    def test_full_reuses_existing_monitor_mode(self):
-        self.env["INITIAL_MODE"] = "monitor"
-        result = self.run_launcher("full", "lab0mon")
+    def test_replay_runs_without_sudo_starts_frontend_when_installed_and_supports_spaces(self):
+        capture = self.root / "example capture.pcap"
+        capture.touch()
+        (self.root / "target/ewave-0.1.0-SNAPSHOT.jar").unlink()
+        self.install_fake_frontend()
+        result = self.run_launcher(input=f"2\nc\n{capture}\n")
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertFalse(any(c[0] == "ip" or c[0] == "nmcli" for c in self.commands()))
+        commands = self.commands()
+        self.assertIn(["mvn", "package"], commands)
+        self.assertFalse(any(c[0] == "sudo" for c in commands))
+        self.assertIn(["java", "-jar", str(self.root / "target/ewave-0.1.0-SNAPSHOT.jar"),
+                       "--replay", str(capture)], commands)
+        self.assertTrue(any(c[:2] == ["node", "node_modules/vite/bin/vite.js"] for c in commands))
+        self.assertIn("Dashboard: http://127.0.0.1:5174/", result.stdout)
+        self.assertNotIn("Dashboard: http://127.0.0.1:5173", result.stdout)
 
-    def test_full_rejects_conflicting_flags_and_invalid_ports_before_setup(self):
-        for extra in (("--adaptive",), ("--replay", "capture.pcap"), ("--port", "65536")):
-            self.log.unlink(missing_ok=True)
-            result = self.run_launcher("full", "lab0mon", *extra, input="monitor\n")
-            self.assertNotEqual(0, result.returncode)
-            self.assertEqual([], self.commands())
+    def test_dashboard_reports_failed_frontend_start_and_still_starts_api(self):
+        self.install_fake_frontend()
+        self.env["FAIL_FRONTEND"] = "1"
+        result = self.run_launcher(input="4\n")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertNotIn("Dashboard:", result.stdout)
+        self.assertIn("Dashboard failed to start", result.stderr)
+        self.assertTrue(any(c[:2] == ["java", "-jar"] for c in self.commands()))
+        log, = self.root.glob("ewave-frontend.*.log")
+        self.assertEqual("Vite failed\n", log.read_text())
 
-    def test_recovery_cancel_and_eof_never_mutate_network(self):
-        for answer in ("no\n", ""):
-            self.log.unlink(missing_ok=True)
-            self.assertEqual(0, self.run_launcher("restore", "lab0mon", input=answer).returncode)
-            self.assertFalse(any(c[0] in ("sudo", "ip", "systemctl") for c in self.commands()))
+    def test_setup_menu_doctor_build_and_restore(self):
+        result = self.run_launcher(input="3\n1\n3\n2\n0\n")
+        self.assertEqual(0, result.returncode, result.stderr)
+        commands = self.commands()
+        self.assertFalse(any(c[0] == "sudo" for c in commands))
+        self.assertIn(["mvn", "package"], commands)
 
-    def test_recovery_commands_target_only_selected_interface(self):
-        result = self.run_launcher(input="3\nlab0mon\nrestore\n0\n")
+        self.log.unlink(missing_ok=True)
+        result = self.run_launcher(input="3\n3\nlab0mon\nrestore\n0\n")
         self.assertEqual(0, result.returncode, result.stderr)
         privileged = [c for c in self.commands() if c[0] == "sudo"]
         self.assertEqual([["sudo", "-v"], ["sudo", "ip", "link", "set", "lab0mon", "down"],
@@ -223,19 +244,22 @@ elif name == "mvn":
                           ["sudo", "ip", "link", "set", "lab0mon", "up"],
                           ["sudo", "systemctl", "start", "NetworkManager"],
                           ["sudo", "nmcli", "device", "set", "lab0mon", "managed", "yes"]], privileged)
-        self.assertFalse(any(c[0] in ("java", "mvn") for c in self.commands()))
 
-    def test_failed_mode_change_attempts_to_bring_interface_back_up(self):
-        self.env["FAIL_MANAGED"] = "1"
-        result = self.run_launcher("restore", "lab0mon", input="restore\n")
-        self.assertNotEqual(0, result.returncode)
-        self.assertIn(["ip", "link", "set", "lab0mon", "up"], self.commands())
-        self.assertFalse(any(c[0] == "systemctl" for c in self.commands()))
+        self.log.unlink(missing_ok=True)
+        self.assertEqual(0, self.run_launcher("restore", "lab0mon", input="no\n").returncode)
+        self.assertFalse(any(c[0] in ("sudo", "ip", "systemctl") for c in self.commands()))
 
-    def test_invalid_interface_is_rejected_before_commands(self):
-        result = self.run_launcher("restore", "--help", input="restore\n")
-        self.assertNotEqual(0, result.returncode)
+        self.log.unlink(missing_ok=True)
+        self.assertNotEqual(0, self.run_launcher("restore", "--help", input="restore\n").returncode)
         self.assertFalse(any(c[0] in ("sudo", "iw", "ip", "systemctl") for c in self.commands()))
+
+    def test_unknown_subcommands_are_rejected(self):
+        for cmd in ("watch", "scan", "ops", "replay", "probes", "summary", "--iface"):
+            with self.subTest(cmd=cmd):
+                self.log.unlink(missing_ok=True)
+                result = self.run_launcher(cmd, "lab0mon")
+                self.assertNotEqual(0, result.returncode)
+                self.assertEqual([], self.commands())
 
 
 if __name__ == "__main__":

@@ -1,5 +1,7 @@
 # Synthetic passive scanner benchmark results
 
+Current module naming: scanner/channel reports belong to **Lookout**; selected-router following belongs to **Sniper**. This report preserves the original offline benchmark results. It does not verify the newer Sniper controller, React integration, or live hardware. See [current state](../docs/CURRENT-STATE.md).
+
 These results come from the seeded simulation in `ScannerEvaluation.java`.
 They contain no live captures, network names, device addresses, or credentials.
 
@@ -17,7 +19,7 @@ The old live monitor additionally reserved a visit about once a second and liste
 
 Each new passive discovery session sweeps channels 1–13 in order. After each confirmed tune, it listens for at least 100 ms, or twice the measured command time up to a 500 ms minimum dwell. A decoded frame on the confirmed channel keeps the receiver there until 200 ms after the most recent frame, subject to a 1.2-second busy-visit cap. The timer applies those conditions at the next decision, so actual visits can be longer. Even sustained traffic eventually yields to the next channel. A failed tune advances the sweep without crediting a visit.
 
-The ordered sweep avoids score ties and gives every channel a turn. The phase model continues to supply Spectrum estimates. A quiet observation now requires a complete confirmed listening window. A heard frame still counts in a partial window. The passive path uses the existing serialized retune worker, session lock, frame timestamp checks, and session teardown. The benchmark sends only received frames and completed tune timings into the discovery policy.
+The ordered sweep avoids score ties and gives every channel a turn. The phase model continues to supply Lookout channel estimates (formerly Spectrum). A quiet observation now requires a complete confirmed listening window. A heard frame still counts in a partial window. The passive path uses the existing serialized retune worker, session lock, frame timestamp checks, and session teardown. The benchmark sends only received frames and completed tune timings into the discovery policy.
 
 ## Original 12-second fixture
 

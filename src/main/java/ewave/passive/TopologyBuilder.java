@@ -22,7 +22,7 @@ import static ewave.decoder.Dot11InformationElements.hidden;
 public final class TopologyBuilder {
     private static final int AP_LIMIT = 2048, EDGE_LIMIT = 8192, ROAM_LIMIT = 1024;
     private static final long RETRY_MS = 1000;
-    public record AccessPoint(String bssid, String ssidToken, boolean ssidHidden, String ssidRevealedVia,
+    public record AccessPoint(String bssid, String ssid, String ssidToken, boolean ssidHidden, String ssidRevealedVia,
                               int channel, String band, String security, int beaconIntervalTu, String mobilityDomain,
                               Integer stationCount, Integer channelUtilization, Integer availableAdmissionCapacity,
                               String country, String radioGroupId, String essId, Double rssiMedian,
@@ -296,10 +296,11 @@ public final class TopologyBuilder {
         if (hidden(ssid) || observedAt < ap.nameObservedAt) return;
         // Association requests can supply a name only when the AP has not supplied one.
         if ((source.equals("ASSOC_REQ") || source.equals("REASSOC_REQ")) && (ap.ssid != null || !ap.hidden)) return;
+        ap.ssidName = Dot11InformationElements.ssidLabel(ssid);
         ap.ssid = ids.id("topology-ssid", ssid);
         ap.nameSource = source.equals("BEACON") ? "NONE" : source;
         ap.nameObservedAt = observedAt;
-        ap.observedName = revealNames && !source.equals("BEACON") ? Dot11InformationElements.ssidLabel(ssid) : null;
+        ap.observedName = revealNames && !source.equals("BEACON") ? ap.ssidName : null;
     }
 
     void purge(long now, long retention) {
@@ -310,8 +311,8 @@ public final class TopologyBuilder {
         recent.values().removeIf(time -> time < now - RETRY_MS);
     }
 
-    private record ApCopy(String id, List<Double> rssi, List<ClockSample> clocks, String ssid, String observedName,
-                          String security, String domain, String country, String nameSource,
+    private record ApCopy(String id, List<Double> rssi, List<ClockSample> clocks, String ssidName, String ssid,
+                          String observedName, String security, String domain, String country, String nameSource,
                           List<AdvertisedSecurity> advertisedSecurity, Integer stations, Integer utilization,
                           Integer admissionCapacity, int frequency, int channel, int interval, boolean hidden,
                           long last, long nameObservedAt, long beaconNameObservedAt) { }
@@ -367,7 +368,7 @@ public final class TopologyBuilder {
                 var hiddenEvidence = ap.hidden() ? new HiddenSsidEvidence(ap.observedName(), hiddenNameSource,
                         hiddenNameSource.equals("NONE") ? null : ap.nameObservedAt(), ap.beaconNameObservedAt()) : null;
                 String legacyNameSource = hiddenNameSource.equals("REASSOC_REQ") ? "ASSOC_REQ" : hiddenNameSource;
-                output.add(new AccessPoint(key, ap.ssid(), ap.hidden(), legacyNameSource, ap.channel(),
+                output.add(new AccessPoint(key, ap.ssidName(), ap.ssid(), ap.hidden(), legacyNameSource, ap.channel(),
                         WifiInventory.band(ap.frequency()), ap.security(), ap.interval(), ap.domain(), ap.stations(),
                         ap.utilization(), ap.admissionCapacity(), ap.country(), radio.get(key), group, median,
                         median == null ? null : median > -55 ? "STRONG" : median < -75 ? "WEAK" : "MEDIUM",
@@ -396,10 +397,10 @@ public final class TopologyBuilder {
         var apCopies = new ArrayList<ApCopy>(aps.size());
         for (var row : aps.entrySet()) {
             Ap ap = row.getValue();
-            apCopies.add(new ApCopy(row.getKey(), List.copyOf(ap.rssi), List.copyOf(ap.clocks), ap.ssid, ap.observedName,
-                    ap.security, ap.domain, ap.country, ap.nameSource, ap.advertisedSecurity, ap.stations,
-                    ap.utilization, ap.admissionCapacity, ap.frequency, ap.channel, ap.interval, ap.hidden,
-                    ap.last, ap.nameObservedAt, ap.beaconNameObservedAt));
+            apCopies.add(new ApCopy(row.getKey(), List.copyOf(ap.rssi), List.copyOf(ap.clocks), ap.ssidName, ap.ssid,
+                    ap.observedName, ap.security, ap.domain, ap.country, ap.nameSource, ap.advertisedSecurity,
+                    ap.stations, ap.utilization, ap.admissionCapacity, ap.frequency, ap.channel, ap.interval,
+                    ap.hidden, ap.last, ap.nameObservedAt, ap.beaconNameObservedAt));
         }
         return new PendingSnapshot(ids, links, apCopies, List.copyOf(roams));
     }
@@ -456,7 +457,7 @@ public final class TopologyBuilder {
     private static final class Ap {
         final ArrayDeque<Double> rssi = new ArrayDeque<>();
         final ArrayDeque<ClockSample> clocks = new ArrayDeque<>();
-        String ssid, observedName, security, domain, country, nameSource = "NONE";
+        String ssidName, ssid, observedName, security, domain, country, nameSource = "NONE";
         List<AdvertisedSecurity> advertisedSecurity = List.of();
         Integer stations, utilization, admissionCapacity;
         int frequency, channel, interval;

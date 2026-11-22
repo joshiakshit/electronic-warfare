@@ -4,10 +4,14 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import ewave.Ewave;
 import ewave.core.AdaptiveScanner;
+import ewave.decoder.Dot11FrameDecoder;
+import ewave.fixtures.ProbeFrames;
 import ewave.fixtures.StreamingCaptureProcess;
 import ewave.model.DeviceRecord;
 import ewave.model.EwaveEvent;
 import ewave.passive.DeviceProfiler;
+import ewave.passive.MyNetworkProfile;
+import ewave.passive.PassiveWifiSession;
 import ewave.ui.PassiveRfServer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -17,6 +21,8 @@ import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.URI;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -28,6 +34,7 @@ import java.net.http.HttpResponse;
 import java.net.http.WebSocket;
 import java.time.Duration;
 import java.util.Date;
+import java.util.HexFormat;
 import java.util.Map;
 import java.util.List;
 import java.util.concurrent.BlockingQueue;
@@ -108,8 +115,10 @@ class ConsolidatedServerTest {
     }
 
     @Test void exposesChannelsWhileTheCaptureScannerIsRunningAndKeepsDevicesAfterStop() throws Exception {
-        String packet = "1700000000.123456 " + MAC
-                + " > ff:ff:ff:ff:ff:ff, ethertype IPv4 (0x0800), length 128: UDP";
+        byte[] pcap = ewave.fixtures.ProbeFrames.pcap(java.nio.ByteOrder.LITTLE_ENDIAN, false, 127,
+                ewave.fixtures.ProbeFrames.radiotap(ewave.fixtures.ProbeFrames.frame("LabNet")));
+        java.nio.ByteBuffer.wrap(pcap).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                .putInt(24, (int) (System.currentTimeMillis() / 1000));
         var scanner = new AdaptiveScanner(AdaptiveScanner.Config.defaults(13, 128, 71), 120);
         var process = new StreamingCaptureProcess();
         var tuned = new StreamingCaptureProcess();
@@ -118,9 +127,16 @@ class ConsolidatedServerTest {
                      Map.of("021122", "Lab Vendor"), new DeviceProfiler(), 50);
              var server = new PassiveRfServer(bridge, true).start(0);
              var client = HttpClient.newHttpClient()) {
-            bridge.start("lab0", scanner);
-            process.write((packet + "\n").getBytes(StandardCharsets.UTF_8));
-            assertNotNull(bridge.getPacketQueue().poll(3, TimeUnit.SECONDS));
+            bridge.startPassive("lab0", true, scanner);
+            process.write(pcap);
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+            while ((bridge.getPassiveWifi() == null || bridge.getPassiveWifi().inventory().isEmpty()
+                    || bridge.getChannelSnapshot() == null || bridge.getChannelSnapshot().lastChosen() == null)
+                    && System.nanoTime() < deadline) {
+                Thread.sleep(15);
+            }
+            assertFalse(bridge.getPassiveWifi().inventory().isEmpty());
+            assertNotNull(bridge.getChannelSnapshot().lastChosen());
 
             var channels = get(client, server, "/api/channels");
             assertEquals(200, channels.statusCode());
@@ -128,9 +144,6 @@ class ConsolidatedServerTest {
             Instant.parse(response.path("timestamp").asText());
             assertEquals(50, response.path("tickMs").asInt());
             assertEquals(13, response.at("/radio/dwellMs").size());
-            assertTrue(response.at("/radio/coverage").isArray());
-            assertTrue(response.at("/radio/coverage").isEmpty());
-            assertTrue(response.at("/radio/lastObservedChannel").isNull());
             int chosen = response.path("lastChosen").asInt();
             assertTrue(chosen >= 1 && chosen <= 13);
             assertEquals(2407 + chosen * 5, response.path("lastChosenFreqMhz").asInt());
@@ -147,16 +160,18 @@ class ConsolidatedServerTest {
             assertTrue(first.path("anomaly").isNull());
 
             bridge.stop();
-            var profiles = get(client, server, "/api/profiles");
-            assertEquals(200, profiles.statusCode());
-            var profile = mapper.readTree(profiles.body()).get(0);
-            assertEquals(MAC, profile.path("mac").asText());
-            assertEquals(1, profile.path("packetCount").asInt());
-            assertTrue(profile.path("estimatedMeters").isNull());
+            var profiler = get(client, server, "/api/profiler");
+            assertEquals(200, profiler.statusCode());
+            var observed = mapper.readTree(profiler.body()).get(0);
+            assertEquals(1, observed.path("packetCount").asInt());
             assertEquals(503, get(client, server, "/api/channels").statusCode());
-            var devices = mapper.readTree(get(client, server, "/api/devices").body());
-            assertEquals("Lab Vendor", devices.path(MAC).path("vendor").asText());
-            assertEquals(MAC, devices.path(MAC).path("mac").asText());
+
+            // Retired text-mode endpoints return 410 Gone with explicit migration pointers.
+            for (String retired : List.of("/api/devices", "/api/profiles", "/api/probes")) {
+                var gone = get(client, server, retired);
+                assertEquals(410, gone.statusCode(), retired);
+                assertFalse(mapper.readTree(gone.body()).path("replacement").asText().isEmpty(), retired);
+            }
             assertFalse(bridge.isRunning());
         }
     }
@@ -207,37 +222,28 @@ class ConsolidatedServerTest {
     }
 
     @Test void exposesDecodedProbeHistoryAndDeviceEnrichmentOverRestAndWebSocket() throws Exception {
-        byte[] bytes = ("14:23:11 " + MAC + " > Broadcast, SSID 'Lab (guest)'\n").getBytes(StandardCharsets.UTF_8);
-        Process process = new Process() {
-            @Override public InputStream getInputStream() { return new ByteArrayInputStream(bytes); }
-            @Override public OutputStream getOutputStream() { return new ByteArrayOutputStream(); }
-            @Override public InputStream getErrorStream() { return InputStream.nullInputStream(); }
-            @Override public int waitFor() { return 0; }
-            @Override public int exitValue() { return 0; }
-            @Override public void destroy() { }
-        };
+        byte[] pcap = ewave.fixtures.ProbeFrames.pcap(java.nio.ByteOrder.LITTLE_ENDIAN, false, 127,
+                ewave.fixtures.ProbeFrames.radiotap(ewave.fixtures.ProbeFrames.frame("Lab (guest)")));
+        java.nio.ByteBuffer.wrap(pcap).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                .putInt(24, (int) (System.currentTimeMillis() / 1000));
+        var process = new StreamingCaptureProcess();
         try (var bridge = new PacketBridge(builder -> process, Map.of());
              var server = new PassiveRfServer(bridge, true).start(0);
              var client = HttpClient.newHttpClient()) {
             var events = new Events();
             var socket = connect(client, server, events);
             try {
-                bridge.startProbes("wlo1");
-                var deviceEvent = events.next(mapper);
-                assertEquals(EwaveEvent.DEVICE_APPEARED, deviceEvent.path("type").asText());
-                assertEquals("Lab (guest)", deviceEvent.at("/payload/probedSsids/0").asText());
-                var probe = events.next(mapper);
-                assertEquals(EwaveEvent.PROBE_REQUEST, probe.path("type").asText());
-                assertEquals("Lab (guest)", probe.at("/payload/ssid").asText());
-                var history = mapper.readTree(get(client, server, "/api/probes").body());
-                assertEquals(1, history.size());
-                assertEquals(probe.path("payload"), history.get(0));
-                var profile = mapper.readTree(get(client, server, "/api/profiles").body()).get(0);
-                assertEquals("Lab (guest)", profile.path("probedSsids").get(0).asText());
-                assertEquals(1, profile.path("packetCount").asInt());
-                assertEquals(127, profile.path("lastRssi").asInt());
-                assertTrue(profile.path("estimatedMeters").isNull());
-                assertEquals("probes", mapper.readTree(get(client, server, "/api/status").body()).path("wifi").path("captureMode").asText());
+                bridge.startPassive("wlo1", false);
+                process.write(pcap);
+                var first = events.next(mapper).path("type").asText();
+                var second = events.next(mapper).path("type").asText();
+                assertEquals(List.of("WIFI_DEVICE_SEEN", "PROBE_RECEIVED"), List.of(first, second));
+                var decloaker = mapper.readTree(get(client, server, "/api/decloaker").body());
+                assertEquals(1, decloaker.path("totalProbes").asInt());
+                assertEquals(1, decloaker.path("directedProbes").asInt());
+                assertEquals(410, get(client, server, "/api/probes").statusCode());
+                assertEquals("watch", mapper.readTree(get(client, server, "/api/status").body())
+                        .path("wifi").path("captureMode").asText());
                 assertEquals(503, get(client, server, "/api/channels").statusCode());
             } finally {
                 socket.abort();
@@ -248,29 +254,30 @@ class ConsolidatedServerTest {
     @Test void parsesLaunchModesRejectsContradictoryFlagsAndDispatchesExpectedCommands(@TempDir Path dir) throws Exception {
         assertEquals(new Ewave.LaunchPlan(Ewave.Mode.HELP, "wlo1", 7070, 13, 100, false, false, null),
                 Ewave.parse("--help"));
-        assertEquals(new Ewave.LaunchPlan(Ewave.Mode.PACKETS, "wlo1", 7070, 13, 100, true, true, null),
+        assertEquals(new Ewave.LaunchPlan(Ewave.Mode.IDLE, "wlo1", 7070, 13, 100, false, false, null),
                 Ewave.parse());
-        assertEquals(new Ewave.LaunchPlan(Ewave.Mode.PROBES, "mon0", 7070, 13, 100, false, true, null),
-                Ewave.parse("--probes", "--iface", "mon0"));
-        assertEquals(new Ewave.LaunchPlan(Ewave.Mode.PASSIVE_RF, "mon0", 7070, 13, 100, false, false, null),
+        assertEquals(new Ewave.LaunchPlan(Ewave.Mode.IDLE, "wlo1", 7070, 13, 100, false, true, null),
+                Ewave.parse("--ops"));
+        assertEquals(new Ewave.LaunchPlan(Ewave.Mode.CAPTURE, "mon0", 7070, 13, 100, false, false, null),
+                Ewave.parse("--iface", "mon0"));
+        assertEquals(new Ewave.LaunchPlan(Ewave.Mode.CAPTURE, "mon0", 7070, 13, 100, false, false, null),
                 Ewave.parse("--passive-rf", "--iface", "mon0"));
-        assertEquals(new Ewave.LaunchPlan(Ewave.Mode.PASSIVE_RF, "mon0", 7070, 13, 100, true, false, null),
+        assertEquals(new Ewave.LaunchPlan(Ewave.Mode.CAPTURE, "mon0", 7070, 13, 100, true, false, null),
                 Ewave.parse("--passive-rf", "--adaptive", "--iface", "mon0"));
-        assertEquals(new Ewave.LaunchPlan(Ewave.Mode.PASSIVE_RF, "mon0", 7070, 13, 100, false, true, null),
+        assertEquals(new Ewave.LaunchPlan(Ewave.Mode.CAPTURE, "mon0", 7070, 13, 100, false, true, null),
                 Ewave.parse("--passive-rf", "--ops", "--iface", "mon0"));
+        assertEquals(new Ewave.LaunchPlan(Ewave.Mode.CAPTURE, "mon0", 7070, 13, 100, true, true, null),
+                Ewave.parse("--passive-rf", "--adaptive", "--ops", "--iface", "mon0"));
         assertEquals(new Ewave.LaunchPlan(Ewave.Mode.REPLAY, "wlo1", 7070, 13, 100, false, false, Path.of("sample.pcap")),
                 Ewave.parse("--replay", "sample.pcap"));
 
         for (String[] invalid : List.of(
-                new String[]{"--probes", "--passive-rf"},
-                new String[]{"--probes", "--adaptive", "--passive-rf"},
-                new String[]{"--probes", "--ops"},
+                new String[]{"--probes"},
+                new String[]{"--probes", "--iface", "mon0"},
                 new String[]{"--replay", "sample.pcap", "--passive-rf"},
                 new String[]{"--replay", "sample.pcap", "--iface", "wlo1"},
-                new String[]{"--replay", "sample.pcap", "--probes"},
+                new String[]{"--replay", "sample.pcap", "--ops"},
                 new String[]{"--adaptive"},
-                new String[]{"--ops"},
-                new String[]{"--passive-rf", "--adaptive", "--ops"},
                 new String[]{"--bands", "12"},
                 new String[]{"--tick-ms", "5"},
                 new String[]{"--tick-ms", "2001"},
@@ -286,11 +293,9 @@ class ConsolidatedServerTest {
             launched.add(List.copyOf(builder.command()));
             return new StreamingCaptureProcess();
         }, Map.of())) {
-            Ewave.startCapture(Ewave.parse("--probes", "--iface", "mon0"), bridge);
-            assertEquals(List.of("sudo", "tcpdump", "-i", "mon0", "-e", "-l", "-s", "256", "type mgt subtype probe-req"),
-                    launched.getFirst());
-            bridge.stop();
-            launched.clear();
+            Ewave.startCapture(Ewave.parse(), bridge);
+            assertTrue(launched.isEmpty(), () -> "Idle launch should not start capture: " + launched);
+            assertFalse(bridge.isRunning());
 
             Ewave.startCapture(Ewave.parse("--passive-rf", "--iface", "mon0"), bridge);
             assertTrue(launched.stream().anyMatch(cmd -> cmd.getFirst().equals("tcpdump") && cmd.contains("IEEE802_11_RADIO")),
@@ -299,7 +304,7 @@ class ConsolidatedServerTest {
             launched.clear();
 
             Ewave.startCapture(Ewave.parse("--iface", "mon0"), bridge);
-            assertTrue(launched.stream().anyMatch(cmd -> cmd.equals(List.of("tcpdump", "-i", "mon0", "-e", "-l", "-n", "-tt"))),
+            assertTrue(launched.stream().anyMatch(cmd -> cmd.getFirst().equals("tcpdump") && cmd.contains("IEEE802_11_RADIO")),
                     () -> "Launched: " + launched);
             bridge.stop();
             launched.clear();
@@ -310,6 +315,54 @@ class ConsolidatedServerTest {
             Ewave.startCapture(Ewave.parse("--replay", tempPcap.toString()), bridge);
             assertTrue(launched.isEmpty());
         }
+    }
+
+    @Test void parsesChannelBandRevealAndScopeFlagsAndMatchesExactSsidBytes() throws Exception {
+        var c1 = Ewave.parseConfig("--passive-rf", "--iface", "wlo1", "--channel", "6", "--band", "2.4",
+                "--reveal-probes", "--scope", "00:11:22:33:44:55");
+        assertEquals(2437, c1.frequencyMhz());
+        assertEquals(Boolean.TRUE, c1.revealProbes());
+        assertEquals("00:11:22:33:44:55", c1.scope());
+
+        assertEquals(5500, Ewave.parseConfig("--passive-rf", "--channel", "100", "--band", "5").frequencyMhz());
+        assertEquals(5955, Ewave.parseConfig("--passive-rf", "--channel", "1", "--band", "6").frequencyMhz());
+        assertEquals(2484, Ewave.parseConfig("--passive-rf", "--channel", "14").frequencyMhz());
+        assertEquals(5180, Ewave.parseConfig("--passive-rf", "--channel", "36").frequencyMhz());
+        assertEquals(Boolean.FALSE, Ewave.parseConfig("--replay", "sample.pcap", "--hide-probes").revealProbes());
+
+        for (String[] invalid : List.of(
+                new String[]{"--passive-rf", "--channel", "6"},
+                new String[]{"--passive-rf", "--channel", "149"},
+                new String[]{"--passive-rf", "--band", "2.4"},
+                new String[]{"--passive-rf", "--freq", "2437", "--channel", "6", "--band", "2.4"},
+                new String[]{"--passive-rf", "--adaptive", "--freq", "2437"},
+                new String[]{"--replay", "sample.pcap", "--freq", "2437"},
+                new String[]{"--passive-rf", "--reveal-probes", "--hide-probes"},
+                new String[]{"--interactive"},
+                new String[]{"--report-dir", "reports"}
+        )) {
+            assertThrows(IllegalArgumentException.class, () -> Ewave.parseConfig(invalid), String.join(" ", invalid));
+        }
+
+        // Exact SSID byte matching distinguishes raw non-UTF-8 octets from replacement characters.
+        var session = new PassiveWifiSession(new DeviceProfiler(), MyNetworkProfile.EMPTY, () -> 1_000L);
+        byte[] rawBytes = new byte[]{(byte) 0xff, (byte) 0xfe, 'A'};
+        byte[] replacementChars = "\ufffd\ufffdA".getBytes(StandardCharsets.UTF_8);
+        String apA = "00:11:22:33:44:55", apB = "00:11:22:33:44:66";
+        session.observe(Dot11FrameDecoder.decodeAny(ProbeFrames.radiotap(beacon(apA, rawBytes)), 127, 1_000L));
+        session.observe(Dot11FrameDecoder.decodeAny(ProbeFrames.radiotap(beacon(apB, replacementChars)), 127, 1_000L));
+        assertEquals(List.of(session.addressId(apA)), session.findAccessPoints(rawBytes));
+        assertEquals(List.of(session.addressId(apB)), session.findAccessPoints(replacementChars));
+    }
+
+    private static byte[] beacon(String bssid, byte[] ssid) {
+        byte[] mac = HexFormat.ofDelimiter(":").parseHex(bssid);
+        byte[] bcast = HexFormat.of().parseHex("ffffffffffff");
+        var buf = ByteBuffer.allocate(24 + 12 + 2 + ssid.length).order(ByteOrder.LITTLE_ENDIAN);
+        buf.putShort((short) 0x0080).putShort((short) 0).put(bcast).put(mac).put(mac).putShort((short) 0);
+        buf.putLong(1L).putShort((short) 100).putShort((short) 1);
+        buf.put((byte) 0).put((byte) ssid.length).put(ssid);
+        return buf.array();
     }
 
     private static URI uri(PassiveRfServer server, String path) {

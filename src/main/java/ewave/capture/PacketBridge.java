@@ -2,9 +2,7 @@ package ewave.capture;
 
 import ewave.core.AdaptiveScanner;
 import ewave.decoder.Dot11FrameDecoder;
-import ewave.model.DeviceRecord;
 import ewave.model.PacketEvent;
-import ewave.model.ProbeRequest;
 import ewave.model.EwaveEvent;
 import ewave.passive.DeviceProfiler;
 import ewave.passive.MyNetworkProfile;
@@ -22,9 +20,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.ArrayDeque;
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
@@ -33,97 +29,55 @@ import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.regex.Matcher;
 import java.util.function.Function;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 /**
- * Tcpdump capture: line-oriented packets or named probe requests.
- * Summary mode uses configurable (default 100 ms), monotonic-clock observation windows.
- * Channels 1..13 map to scanner band indexes 0..12,
- * so the scanner must have at least 13 bands. Channel 14 packets are queued only.
- * Summary-mode feedback marks every channel valid, including quiet channels.
- * Probe mode parses tcpdump text without feeding the general scanner.
- *
- * <p>Call {@link #setChannel(int)} when tuning the receiver if tcpdump does not
- * print channel metadata. Unavailable channels are represented by 0 and unavailable
- * RSSI by NaN; neither is guessed. Lines lacking timestamps, both addresses or a
- * printed length are skipped in summary mode. Probe text does not supply a frame length.
- * Text probes preserve any previously observed signal measurement.
- *
- * <p>Ticks, discovered devices and queued events survive stop/start. A scanner
- * supplied to a new bridge must have fresh feedback chronology. All bridge access
- * to the single-threaded scanner is synchronized on the scanner; callers sharing
- * it must use the same monitor. The optional packet retention queue is bounded
- * and evicts the oldest packets; overflow is counted by {@link #getDroppedPackets()}.
- * The event queue is bounded and evicts the oldest events when full; overflow is
- * counted by {@link #getDroppedEvents()}.
+ * Binary 802.11 radiotap capture and PCAP replay coordinator with channel hopping,
+ * Sniper tracking, passive analysis session state, and physical-radio Lab Ops coordination.
  */
 public final class PacketBridge implements AutoCloseable {
     private static final System.Logger LOG = System.getLogger(PacketBridge.class.getName());
     public static final int DEFAULT_TICK_MS = 100;
     private final int tickMs;
     private final long tickNanos;
-    private static final String MAC = "(?:[0-9a-f]{2}:){5}[0-9a-f]{2}";
-    private static final Pattern TIMESTAMP = Pattern.compile("^\\s*(\\d+(?:\\.\\d+)?)\\s+");
-    private static final Pattern ETHERNET = Pattern.compile("(" + MAC + ")\\s*>\\s*(" + MAC + ")", Pattern.CASE_INSENSITIVE);
-    private static final Pattern SOURCE = Pattern.compile("\\bSA:(" + MAC + ")", Pattern.CASE_INSENSITIVE);
-    private static final Pattern DESTINATION = Pattern.compile("\\bDA:(" + MAC + ")", Pattern.CASE_INSENSITIVE);
-    private static final Pattern TRANSMITTER = Pattern.compile("\\bTA:(" + MAC + ")", Pattern.CASE_INSENSITIVE);
-    private static final Pattern RECEIVER = Pattern.compile("\\bRA:(" + MAC + ")", Pattern.CASE_INSENSITIVE);
-    private static final Pattern PROBE_SENDER = Pattern.compile(
-            "\\b(" + MAC + ")(?:\\s+\\([^)]*\\))?\\s*>", Pattern.CASE_INSENSITIVE);
-    private static final Pattern PROBE_SSID = Pattern.compile("\\bSSID\\s+'((?:\\\\.|[^'\\\\])*)'", Pattern.CASE_INSENSITIVE);
-    private static final Pattern PROBE_NAME = Pattern.compile(
-            "\\bProbe Request\\s+\\((.*?)\\)(?=\\s*(?:,|\\[|$))", Pattern.CASE_INSENSITIVE);
-    private static final Pattern LENGTH = Pattern.compile("\\blength\\s+(\\d+)\\b", Pattern.CASE_INSENSITIVE);
-    private static final Pattern FREQUENCY = Pattern.compile("\\b(\\d{4})\\s*MHz\\b", Pattern.CASE_INSENSITIVE);
-    private static final Pattern CHANNEL = Pattern.compile("\\b(?:channel|chan)\\s*[=:]?\\s*(\\d+)\\b", Pattern.CASE_INSENSITIVE);
-    private static final Pattern SIGNAL = Pattern.compile("(-?\\d+(?:\\.\\d+)?)\\s*dBm\\s+signal\\b", Pattern.CASE_INSENSITIVE);
-    private static final Pattern PROTOCOL = Pattern.compile("\\bethertype\\s+([^\\s,(]+)", Pattern.CASE_INSENSITIVE);
     private static final Pattern OUI = Pattern.compile(
             "^\\s*([0-9a-f]{2}[:-][0-9a-f]{2}[:-][0-9a-f]{2}|[0-9a-f]{6})"
                     + "\\s+(?:\\((?:hex|base 16)\\)\\s+)?(.+?)\\s*$", Pattern.CASE_INSENSITIVE);
 
-    private final ConcurrentHashMap<String, DeviceRecord> devices = new ConcurrentHashMap<>();
-    private final Map<String, DeviceRecord> deviceView = Collections.unmodifiableMap(devices);
-    /** Default cap for the diagnostic packet queue; production does not drain it. */
-    public static final int PACKET_QUEUE_CAPACITY = 1024;
     /** Default cap for the WebSocket/UI event queue; oldest events are evicted if unconsumed. */
     public static final int EVENT_QUEUE_CAPACITY = 1024;
-    /** Maximum number of retained summary/probe device records in {@link #getDevices()}. */
-    public static final int DEVICE_LIMIT = 4096;
     private static final int MAX_CAPTURE_ERROR = 256;
-    private final BlockingQueue<PacketEvent> packetQueue;
-    private final int packetCapacity;
     private final int eventCapacity;
-    private final AtomicLong droppedPackets = new AtomicLong();
     private final AtomicLong droppedEvents = new AtomicLong();
-    private final AtomicLong evictedDevices = new AtomicLong();
     private final BlockingQueue<EwaveEvent> eventQueue;
-    public static final int RECENT_PROBE_LIMIT = 256;
-    private final ArrayDeque<ProbeRequest> recentProbes = new ArrayDeque<>();
     private final Map<String, String> vendors;
     private final ProcessStarter processStarter;
     private final Function<String, RadioStatus.Settings> radioSettings;
+    private final Function<String, String> wiphyResolver;
     private final DeviceProfiler profiler;
     private volatile int channel;
     // Guarded by this, including every session's counters and pending packets.
     private volatile Session session;
     private long tick;
     private long probeCount;
-    private String captureMode = "packets";
+    private String captureMode = "idle";
+    private long captureStartedAt;
     private String captureInterface;
+    private Integer fixedFrequencyMhz;
+    private boolean captureStoppedWhilePaused;
     private String captureError;
+    private final Map<String, String> activeOpsLeases = new HashMap<>();
     private volatile PassiveWifiSession passiveWifi;
     private PassiveApWatch apWatch;
+    private final SniperController sniper = new SniperController();
     private CaptureHealth health;
     private Replay replay;
     private final MyNetworkStore myNetwork = new MyNetworkStore();
@@ -141,8 +95,8 @@ public final class PacketBridge implements AutoCloseable {
     }
 
     public PacketBridge(int tickMs, DeviceProfiler profiler) {
-        this(ProcessBuilder::start, loadBundledVendors(), profiler, tickMs, PACKET_QUEUE_CAPACITY,
-                EVENT_QUEUE_CAPACITY, RadioStatus::read);
+        this(ProcessBuilder::start, loadBundledVendors(), profiler, tickMs, EVENT_QUEUE_CAPACITY,
+                EVENT_QUEUE_CAPACITY, RadioStatus::read, RadioStatus::readWiphy);
     }
 
     @FunctionalInterface
@@ -160,31 +114,30 @@ public final class PacketBridge implements AutoCloseable {
     }
 
     PacketBridge(ProcessStarter processStarter, Map<String, String> vendors, DeviceProfiler profiler, int tickMs) {
-        this(processStarter, vendors, profiler, tickMs, PACKET_QUEUE_CAPACITY);
+        this(processStarter, vendors, profiler, tickMs, EVENT_QUEUE_CAPACITY);
     }
 
     PacketBridge(ProcessStarter processStarter, Map<String, String> vendors, DeviceProfiler profiler, int tickMs,
-                 int packetCapacity) {
-        this(processStarter, vendors, profiler, tickMs, packetCapacity, EVENT_QUEUE_CAPACITY);
+                 int eventCapacity) {
+        this(processStarter, vendors, profiler, tickMs, eventCapacity, eventCapacity);
     }
 
     PacketBridge(ProcessStarter processStarter, Map<String, String> vendors, DeviceProfiler profiler, int tickMs,
-                 int packetCapacity, int eventCapacity) {
-        this(processStarter, vendors, profiler, tickMs, packetCapacity, eventCapacity, iface -> null);
+                 int ignoredPacketCapacity, int eventCapacity) {
+        this(processStarter, vendors, profiler, tickMs, ignoredPacketCapacity, eventCapacity, iface -> null, iface -> iface);
     }
 
-    private PacketBridge(ProcessStarter processStarter, Map<String, String> vendors, DeviceProfiler profiler,
-                         int tickMs, int packetCapacity, int eventCapacity,
-                         Function<String, RadioStatus.Settings> radioSettings) {
+    PacketBridge(ProcessStarter processStarter, Map<String, String> vendors, DeviceProfiler profiler, int tickMs,
+                 int ignoredPacketCapacity, int eventCapacity,
+                 Function<String, RadioStatus.Settings> radioSettings,
+                 Function<String, String> wiphyResolver) {
         this.radioSettings = radioSettings;
+        this.wiphyResolver = Objects.requireNonNull(wiphyResolver);
         if (tickMs < 10 || tickMs > 2000) throw new IllegalArgumentException("--tick-ms must be 10..2000");
-        if (packetCapacity < 1) throw new IllegalArgumentException("packetCapacity must be positive");
         if (eventCapacity < 1) throw new IllegalArgumentException("eventCapacity must be positive");
         this.tickMs = tickMs;
         tickNanos = TimeUnit.MILLISECONDS.toNanos(tickMs);
-        this.packetCapacity = packetCapacity;
         this.eventCapacity = eventCapacity;
-        this.packetQueue = new ArrayBlockingQueue<>(packetCapacity);
         this.eventQueue = new ArrayBlockingQueue<>(eventCapacity);
         this.processStarter = Objects.requireNonNull(processStarter);
         this.vendors = Map.copyOf(vendors);
@@ -194,22 +147,6 @@ public final class PacketBridge implements AutoCloseable {
     public int getTickMs() { return tickMs; }
 
     public DeviceProfiler getProfiler() { return profiler; }
-
-    /** Starts a new capture, or throws if already running; launch failures leave it restartable. */
-    public synchronized void start(String iface, AdaptiveScanner scanner) throws IOException {
-        Objects.requireNonNull(scanner, "scanner");
-        if (scanner.config().bands() < 13) {
-            throw new IllegalArgumentException("Channels 1..13 require at least 13 scanner bands");
-        }
-        startCapture(iface, scanner, "packets", false);
-    }
-
-    /** Passive, filtered capture on an already prepared monitor-mode interface.
-     * Probe-only traffic does not supply generic scanner observations or quiet misses.
-     */
-    public synchronized void startProbes(String iface) throws IOException {
-        startCapture(iface, null, "probes", false);
-    }
 
     /** Binary capture on an operator-prepared radiotap monitor interface. */
     public synchronized void startPassive(String iface) throws IOException {
@@ -225,21 +162,31 @@ public final class PacketBridge implements AutoCloseable {
         if (scanner != null && scanner.config().bands() < 13) {
             throw new IllegalArgumentException("Channels 1..13 require at least 13 scanner bands");
         }
-        startCapture(iface, scanner, "passive-rf", collectLabTargets);
+        startCapture(iface, scanner, scanner == null ? "watch" : "scan", collectLabTargets, true);
     }
 
     /** Reads an existing PCAP in order, as fast as the decoder can process it. */
     public synchronized void startReplay(Path file) throws IOException {
+        startReplay(file, Objects.toString(file.getFileName(), ""), null);
+    }
+
+    public synchronized Map<String, Object> startReplay(Path file, String name, UUID recordingId) throws IOException {
         if (isRunning()) throw new IllegalStateException("Capture is already running");
+        if (!activeOpsLeases.isEmpty()) throw new IllegalStateException("Stop active Lab Ops before starting replay");
         if (!Files.isRegularFile(file)) throw new IOException("Replay requires a regular PCAP file");
-        var started = new Replay(file.getFileName().toString());
+        captureStoppedWhilePaused = false;
+        fixedFrequencyMhz = null;
+        sniper.cancel();
+        var started = new Replay(name, recordingId);
         var reports = PassiveWifiSession.forReplay(profiler, myNetwork.get(), started::now);
         started.input = Files.newInputStream(file);
         replay = started;
         health = started.health;
         passiveWifi = reports;
         captureMode = "replay";
+        captureStartedAt = System.currentTimeMillis();
         captureInterface = null;
+        channel = 0;
         captureError = null;
         probeCount = 0;
         try {
@@ -249,6 +196,148 @@ public final class PacketBridge implements AutoCloseable {
             closeStream(started.input);
             throw failure;
         }
+        return getCaptureStatus();
+    }
+
+    public synchronized void setFixedFrequencyMhz(Integer frequencyMhz) {
+        if (frequencyMhz != null && (frequencyMhz < 2300 || frequencyMhz > 7125)) {
+            throw new IllegalArgumentException("Frequency must be in 2300..7125 MHz");
+        }
+        this.fixedFrequencyMhz = frequencyMhz;
+        if (frequencyMhz != null && frequencyMhz >= 2412 && frequencyMhz <= 2484) {
+            int ch = Dot11FrameDecoder.channel(frequencyMhz);
+            if (ch >= 1 && ch <= 14) this.channel = ch;
+        }
+    }
+
+    /** Serialized runtime capture start/switch preserving live same-interface observations. */
+    public synchronized Map<String, Object> configureRuntimeCapture(String mode, String iface, Integer frequencyMhz,
+                                                                    Path replayFile, int bands,
+                                                                    boolean collectLabTargets) throws IOException {
+        return configureRuntimeCapture(mode, iface, frequencyMhz, replayFile, bands, collectLabTargets, false);
+    }
+
+    public synchronized Map<String, Object> configureRuntimeCapture(String mode, String iface, Integer frequencyMhz,
+                                                                    Path replayFile, int bands,
+                                                                    boolean collectLabTargets, boolean requireIdle)
+            throws IOException {
+        if (requireIdle && isRunning()) throw new IllegalStateException("Stop the current capture first");
+        if (!activeOpsLeases.isEmpty()) {
+            throw new IllegalStateException("Stop active Lab Ops before changing capture mode");
+        }
+        if (mode == null) throw new IllegalArgumentException("mode is required (watch, scan, or replay)");
+        switch (mode) {
+            case "replay" -> {
+                if (replayFile == null || !Files.isRegularFile(replayFile) || !Files.isReadable(replayFile)) {
+                    throw new IllegalArgumentException("Replay requires a readable PCAP file");
+                }
+                stop();
+                startReplay(replayFile);
+            }
+            case "watch", "scan" -> {
+                if (iface == null || iface.isBlank() || iface.startsWith("-")) {
+                    throw new IllegalArgumentException("A valid Wi-Fi interface is required");
+                }
+                if (bands < 13) throw new IllegalArgumentException("Channels 1..13 require at least 13 scanner bands");
+                if ("watch".equals(mode) && frequencyMhz != null && (frequencyMhz < 2300 || frequencyMhz > 7125)) {
+                    throw new IllegalArgumentException("Frequency must be in 2300..7125 MHz");
+                }
+                if ("scan".equals(mode) && frequencyMhz != null) {
+                    throw new IllegalArgumentException("Fixed frequency cannot be combined with adaptive scan mode");
+                }
+                boolean preserveSession = passiveWifi != null && !passiveWifi.isReplaySession()
+                        && Objects.equals(captureInterface, iface) && replay == null;
+                AdaptiveScanner scanner = "scan".equals(mode)
+                        ? new AdaptiveScanner(AdaptiveScanner.Config.defaults(bands, 2048, 42L),
+                                Math.max(60, Math.ceilDiv(6000, tickMs)))
+                        : null;
+                if (session != null || (replay != null && replay.running())) {
+                    stopCaptureOnly(!preserveSession);
+                }
+                if ("watch".equals(mode) && frequencyMhz != null) {
+                    tuneInterfaceNow(iface, frequencyMhz);
+                    setFixedFrequencyMhz(frequencyMhz);
+                } else if ("scan".equals(mode)) {
+                    fixedFrequencyMhz = null;
+                }
+                startCapture(iface, scanner, mode, collectLabTargets, !preserveSession);
+            }
+            default -> throw new IllegalArgumentException("Unsupported capture mode: " + mode);
+        }
+        return getCaptureStatus();
+    }
+
+    /** Stops live capture or replay while keeping collected observations available for inspection. */
+    public synchronized Map<String, Object> stopRuntimeCapture() {
+        if (!activeOpsLeases.isEmpty()) {
+            throw new IllegalStateException("Stop active Lab Ops before stopping capture");
+        }
+        stopCaptureOnly(true);
+        return getCaptureStatus();
+    }
+
+    /** Tunes the active monitor interface during fixed-channel watch mode. */
+    public synchronized Map<String, Object> tuneChannel(int frequencyMhz) throws IOException {
+        if (frequencyMhz < 2300 || frequencyMhz > 7125) {
+            throw new IllegalArgumentException("Frequency must be in 2300..7125 MHz");
+        }
+        if (!activeOpsLeases.isEmpty()) {
+            throw new IllegalStateException("Stop active Lab Ops before tuning the channel");
+        }
+        Session current = session;
+        if (current == null || current.health == null || captureInterface == null) {
+            throw new IllegalStateException("Start live Wi-Fi capture before tuning a channel");
+        }
+        if (current.scanner != null || sniper.needsSweep() || sniper.desiredFrequencyMhz() != null) {
+            throw new IllegalStateException("Switch to fixed watch and cancel Sniper before manually tuning");
+        }
+        tuneInterfaceNow(captureInterface, frequencyMhz);
+        setFixedFrequencyMhz(frequencyMhz);
+        int ch24 = (frequencyMhz >= 2412 && frequencyMhz <= 2484) ? Dot11FrameDecoder.channel(frequencyMhz) : 0;
+        current.tunedFrequencyMhz = frequencyMhz;
+        current.tunedChannel = ch24;
+        return getCaptureStatus();
+    }
+
+    private void tuneInterfaceNow(String iface, int frequencyMhz) throws IOException {
+        var builder = new ProcessBuilder("sudo", "iw", "dev", iface, "set", "freq", Integer.toString(frequencyMhz))
+                .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+                .redirectError(ProcessBuilder.Redirect.DISCARD);
+        Process tuning = processStarter.start(builder);
+        try {
+            if (!tuning.waitFor(2, TimeUnit.SECONDS) || tuning.exitValue() != 0) {
+                throw new IOException("Could not tune " + iface + " to " + frequencyMhz + " MHz");
+            }
+        } catch (InterruptedException stopped) {
+            Thread.currentThread().interrupt();
+            throw new IOException("Interrupted while tuning " + iface, stopped);
+        } finally {
+            if (tuning.isAlive()) {
+                destroyDescendants(tuning, true);
+                tuning.destroyForcibly();
+            }
+        }
+    }
+
+    private void stopCaptureOnly(boolean cancelSniper) {
+        Session stopped;
+        InputStream replayInput = null;
+        synchronized (this) {
+            captureStoppedWhilePaused = true;
+            stopped = session;
+            if (stopped != null) {
+                session = null;
+                if (apWatch != null) apWatch.stop(System.currentTimeMillis());
+                if (cancelSniper) sniper.cancel();
+            }
+            if (replay != null && replay.running()) {
+                replay.state = "STOPPED";
+                replayInput = replay.input;
+            }
+            notifyAll();
+        }
+        if (stopped != null) terminate(stopped);
+        if (replayInput != null) closeStream(replayInput);
     }
 
     public synchronized CaptureHealth.Report getCaptureHealth() {
@@ -334,43 +423,38 @@ public final class PacketBridge implements AutoCloseable {
                 passiveWifi == null ? null : passiveWifi.addressId(entry.address()))).toList();
     }
 
-    private void startCapture(String iface, AdaptiveScanner scanner, String mode, boolean collectLabTargets) throws IOException {
+    private void startCapture(String iface, AdaptiveScanner scanner, String mode, boolean collectLabTargets,
+                              boolean resetSession) throws IOException {
         if (iface == null || iface.isBlank()) throw new IllegalArgumentException("Interface must not be blank");
         if (isRunning()) throw new IllegalStateException("Capture is already running");
-        boolean probes = mode.equals("probes"), monitor = mode.equals("passive-rf");
-        List<String> command = monitor ? PassiveCommandGuard.monitor(iface) : probes
-                ? PassiveCommandGuard.probes(iface) : PassiveCommandGuard.packets(iface);
+        captureStoppedWhilePaused = false;
+        List<String> command = PassiveCommandGuard.monitor(iface);
         var builder = new ProcessBuilder(command);
-        builder.redirectError(monitor ? ProcessBuilder.Redirect.PIPE
-                : probes ? ProcessBuilder.Redirect.DISCARD : ProcessBuilder.Redirect.INHERIT);
-        if (monitor) builder.environment().put("LC_ALL", "C");
-        PassiveWifiSession reports = monitor ? new PassiveWifiSession(profiler, myNetwork.get()) : null;
+        builder.redirectError(ProcessBuilder.Redirect.PIPE);
+        builder.environment().put("LC_ALL", "C");
+        PassiveWifiSession reports = !resetSession && passiveWifi != null
+                ? passiveWifi : new PassiveWifiSession(profiler, myNetwork.get());
         PassiveCommandGuard.requireWifi(builder.command(), iface);
         Process process = processStarter.start(builder);
-        Session started = new Session(process, scanner, monitor ? new CaptureHealth() : null,
-                monitor && !collectLabTargets);
+        CaptureHealth sessionHealth = !resetSession && health != null ? health : new CaptureHealth();
+        Session started = new Session(process, scanner, sessionHealth, collectLabTargets);
+        if (resetSession) sniper.cancel();
         replay = null;
         health = started.health;
         session = started;
         passiveWifi = reports;
         captureMode = mode;
+        if (resetSession) captureStartedAt = System.currentTimeMillis();
         captureInterface = iface;
         captureError = null;
         try {
-            started.reader = new Thread(() -> {
-                if (monitor) readMonitor(started, reports, collectLabTargets);
-                else if (probes) readProbes(started);
-                else readPackets(started);
-            }, "ewave-packet-reader");
+            started.reader = new Thread(() -> readMonitor(started, reports, collectLabTargets), "ewave-packet-reader");
             started.reader.setDaemon(true);
-            if (scanner != null) started.timer.scheduleAtFixedRate(() -> onTimer(started, iface),
-                    tickMs, tickMs, TimeUnit.MILLISECONDS);
-            if (reports != null) {
-                started.timer.scheduleAtFixedRate(reports::purge, 1, 1, TimeUnit.MINUTES);
-                started.timer.scheduleWithFixedDelay(() -> sampleMonitor(started, iface), 0, 5, TimeUnit.SECONDS);
-                started.diagnostics = Thread.ofPlatform().daemon().name("ewave-monitor-diagnostics")
-                        .start(() -> readDiagnostics(started));
-            }
+            started.timer.scheduleAtFixedRate(() -> onTimer(started, iface), tickMs, tickMs, TimeUnit.MILLISECONDS);
+            started.timer.scheduleAtFixedRate(reports::purge, 1, 1, TimeUnit.MINUTES);
+            started.timer.scheduleWithFixedDelay(() -> sampleMonitor(started, iface), 0, 5, TimeUnit.SECONDS);
+            started.diagnostics = Thread.ofPlatform().daemon().name("ewave-monitor-diagnostics")
+                    .start(() -> readDiagnostics(started));
             started.reader.start();
         } catch (RuntimeException | Error failure) {
             session = null;
@@ -385,17 +469,7 @@ public final class PacketBridge implements AutoCloseable {
         this.channel = channel;
     }
 
-    public Map<String, DeviceRecord> getDevices() { return deviceView; }
-
-    public BlockingQueue<PacketEvent> getPacketQueue() { return packetQueue; }
-
-    /** Capacity of the bounded diagnostic packet queue. */
-    public int getPacketQueueCapacity() { return packetCapacity; }
-
-    /** Packets discarded because the bounded packet queue was full; cumulative across stop/start. */
-    public long getDroppedPackets() { return droppedPackets.get(); }
-
-    /** Device lifecycle and decoded-probe events, with immutable payloads. */
+    /** Wi-Fi observation events, with immutable payloads. */
     public BlockingQueue<EwaveEvent> getEventQueue() { return eventQueue; }
 
     /** Capacity of the bounded event queue. */
@@ -404,30 +478,28 @@ public final class PacketBridge implements AutoCloseable {
     /** Events discarded because the bounded event queue was full; cumulative across stop/start. */
     public long getDroppedEvents() { return droppedEvents.get(); }
 
-    /** Most recent requests, oldest first, bounded across stop/start. */
-    public synchronized List<ProbeRequest> getProbeRequests() { return List.copyOf(recentProbes); }
-
     public synchronized Map<String, Object> getCaptureStatus() {
         Map<String, Object> status = new HashMap<>();
         status.put("captureRunning", isRunning());
         if (replay != null) {
             status.put("replayState", replay.state);
+            status.put("captureSource", replay.filename);
+            if (replay.recordingId != null) status.put("recordingId", replay.recordingId);
             if (replay.timestamp >= 0) status.put("referenceTime", replay.timestamp);
         }
         if (channel != 0) status.put("channel", channel);
         status.put("captureMode", captureMode);
+        if (captureStartedAt != 0) status.put("captureStartedAt", captureStartedAt);
         status.put("scannerAttached", session != null && session.scanner != null);
         if (captureInterface != null) status.put("captureInterface", captureInterface);
         status.put("probeRequests", probeCount);
-        status.put("recentProbeLimit", RECENT_PROBE_LIMIT);
-        status.put("packetQueueCapacity", packetCapacity);
-        status.put("packetsDropped", droppedPackets.get());
         status.put("eventQueueCapacity", eventCapacity);
         status.put("eventsDropped", droppedEvents.get());
         status.put("profileLimit", profiler.profileLimit());
         status.put("profilesEvicted", profiler.evictedCount());
         if (captureError != null) status.put("captureError", captureError);
         if (passiveWifi != null) {
+            status.put("sessionId", passiveWifi.sessionId());
             status.put("scopedBssidCount", passiveWifi.scopedBssidCount());
             status.put("neighborhoodProbes", passiveWifi.neighborhoodProbes());
             if (passiveWifi.preferredApId() != null) status.put("preferredApId", passiveWifi.preferredApId());
@@ -458,6 +530,51 @@ public final class PacketBridge implements AutoCloseable {
         if (apWatch == null || !apWatch.id().equals(id)) throw new IllegalArgumentException("Watch run has changed.");
         apWatch.stop(System.currentTimeMillis());
         return apWatchState();
+    }
+
+    public record SniperState(boolean available, SniperController.Snapshot run) {}
+
+    public synchronized SniperState sniperState() {
+        return new SniperState(session != null && session.watchAllowed, sniper.snapshot());
+    }
+
+    public synchronized SniperState startSniperBySsid(String ssid) {
+        if (ssid == null) throw new IllegalArgumentException("Enter a network name of 1–32 Wi-Fi bytes");
+        return startSniperBySsidBytes(ssid.getBytes(StandardCharsets.UTF_8), ssid);
+    }
+
+    public synchronized SniperState startSniperBySsidBytes(byte[] ssidBytes, String displaySsid) {
+        if (session == null || !session.watchAllowed)
+            throw new IllegalStateException("Start live passive Wi-Fi capture to run Sniper.");
+        if (session.survey != null) session.survey.reset();
+        return new SniperState(true, sniper.startBySsid(ssidBytes, displaySsid));
+    }
+
+    public synchronized SniperState startSniperByApId(String apId) {
+        if (session == null || !session.watchAllowed)
+            throw new IllegalStateException("Start live passive Wi-Fi capture to run Sniper.");
+        var details = passiveWifi == null ? null : passiveWifi.observedAp(apId);
+        if (details == null) throw new IllegalArgumentException("Choose an access point from the current capture.");
+        return new SniperState(true, sniper.startByAp(apId, details.bssid(), details.ssidBytes(),
+                details.ssid(), details.channel(), details.frequencyMhz(),
+                details.beaconIntervalTu(), details.lastSeen()));
+    }
+
+    public synchronized SniperState selectSniperCandidate(String apId) {
+        if (session == null || !session.watchAllowed)
+            throw new IllegalStateException("Start live passive Wi-Fi capture to run Sniper.");
+        return new SniperState(true, sniper.selectCandidate(apId));
+    }
+
+    public synchronized SniperState stopSniper() {
+        return new SniperState(session != null && session.watchAllowed, sniper.cancel());
+    }
+
+    public synchronized SniperState stopSniper(UUID id) {
+        var current = sniper.snapshot();
+        if (current.id() == null || !current.id().equals(id))
+            throw new IllegalArgumentException("Sniper run has changed.");
+        return stopSniper();
     }
 
     public record ChannelCoverage(int channel, Long lastTuneAtMs, Long lastFrameAtMs,
@@ -496,57 +613,110 @@ public final class PacketBridge implements AutoCloseable {
 
     public synchronized boolean isRunning() { return session != null || replay != null && replay.running(); }
 
-    /** Stops capture and publishes pending packets without inventing a complete final tick. */
-    public void stop() {
-        Session stopped;
-        InputStream replayInput = null;
+    private record PausedSession(String iface, AdaptiveScanner scanner, String mode, boolean collectLabTargets) {}
+
+    /** Exclusive physical-radio lease for active Lab Ops; restores the current desired passive policy on close. */
+    public final class OpsLease implements AutoCloseable {
+        private final String wiphy;
+        private final PausedSession paused;
+        private final java.util.concurrent.atomic.AtomicBoolean released = new java.util.concurrent.atomic.AtomicBoolean();
+
+        private OpsLease(String wiphy, PausedSession paused) {
+            this.wiphy = wiphy;
+            this.paused = paused;
+        }
+
+        @Override public void close() {
+            if (released.compareAndSet(false, true)) releaseOpsLease(wiphy, paused);
+        }
+    }
+
+    public OpsLease acquireOpsLease(String requestedInterface, boolean pauseMonitorCapture) {
+        String target = requestedInterface == null || requestedInterface.isBlank() ? "wlo1" : requestedInterface;
+        String wiphy = wiphyResolver.apply(target);
+        if (wiphy == null || wiphy.isBlank()) wiphy = target;
+        Session toPause = null;
+        PausedSession pausedInfo = null;
         synchronized (this) {
-            stopped = session;
-            if (stopped != null) {
-                session = null;
-                if (apWatch != null) apWatch.stop(System.currentTimeMillis());
-                publishPending(stopped);
+            if (activeOpsLeases.containsKey(wiphy)) {
+                throw new IllegalStateException("An active operation already owns radio " + wiphy);
             }
-            if (replay != null && replay.running()) {
-                replay.state = "STOPPED";
-                replayInput = replay.input;
+            activeOpsLeases.put(wiphy, target);
+            Session current = session;
+            boolean sameRadio = current != null && captureInterface != null
+                    && wiphy.equals(Objects.requireNonNullElse(wiphyResolver.apply(captureInterface), captureInterface));
+            if (sameRadio) {
+                current.opsPaused = true;
+                sniper.setOpsPaused(true);
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+                while (session == current && (current.retunePending || current.tuning)) {
+                    long remainingMs = TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime());
+                    if (remainingMs <= 0) break;
+                    try {
+                        wait(Math.min(200, remainingMs));
+                    } catch (InterruptedException interrupted) {
+                        activeOpsLeases.remove(wiphy);
+                        current.opsPaused = false;
+                        sniper.setOpsPaused(false);
+                        Thread.currentThread().interrupt();
+                        throw new IllegalStateException("Interrupted while waiting for radio retune", interrupted);
+                    }
+                }
+                if (pauseMonitorCapture && current.health != null && session == current) {
+                    toPause = current;
+                    pausedInfo = new PausedSession(captureInterface, current.scanner, captureMode,
+                            current.collectLabTargets);
+                    session = null;
+                }
             }
         }
-        if (stopped != null) terminate(stopped);
-        if (replayInput != null) closeStream(replayInput);
+        if (toPause != null) terminate(toPause);
+        return new OpsLease(wiphy, pausedInfo);
+    }
+
+    private void releaseOpsLease(String wiphy, PausedSession paused) {
+        synchronized (this) {
+            activeOpsLeases.remove(wiphy);
+            sniper.setOpsPaused(false);
+            if (captureStoppedWhilePaused) return;
+            if (paused != null && session == null) {
+                try {
+                    startCapture(paused.iface(), paused.scanner(), paused.mode(), paused.collectLabTargets(), false);
+                } catch (IOException failure) {
+                    captureError = "Failed to resume capture after Lab Ops: " + failure.getMessage();
+                    LOG.log(System.Logger.Level.WARNING, captureError, failure);
+                }
+            }
+            Session current = session;
+            if (current != null && captureInterface != null
+                    && wiphy.equals(Objects.requireNonNullElse(wiphyResolver.apply(captureInterface), captureInterface))) {
+                current.opsPaused = false;
+                current.tunedChannel = 0;
+                current.tunedFrequencyMhz = 0;
+                Integer desired = sniper.desiredFrequencyMhz();
+                if (desired == null && !sniper.needsSweep() && current.scanner == null) {
+                    desired = fixedFrequencyMhz;
+                }
+                if (desired != null && current.retuner != null) {
+                    int targetFreq = desired;
+                    int ch = Dot11FrameDecoder.channel(targetFreq);
+                    int requestedCh = ch >= 1 && ch <= 13 ? ch : 0;
+                    current.retunePending = true;
+                    current.retuner.execute(() -> retune(current, captureInterface, requestedCh, targetFreq));
+                } else if ((sniper.needsSweep() || current.scanner != null) && current.survey != null) {
+                    current.survey.reset();
+                }
+            }
+            notifyAll();
+        }
+    }
+
+    /** Stops capture and preserves collected observations. */
+    public void stop() {
+        stopCaptureOnly(true);
     }
 
     @Override public void close() { stop(); }
-
-    private void readPackets(Session current) {
-        try (BufferedReader reader = new BufferedReader(new InputStreamReader(
-                current.process.getInputStream(), StandardCharsets.UTF_8))) {
-            String line;
-            while (!Thread.currentThread().isInterrupted() && (line = reader.readLine()) != null) {
-                synchronized (this) {
-                    if (session != current) return;
-                    advanceTicks(current, System.nanoTime());
-                    PacketEvent packet = parseLine(line, channel);
-                    if (packet == null) continue;
-                    profiler.observe(packet);
-                    if (packet.channel() >= 1 && packet.channel() <= 13) current.counts[packet.channel()]++;
-                    current.pending.add(packet);
-                    if (current.pending.size() >= packetCapacity) publishPending(current);
-                    updateDevice(packet.srcMac(), packet, true);
-                    if (!packet.dstMac().equals(packet.srcMac())) updateDevice(packet.dstMac(), packet, false);
-                }
-            }
-            synchronized (this) {
-                if (session == current) LOG.log(System.Logger.Level.WARNING, "tcpdump stdout closed; stopping capture");
-            }
-        } catch (IOException | RuntimeException failure) {
-            synchronized (this) {
-                if (session == current) LOG.log(System.Logger.Level.WARNING, "Capture reader failed", failure);
-            }
-        } finally {
-            endSession(current);
-        }
-    }
 
     private void readMonitor(Session current, PassiveWifiSession reports, boolean collectLabTargets) {
         try (InputStream input = current.process.getInputStream()) {
@@ -556,29 +726,37 @@ public final class PacketBridge implements AutoCloseable {
                 synchronized (this) {
                     if (session != current) return;
                     long now = System.currentTimeMillis();
+                    current.receivedFrame = true;
                     current.health.record(control, complete, frame, timestamp, now, monotonicMillis());
                     if (frame == null) return;
                     if (current.scanner != null) {
                         advanceTicks(current, System.nanoTime());
-                        int observedChannel = Dot11FrameDecoder.channel(frame.frequencyMhz());
-                        if (observedChannel >= 1 && observedChannel <= 13
-                                && Integer.valueOf(frame.frequencyMhz()).equals(channelFrequencyMhz(observedChannel))) {
-                            current.counts[observedChannel]++;
-                            if (current.survey != null) {
-                                int band = observedChannel - 1;
-                                current.lastFrameAtMs[band] = Math.max(current.lastFrameAtMs[band], frame.timestamp());
-                                if (!current.tuning && current.tunedChannel == observedChannel
-                                        && current.lastTuneAtMs[band] != 0 && frame.timestamp() >= current.lastTuneAtMs[band]) {
-                                    current.survey.frame(System.nanoTime(), observedChannel);
-                                    current.lastFrameWhileTunedAtMs[band] = Math.max(
-                                            current.lastFrameWhileTunedAtMs[band], frame.timestamp());
-                                }
+                    }
+                    int observedChannel = Dot11FrameDecoder.channel(frame.frequencyMhz());
+                    if (observedChannel >= 1 && observedChannel <= 13
+                            && Integer.valueOf(frame.frequencyMhz()).equals(channelFrequencyMhz(observedChannel))) {
+                        if (current.scanner != null) current.counts[observedChannel]++;
+                        if (current.survey != null) {
+                            int band = observedChannel - 1;
+                            current.lastFrameAtMs[band] = Math.max(current.lastFrameAtMs[band], frame.timestamp());
+                            if (!current.tuning && current.tunedChannel == observedChannel
+                                    && current.lastTuneAtMs[band] != 0 && frame.timestamp() >= current.lastTuneAtMs[band]) {
+                                current.survey.frame(System.nanoTime(), observedChannel);
+                                current.lastFrameWhileTunedAtMs[band] = Math.max(
+                                        current.lastFrameWhileTunedAtMs[band], frame.timestamp());
                             }
                         }
                     }
                     if (current.watchAllowed && apWatch != null) apWatch.observe(frame);
                 }
                 var observed = reports.observe(frame);
+                if (frame.apAdvertisement() && (frame.capability() & 1) != 0 && frame.addr3().equals(frame.addr2())) {
+                    String apId = reports.addressId(frame.addr3());
+                    var details = reports.observedAp(apId);
+                    sniper.observeFrame(frame, apId, frame.addr3(),
+                            details != null ? details.ssidBytes() : frame.ies().first(0),
+                            details != null ? details.ssid() : null);
+                }
                 if (collectLabTargets && observed.inventory()) {
                     profiler.observe(new PacketEvent(frame.addr2(), frame.addr1(),
                             Dot11FrameDecoder.channel(frame.frequencyMhz()), frame.rssi(), frame.frameLength(),
@@ -643,7 +821,7 @@ public final class PacketBridge implements AutoCloseable {
         synchronized (this) {
             if (session != current) return;
             if (settings != null) current.health.updateRadio(settings);
-            if (!current.health.hasFrames()) return;
+            if (!current.receivedFrame) return;
         }
         requestTcpdumpStatistics(current.process);
     }
@@ -686,26 +864,6 @@ public final class PacketBridge implements AutoCloseable {
 
     private static long monotonicMillis() { return TimeUnit.NANOSECONDS.toMillis(System.nanoTime()); }
 
-    private void readProbes(Session current) {
-        try (var reader = new BufferedReader(new InputStreamReader(
-                current.process.getInputStream(), StandardCharsets.UTF_8))) {
-            String line;
-            while (!Thread.currentThread().isInterrupted() && (line = reader.readLine()) != null) {
-                ProbeRequest probe = parseProbeLine(line);
-                if (probe == null) continue;
-                synchronized (this) {
-                    if (session != current) return;
-                    recordProbe(probe);
-                }
-            }
-            reportProbeFailure(current, "Probe capture ended; check the monitor interface and tcpdump permissions");
-        } catch (IOException | RuntimeException failure) {
-            reportProbeFailure(current, Objects.toString(failure.getMessage(), "Probe capture failed"));
-        } finally {
-            endSession(current);
-        }
-    }
-
     private void reportProbeFailure(Session current, String fallback) {
         // Never hold the bridge lock while waiting for the child or diagnostics stream to finish.
         try {
@@ -742,45 +900,51 @@ public final class PacketBridge implements AutoCloseable {
         return text.length() > MAX_CAPTURE_ERROR ? text.substring(0, MAX_CAPTURE_ERROR - 1) + "…" : text;
     }
 
-    private void recordProbe(ProbeRequest probe) {
-        profiler.observeProbe(probe.sourceMac(), probe.ssid());
-        if (recentProbes.size() == RECENT_PROBE_LIMIT) recentProbes.removeFirst();
-        recentProbes.addLast(probe);
-        probeCount++;
-        DeviceRecord previous = devices.get(probe.sourceMac());
-        var profile = profiler.get(probe.sourceMac());
-        var ssids = profile == null ? List.of(probe.ssid()) : profile.probedSsids();
-        var metadata = new HashMap<>(previous == null ? Map.<String, String>of() : previous.metadata());
-        metadata.put("probeRequests", Long.toString(Long.parseLong(metadata.getOrDefault("probeRequests", "0")) + 1));
-        metadata.put("macAddressType", probe.locallyAdministered() ? "locally administered" : "globally administered");
-        double rssi = previous == null ? Double.NaN : previous.rssi();
-        String vendor = probe.locallyAdministered() ? "Unknown"
-                : vendors.getOrDefault(probe.sourceMac().substring(0, 8).replace(":", ""), "Unknown");
-        DeviceRecord updated = new DeviceRecord(probe.sourceMac(), previous == null ? vendor : previous.vendor(),
-                previous == null ? null : previous.hostname(),
-                previous == null ? DeviceRecord.DeviceType.UNKNOWN : previous.type(), rssi,
-                previous == null ? probe.timestamp() : Math.min(previous.firstSeen(), probe.timestamp()),
-                previous == null ? probe.timestamp() : Math.max(previous.lastSeen(), probe.timestamp()), ssids, metadata);
-        putDevice(probe.sourceMac(), updated);
-        publishEvent(previous == null ? EwaveEvent.deviceAppeared(updated) : EwaveEvent.deviceUpdated(updated));
-        publishEvent(EwaveEvent.probeRequest(probe));
-    }
-
     private void onTimer(Session current, String iface) {
         try {
             synchronized (this) {
-                if (session != current) return;
+                if (session != current || current.opsPaused) return;
                 long now = System.nanoTime();
-                advanceTicks(current, now);
-                if (tick == current.lastDecisionTick) return;
-                // The packet reader can also close windows, so check the tick even
-                // when advanceTicks did not close a window in this callback.
-                current.lastDecisionTick = tick;
+                if (current.scanner != null) {
+                    advanceTicks(current, now);
+                }
+                sniper.tick();
+                Integer sniperFreq = sniper.desiredFrequencyMhz();
+                boolean sniperSweep = sniperFreq == null && sniper.needsSweep();
+                if (sniperFreq == null && !sniperSweep) {
+                    if (current.scanner == null) return;
+                    if (tick == current.lastDecisionTick) return;
+                    // The packet reader can also close windows, so check the tick even
+                    // when advanceTicks did not close a window in this callback.
+                    current.lastDecisionTick = tick;
+                }
                 var survey = current.survey;
                 if (survey != null && current.retunePending) return;
+                if (sniperFreq != null) {
+                    if (current.tunedFrequencyMhz == sniperFreq) return;
+                    int ch = Dot11FrameDecoder.channel(sniperFreq);
+                    current.lastChosen = ch >= 1 && ch <= 13 ? ch : null;
+                    if (survey != null) current.retunePending = true;
+                    current.retuner.execute(() -> retune(current, iface, ch, sniperFreq));
+                    return;
+                }
                 int chosen;
                 if (survey != null) {
                     chosen = survey.channel(now);
+                    int listening = survey.listeningChannel();
+                    if (sniperSweep && listening != 0 && listening == current.tunedChannel && chosen != listening) {
+                        sniper.sweepChannelFinished(listening);
+                        Integer lockedFreq = sniper.desiredFrequencyMhz();
+                        if (lockedFreq != null) {
+                            int lockedCh = Dot11FrameDecoder.channel(lockedFreq);
+                            current.lastChosen = lockedCh >= 1 && lockedCh <= 13 ? lockedCh : null;
+                            if (current.tunedFrequencyMhz == lockedFreq) return;
+                            current.retunePending = true;
+                            current.retuner.execute(() -> retune(current, iface, lockedCh, lockedFreq));
+                            return;
+                        }
+                        if (!sniper.needsSweep() && current.scanner == null) return;
+                    }
                 } else {
                     synchronized (current.scanner) {
                         chosen = current.scanner.choose(tick, 1).bands()[0] + 1;
@@ -788,7 +952,11 @@ public final class PacketBridge implements AutoCloseable {
                 }
                 current.lastChosen = chosen;
                 Integer frequency = channelFrequencyMhz(chosen);
-                if (frequency == null || survey != null && current.tunedChannel == chosen) return;
+                if (frequency == null) return;
+                if (survey != null && current.tunedChannel == chosen && current.tunedFrequencyMhz == frequency) {
+                    survey.listenOnConfirmedChannel(now, chosen);
+                    return;
+                }
                 int requested = chosen;
                 if (survey != null) current.retunePending = true;
                 current.retuner.execute(() -> retune(current, iface, requested, frequency));
@@ -802,8 +970,16 @@ public final class PacketBridge implements AutoCloseable {
     private void retune(Session current, String iface, int chosen, int frequency) {
         if (Thread.currentThread().isInterrupted()) return;
         synchronized (this) {
-            if (session != current) return;
-            if (current.health != null && current.tunedChannel == chosen) return;
+            if (session != current || current.opsPaused) {
+                current.retunePending = false;
+                notifyAll();
+                return;
+            }
+            if (current.health != null && current.tunedFrequencyMhz == frequency) {
+                current.retunePending = false;
+                notifyAll();
+                return;
+            }
             current.recordDwell(System.nanoTime());
             current.tuning = true;
         }
@@ -832,24 +1008,31 @@ public final class PacketBridge implements AutoCloseable {
                 if (session == current) {
                     long completed = System.nanoTime();
                     current.dwellStarted = completed;
+                    int ch24 = (frequency >= 2412 && frequency <= 2484) ? Dot11FrameDecoder.channel(frequency) : 0;
                     if (succeeded) {
                         current.successfulRetunes++;
                         current.retuneNanos += completed - started;
-                        channel = chosen;
-                        current.tunedChannel = chosen;
-                        if (current.survey != null) {
-                            long confirmedAt = System.currentTimeMillis();
-                            current.lastTuneAtMs[chosen - 1] = confirmedAt;
-                            if (apWatch != null) apWatch.tuneConfirmed(chosen, confirmedAt);
+                        current.tunedFrequencyMhz = frequency;
+                        current.tunedChannel = ch24;
+                        if (ch24 >= 1 && ch24 <= 14) channel = ch24;
+                        long confirmedAt = System.currentTimeMillis();
+                        sniper.tuneConfirmed(Dot11FrameDecoder.channel(frequency), frequency, confirmedAt);
+                        if (current.survey != null && ch24 >= 1 && ch24 <= 13) {
+                            current.lastTuneAtMs[ch24 - 1] = confirmedAt;
+                            if (apWatch != null) apWatch.tuneConfirmed(ch24, confirmedAt);
                         }
                     } else {
                         current.failedRetunes++;
                         current.tunedChannel = 0;
+                        current.tunedFrequencyMhz = 0;
                     }
-                    if (current.survey != null) current.survey.tuneFinished(completed, chosen, succeeded, completed - started);
+                    if (current.survey != null && chosen >= 1 && chosen <= 13 && sniper.desiredFrequencyMhz() == null) {
+                        current.survey.tuneFinished(completed, chosen, succeeded, completed - started);
+                    }
                 }
                 current.retunePending = false;
                 current.tuning = false;
+                notifyAll();
             }
         }
     }
@@ -866,29 +1049,8 @@ public final class PacketBridge implements AutoCloseable {
                 }
             }
             Arrays.fill(current.counts, 0);
-            publishPending(current);
             tick++;
             current.nextBoundary += tickNanos;
-        }
-    }
-
-    /** Publishes collected packets, evicting the oldest when the bounded queue is full. Caller holds this. */
-    private void publishPending(Session current) {
-        if (current.pending.isEmpty()) return;
-        for (PacketEvent packet : current.pending) {
-            if (packetQueue.offer(packet)) continue;
-            PacketEvent evicted = packetQueue.poll();
-            if (evicted != null) recordDrop();
-            if (!packetQueue.offer(packet)) recordDrop();
-        }
-        current.pending.clear();
-    }
-
-    private void recordDrop() {
-        if (droppedPackets.incrementAndGet() == 1) {
-            LOG.log(System.Logger.Level.WARNING,
-                    "Packet retention queue reached capacity " + packetCapacity
-                            + "; oldest packets are being discarded. The launcher does not drain this diagnostic queue.");
         }
     }
 
@@ -905,43 +1067,12 @@ public final class PacketBridge implements AutoCloseable {
         }
     }
 
-    private void putDevice(String mac, DeviceRecord updated) {
-        if (!devices.containsKey(mac) && devices.size() >= DEVICE_LIMIT) {
-            String oldestKey = null;
-            long oldestTime = Long.MAX_VALUE;
-            for (var entry : devices.entrySet()) {
-                if (entry.getValue().lastSeen() < oldestTime) {
-                    oldestTime = entry.getValue().lastSeen();
-                    oldestKey = entry.getKey();
-                }
-            }
-            if (oldestKey != null && devices.remove(oldestKey) != null) evictedDevices.incrementAndGet();
-        }
-        devices.put(mac, updated);
-    }
-
-    private void updateDevice(String mac, PacketEvent packet, boolean transmitter) {
-        // Broadcast/multicast addresses identify groups, not individual devices.
-        if ((Integer.parseInt(mac.substring(0, 2), 16) & 1) != 0 || mac.equals("00:00:00:00:00:00")) return;
-        DeviceRecord previous = devices.get(mac);
-        double rssi = transmitter && !Double.isNaN(packet.rssi()) ? packet.rssi()
-                : previous == null ? Double.NaN : previous.rssi();
-        DeviceRecord updated = previous == null
-                ? new DeviceRecord(mac, vendors.getOrDefault(mac.substring(0, 8).replace(":", ""), "Unknown"),
-                        null, DeviceRecord.DeviceType.UNKNOWN, rssi, packet.timestamp(), packet.timestamp(), null, null)
-                : new DeviceRecord(mac, previous.vendor(), previous.hostname(), previous.type(), rssi,
-                        Math.min(previous.firstSeen(), packet.timestamp()), Math.max(previous.lastSeen(), packet.timestamp()),
-                        previous.probedSsids(), previous.metadata());
-        putDevice(mac, updated);
-        publishEvent(previous == null ? EwaveEvent.deviceAppeared(updated) : EwaveEvent.deviceUpdated(updated));
-    }
-
     private void endSession(Session current) {
         synchronized (this) {
             if (session != current) return; // A stopped reader cannot tear down a newer capture.
             session = null;
             if (apWatch != null) apWatch.stop(System.currentTimeMillis());
-            publishPending(current);
+            sniper.cancel();
         }
         terminate(current);
     }
@@ -1002,85 +1133,6 @@ public final class PacketBridge implements AutoCloseable {
         }
     }
 
-    /** Parses named requests only; time-of-day text has no date, so use receipt time. */
-    static ProbeRequest parseProbeLine(String line) {
-        if (line == null) return null;
-        Matcher ssidField = PROBE_SSID.matcher(line);
-        Matcher probeName = PROBE_NAME.matcher(line);
-        boolean hasSsid = ssidField.find(), hasName = probeName.find();
-        if (!hasSsid && !hasName) return null;
-        Matcher name = hasSsid && (!hasName || ssidField.start() < probeName.start()) ? ssidField : probeName;
-        String ssid = name.group(1);
-        if (ssid.isBlank()) return null;
-        // A network name can itself contain address-like text; only inspect the header.
-        String header = line.substring(0, name.start());
-        String mac = matchAddress(SOURCE, header);
-        if (mac == null) mac = matchAddress(TRANSMITTER, header);
-        if (mac == null) mac = matchAddress(PROBE_SENDER, header);
-        if (mac == null) return null;
-        mac = mac.toLowerCase(Locale.ROOT);
-        int prefix = Integer.parseInt(mac.substring(0, 2), 16);
-        if ((prefix & 1) != 0 || mac.equals("00:00:00:00:00:00")) return null;
-        // Exact SSID octets, destination/BSSID and frame length are unavailable in this text path.
-        return new ProbeRequest(mac, null, null, ssid, "", false, (prefix & 2) != 0,
-                0, 0, Double.NaN, System.currentTimeMillis(), 0, List.of(), List.of());
-    }
-
-    /** Returns null for non-packet output or incomplete/malformed summaries. */
-    static PacketEvent parseLine(String line, int fallbackChannel) {
-        Matcher timestamp = TIMESTAMP.matcher(line);
-        Matcher length = LENGTH.matcher(line);
-        if (!timestamp.find() || !length.find()) return null;
-        Matcher ethernet = ETHERNET.matcher(line);
-        String src;
-        String dst;
-        boolean wireless = !ethernet.find();
-        if (!wireless) {
-            src = ethernet.group(1);
-            dst = ethernet.group(2);
-        } else {
-            src = matchAddress(SOURCE, line);
-            dst = matchAddress(DESTINATION, line);
-            if (src == null) src = matchAddress(TRANSMITTER, line);
-            if (dst == null) dst = matchAddress(RECEIVER, line);
-            if (src == null || dst == null) return null;
-        }
-        try {
-            double seconds = Double.parseDouble(timestamp.group(1));
-            double millis = seconds * 1_000;
-            if (!Double.isFinite(millis) || millis >= Long.MAX_VALUE) return null;
-            Matcher signal = SIGNAL.matcher(line);
-            Matcher protocol = PROTOCOL.matcher(line);
-            return new PacketEvent(src.toLowerCase(Locale.ROOT), dst.toLowerCase(Locale.ROOT),
-                    parseChannel(line, fallbackChannel), signal.find() ? Double.parseDouble(signal.group(1)) : Double.NaN,
-                    Integer.parseInt(length.group(1)), protocol.find() ? protocol.group(1) : wireless ? "802.11" : "Unknown",
-                    (long) millis, line);
-        } catch (NumberFormatException failure) {
-            return null;
-        }
-    }
-
-    private static String matchAddress(Pattern pattern, String line) {
-        Matcher matcher = pattern.matcher(line);
-        return matcher.find() ? matcher.group(1) : null;
-    }
-
-    private static int parseChannel(String line, int fallback) {
-        Matcher frequency = FREQUENCY.matcher(line);
-        if (frequency.find()) {
-            int mhz = Integer.parseInt(frequency.group(1));
-            if (mhz == 2484) return 14;
-            if (mhz >= 2412 && mhz <= 2472 && (mhz - 2407) % 5 == 0) return (mhz - 2407) / 5;
-            return 0; // An explicit non-2.4 GHz frequency must not use a stale fallback.
-        }
-        Matcher explicit = CHANNEL.matcher(line);
-        if (explicit.find()) {
-            int parsed = Integer.parseInt(explicit.group(1));
-            return parsed >= 1 && parsed <= 14 ? parsed : 0;
-        }
-        return fallback;
-    }
-
     private static Map<String, String> loadBundledVendors() {
         try (InputStream input = PacketBridge.class.getResourceAsStream("/oui.txt")) {
             if (input == null) {
@@ -1116,15 +1168,17 @@ public final class PacketBridge implements AutoCloseable {
         final AdaptiveScanner scanner;
         final CaptureHealth health;
         final boolean watchAllowed;
+        final boolean collectLabTargets;
         final PassiveChannelSurvey survey;
         final ThreadPoolExecutor retuner;
         final long[] counts = new long[14];
-        final List<PacketEvent> pending = new ArrayList<>();
         long nextDeviceEvent, nextProbeEvent;
         long lastDecisionTick = tick;
         Integer lastChosen;
         int tunedChannel;
-        boolean tuning, retunePending;
+        int tunedFrequencyMhz;
+        boolean receivedFrame;
+        boolean tuning, retunePending, opsPaused;
         long successfulRetunes, failedRetunes, retuneNanos, dwellStarted;
         final long[] dwellNanos = new long[13];
         final long[] lastTuneAtMs = new long[dwellNanos.length];
@@ -1132,13 +1186,13 @@ public final class PacketBridge implements AutoCloseable {
         final long[] lastFrameWhileTunedAtMs = new long[dwellNanos.length];
 
         void recordDwell(long now) {
-            if (!tuning && tunedChannel != 0) dwellNanos[tunedChannel - 1] += now - dwellStarted;
+            if (!tuning && tunedChannel >= 1 && tunedChannel <= 13) dwellNanos[tunedChannel - 1] += now - dwellStarted;
             dwellStarted = now;
         }
 
         RadioTelemetry radioTelemetry() {
             long[] dwell = dwellNanos.clone();
-            if (!tuning && tunedChannel != 0) dwell[tunedChannel - 1] += System.nanoTime() - dwellStarted;
+            if (!tuning && tunedChannel >= 1 && tunedChannel <= 13) dwell[tunedChannel - 1] += System.nanoTime() - dwellStarted;
             int observed = health == null ? 0 : health.observedChannel();
             if (health != null && !Objects.equals(channelFrequencyMhz(observed), health.observedFrequencyMhz())) {
                 observed = 0;
@@ -1150,7 +1204,7 @@ public final class PacketBridge implements AutoCloseable {
         }
 
         private List<ChannelCoverage> channelCoverage() {
-            if (survey == null) return List.of();
+            if (survey == null || scanner == null) return List.of();
             var coverage = new ArrayList<ChannelCoverage>(lastTuneAtMs.length);
             for (int band = 0; band < lastTuneAtMs.length; band++) {
                 coverage.add(new ChannelCoverage(band + 1, lastTuneAtMs[band] == 0 ? null : lastTuneAtMs[band],
@@ -1169,28 +1223,33 @@ public final class PacketBridge implements AutoCloseable {
         Thread reader;
         Thread diagnostics;
 
-        Session(Process process, AdaptiveScanner scanner, CaptureHealth health, boolean watchAllowed) {
+        Session(Process process, AdaptiveScanner scanner, CaptureHealth health, boolean collectLabTargets) {
             this.process = process;
             this.scanner = scanner;
             this.health = health;
-            this.watchAllowed = watchAllowed;
-            survey = watchAllowed && scanner != null ? new PassiveChannelSurvey() : null;
+            this.watchAllowed = true;
+            this.collectLabTargets = collectLabTargets;
+            survey = health != null ? new PassiveChannelSurvey() : null;
             // Serialize commands and keep only the latest pending choice if iw is slow.
-            retuner = scanner == null ? null : new ThreadPoolExecutor(1, 1, 0, TimeUnit.MILLISECONDS,
+            retuner = (health != null || scanner != null) ? new ThreadPoolExecutor(1, 1, 0, TimeUnit.MILLISECONDS,
                     new ArrayBlockingQueue<>(1),
                     task -> Thread.ofPlatform().daemon().name("ewave-radio-retune").unstarted(task),
-                    new ThreadPoolExecutor.DiscardOldestPolicy());
+                    new ThreadPoolExecutor.DiscardOldestPolicy()) : null;
         }
     }
 
     private static final class Replay {
         final String filename;
+        final UUID recordingId;
         final CaptureHealth health = new CaptureHealth();
         InputStream input;
         volatile long timestamp = -1;
         volatile String state = "RUNNING";
 
-        Replay(String filename) { this.filename = filename; }
+        Replay(String filename, UUID recordingId) {
+            this.filename = filename;
+            this.recordingId = recordingId;
+        }
         long now() { return Math.max(0, timestamp); }
         boolean running() { return state.equals("RUNNING"); }
     }

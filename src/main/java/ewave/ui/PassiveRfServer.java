@@ -15,6 +15,7 @@ import ewave.active.LanScanner;
 import ewave.active.WifiAccessPoints;
 import ewave.capture.PacketBridge;
 import ewave.capture.ProbeDemo;
+import ewave.capture.RadioStatus;
 import ewave.core.ScannerDemo;
 import ewave.model.EwaveEvent;
 import ewave.passive.TopologyBuilder;
@@ -27,10 +28,13 @@ import io.javalin.Javalin;
 import io.javalin.json.JavalinJackson;
 import io.javalin.websocket.WsContext;
 
+import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Base64;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -61,6 +65,7 @@ public final class PassiveRfServer implements AutoCloseable {
             .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
             .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
     private final Set<WsContext> clients = ConcurrentHashMap.newKeySet();
+    private final RecordingLibrary recordingLibrary = new RecordingLibrary(mapper);
     private final BlockingQueue<EwaveEvent> events;
     private static final Pattern LOOPBACK_HOST = Pattern.compile("(?i)(?:127\\.0\\.0\\.1|localhost)(?::[0-9]{1,5})?");
     private final PacketBridge wifi;
@@ -80,6 +85,7 @@ public final class PassiveRfServer implements AutoCloseable {
     private PmkidCapture activePmkid;
     private BeaconFlood activeBeacon;
     private EvilTwin activeEvilTwin;
+    private PacketBridge.OpsLease activeOpsLease;
     private volatile HandshakeAnalyzer latestHandshake;
     private volatile FrameInjector latestInjector;
     private volatile PmkidCapture latestPmkid;
@@ -161,7 +167,7 @@ public final class PassiveRfServer implements AutoCloseable {
             ctx.header("Cache-Control", "no-store");
             if (!isLocal(ctx.header("Host"), ctx.header("Origin")))
                 throw new ForbiddenResponse("Same-origin loopback access required");
-            if (!operations && ctx.path().startsWith("/api/attack/"))
+            if (!operations && (ctx.path().startsWith("/api/attack/") || ctx.path().startsWith("/api/ops/")))
                 throw new NotFoundResponse("Lab operations are disabled");
         });
         registerReports();
@@ -182,22 +188,20 @@ public final class PassiveRfServer implements AutoCloseable {
     }
 
     private void registerReports() {
-        app.get("/api/status", ctx -> ctx.json(Map.of("wifi", wifi.getCaptureStatus(),
-                "startedAt", startedAt, "operationsEnabled", operations)));
-        app.get("/api/capture-health", ctx -> {
+        io.javalin.http.Handler healthHandler = ctx -> {
             var health = wifi.getCaptureHealth();
             if (health == null) ctx.status(503).json(Map.of("error", "Wi-Fi monitor capture or replay is unavailable"));
             else ctx.json(health);
-        });
-        app.get("/api/my-network", ctx -> {
+        };
+        io.javalin.http.Handler myNetworkGet = ctx -> {
             try {
                 ctx.json(wifi.myNetwork());
             } catch (java.io.IOException failure) {
                 LOG.log(System.Logger.Level.WARNING, "Could not read My Network profile", failure);
                 ctx.status(500).json(Map.of("error", "Could not read the local My Network profile"));
             }
-        });
-        app.post("/api/my-network", ctx -> {
+        };
+        io.javalin.http.Handler myNetworkPost = ctx -> {
             final MyNetworkProfile.Change change;
             try {
                 change = mapper.readValue(ctx.body(), MyNetworkProfile.Change.class);
@@ -213,8 +217,8 @@ public final class PassiveRfServer implements AutoCloseable {
                 LOG.log(System.Logger.Level.WARNING, "Could not save My Network profile", failure);
                 ctx.status(500).json(Map.of("error", "Could not save the local My Network profile"));
             }
-        });
-        app.post("/api/my-network/find", ctx -> {
+        };
+        io.javalin.http.Handler myNetworkFind = ctx -> {
             var session = wifi.getPassiveWifi();
             if (session == null) {
                 unavailable(ctx, "Wi-Fi");
@@ -228,27 +232,27 @@ public final class PassiveRfServer implements AutoCloseable {
             } catch (JsonProcessingException | IllegalArgumentException invalid) {
                 ctx.status(400).json(Map.of("error", "Enter a network name of 1–32 Wi-Fi bytes"));
             }
-        });
-        app.get("/api/inventory", ctx -> {
+        };
+        io.javalin.http.Handler inventoryList = ctx -> {
             var session = wifi.getPassiveWifi();
             if (session != null) ctx.json(session.inventory());
             else if (operations) ctx.json(wifi.getProfiler().all());
             else unavailable(ctx, "Wi-Fi");
-        });
-        app.get("/api/inventory/{id}/details", ctx -> {
+        };
+        io.javalin.http.Handler inventoryDetail = ctx -> {
             var detail = wifi.inventoryDetail(ctx.pathParam("id"));
             if (detail == null) throw new NotFoundResponse("No retained Wi-Fi device matches this ID");
             ctx.json(detail);
-        });
-        app.get("/api/fingerprint-samples", ctx -> {
+        };
+        io.javalin.http.Handler fingerprintsGet = ctx -> {
             try {
                 ctx.json(wifi.fingerprintSamples());
             } catch (java.io.IOException failure) {
                 LOG.log(System.Logger.Level.WARNING, "Could not read fingerprint samples", failure);
                 ctx.status(500).json(Map.of("error", "Could not read the local My Network profile"));
             }
-        });
-        app.post("/api/fingerprint-samples", ctx -> {
+        };
+        io.javalin.http.Handler fingerprintsPost = ctx -> {
             final MyNetworkProfile.SampleChange change;
             try {
                 change = mapper.readValue(ctx.body(), MyNetworkProfile.SampleChange.class);
@@ -264,8 +268,8 @@ public final class PassiveRfServer implements AutoCloseable {
                 LOG.log(System.Logger.Level.WARNING, "Could not save fingerprint sample", failure);
                 ctx.status(500).json(Map.of("error", "Could not save the local My Network profile"));
             }
-        });
-        app.delete("/api/fingerprint-samples/{id}", ctx -> {
+        };
+        io.javalin.http.Handler fingerprintsDelete = ctx -> {
             final UUID id;
             try {
                 id = UUID.fromString(ctx.pathParam("id"));
@@ -279,11 +283,113 @@ public final class PassiveRfServer implements AutoCloseable {
                 LOG.log(System.Logger.Level.WARNING, "Could not update fingerprint samples", failure);
                 ctx.status(500).json(Map.of("error", "Could not save the local My Network profile"));
             }
-        });
-        app.get("/api/probe-audit", ctx -> {
+        };
+        io.javalin.http.Handler probeAuditHandler = ctx -> {
             var session = wifi.getPassiveWifi();
             if (session == null) unavailable(ctx, "Wi-Fi"); else ctx.json(session.audit());
+        };
+        io.javalin.http.Handler channelsHandler = ctx -> {
+            var state = wifi.getChannelSnapshot();
+            if (state == null) ctx.status(503).json(Map.of("error", "no scanner attached"));
+            else ctx.json(channelResponse(state));
+        };
+
+        app.get("/api/status", ctx -> ctx.json(Map.of("wifi", wifi.getCaptureStatus(),
+                "startedAt", startedAt, "operationsEnabled", operations)));
+        app.get("/api/capture-health", healthHandler);
+        app.get("/api/capture/health", healthHandler);
+        app.get("/api/capture/adapters", ctx -> {
+            try {
+                ctx.json(RadioStatus.monitorInterfaces());
+            } catch (java.io.IOException unavailable) {
+                ctx.status(503).json(Map.of("error", "Could not list monitor interfaces"));
+            }
         });
+        app.get("/api/recordings", ctx -> {
+            try {
+                ctx.json(recordingLibrary.recordings());
+            } catch (java.io.IOException failure) {
+                LOG.log(System.Logger.Level.WARNING, "Could not list recordings", failure);
+                ctx.status(500).json(Map.of("error", "Could not read the local recording library"));
+            }
+        });
+        app.post("/api/recordings", this::handleRecordingUpload);
+        app.post("/api/recordings/{id}/replay", this::handleRecordingReplay);
+        app.post("/api/capture/start", this::handleCaptureStart);
+        app.post("/api/capture/stop", ctx -> {
+            try {
+                ctx.json(wifi.stopRuntimeCapture());
+            } catch (IllegalStateException conflict) {
+                ctx.status(409).json(Map.of("error", Objects.toString(conflict.getMessage(), "Capture cannot be stopped right now")));
+            }
+        });
+        app.post("/api/capture/channel", this::handleCaptureChannel);
+
+        // Sniper routes + legacy channel-watch routes
+        app.get("/api/sniper", ctx -> ctx.json(wifi.sniperState()));
+        app.post("/api/sniper", this::handleSniperStart);
+        app.post("/api/sniper/select", this::handleSniperSelect);
+        app.delete("/api/sniper", ctx -> ctx.json(wifi.stopSniper()));
+        app.delete("/api/sniper/{id}", ctx -> {
+            try {
+                ctx.json(wifi.stopSniper(UUID.fromString(ctx.pathParam("id"))));
+            } catch (IllegalArgumentException invalid) {
+                ctx.status(400).json(Map.of("error", "The Sniper run has changed."));
+            }
+        });
+
+        // Module analysis views over shared PassiveWifiSession / PacketBridge state
+        app.get("/api/spotter", ctx -> {
+            var session = wifi.getPassiveWifi();
+            if (session == null) { unavailable(ctx, "Wi-Fi"); return; }
+            var topology = session.topology();
+            ctx.json(Map.of("accessPoints", topology.accessPoints(), "edges", topology.edges(),
+                    "devices", session.inventory(), "essGroups", topology.essGroups()));
+        });
+        app.get("/api/whistleblower", ctx -> {
+            var session = wifi.getPassiveWifi();
+            if (session == null) { unavailable(ctx, "Wi-Fi"); return; }
+            var hidden = session.topology().accessPoints().stream()
+                    .filter(TopologyBuilder.AccessPoint::ssidHidden).toList();
+            long revealed = hidden.stream()
+                    .filter(ap -> ap.ssid() != null && !ap.ssid().isEmpty()).count();
+            ctx.json(Map.of("accessPoints", hidden, "hiddenCount", hidden.size(), "revealedCount", revealed));
+        });
+        app.get("/api/decloaker", probeAuditHandler);
+        app.get("/api/decloaker/demo", ctx -> ctx.json(ProbeDemo.replay()));
+        app.get("/api/inspector", ctx -> {
+            var session = wifi.getPassiveWifi();
+            if (session == null) { unavailable(ctx, "Wi-Fi"); return; }
+            var topology = session.topology();
+            ctx.json(Map.of("accessPoints", topology.accessPoints(), "essGroups", topology.essGroups()));
+        });
+        app.get("/api/profiler", inventoryList);
+        app.get("/api/profiler/network", myNetworkGet);
+        app.post("/api/profiler/network", myNetworkPost);
+        app.post("/api/profiler/network/find", myNetworkFind);
+        app.get("/api/profiler/fingerprints", fingerprintsGet);
+        app.post("/api/profiler/fingerprints", fingerprintsPost);
+        app.delete("/api/profiler/fingerprints/{id}", fingerprintsDelete);
+        app.get("/api/profiler/{id}", inventoryDetail);
+        app.get("/api/tracker", ctx -> {
+            var session = wifi.getPassiveWifi();
+            if (session == null) { unavailable(ctx, "Wi-Fi"); return; }
+            var topology = session.topology();
+            ctx.json(Map.of("roams", topology.roams(), "edges", topology.edges(), "devices", session.inventory()));
+        });
+        app.get("/api/lookout", channelsHandler);
+        app.get("/api/lookout/demo", ctx -> ctx.json(SCANNER_DEMO));
+
+        // Compatibility aliases for existing API callers
+        app.get("/api/my-network", myNetworkGet);
+        app.post("/api/my-network", myNetworkPost);
+        app.post("/api/my-network/find", myNetworkFind);
+        app.get("/api/inventory", inventoryList);
+        app.get("/api/inventory/{id}/details", inventoryDetail);
+        app.get("/api/fingerprint-samples", fingerprintsGet);
+        app.post("/api/fingerprint-samples", fingerprintsPost);
+        app.delete("/api/fingerprint-samples/{id}", fingerprintsDelete);
+        app.get("/api/probe-audit", probeAuditHandler);
         app.get("/api/probe-audit/demo", ctx -> ctx.json(ProbeDemo.replay()));
         app.get("/api/topology", ctx -> {
             var session = wifi.getPassiveWifi();
@@ -315,18 +421,14 @@ public final class PassiveRfServer implements AutoCloseable {
             }
         });
         app.get("/api/channels/demo", ctx -> ctx.json(SCANNER_DEMO));
-        app.get("/api/channels", ctx -> {
-            var state = wifi.getChannelSnapshot();
-            if (state == null) {
-                ctx.status(503).json(Map.of("error", "no scanner attached"));
-            } else {
-                ctx.json(channelResponse(state));
-            }
-        });
+        app.get("/api/channels", channelsHandler);
         if (operations) {
-            app.get("/api/devices", ctx -> ctx.json(wifi.getDevices()));
-            app.get("/api/profiles", ctx -> ctx.json(wifi.getProfiler().all()));
-            app.get("/api/probes", ctx -> ctx.json(wifi.getProbeRequests()));
+            app.get("/api/devices", ctx -> ctx.status(410).json(Map.of(
+                    "error", "Text-mode /api/devices has been retired", "replacement", "/api/profiler")));
+            app.get("/api/profiles", ctx -> ctx.status(410).json(Map.of(
+                    "error", "Legacy /api/profiles has been retired", "replacement", "/api/profiler")));
+            app.get("/api/probes", ctx -> ctx.status(410).json(Map.of(
+                    "error", "Text-mode /api/probes has been retired", "replacement", "/api/decloaker")));
         }
     }
 
@@ -368,54 +470,318 @@ public final class PassiveRfServer implements AutoCloseable {
         return response;
     }
 
-    private void registerOperations() {
-        app.post("/api/attack/stop", ctx -> {
-            synchronized (injectionLock) {
-                if (activeInjector != null) activeInjector.terminate();
-                if (activeHandshake != null) activeHandshake.terminate();
-                if (activePmkid != null) activePmkid.terminate();
-                if (activeBeacon != null) {
-                    activeBeacon.terminate();
-                    activeBeacon = null;
-                }
-                if (activeEvilTwin != null) {
-                    activeEvilTwin.terminate();
-                    activeEvilTwin = null;
-                }
+    private void stopOperations() {
+        PacketBridge.OpsLease leaseToClose;
+        synchronized (injectionLock) {
+            if (activeInjector != null) activeInjector.terminate();
+            if (activeHandshake != null) activeHandshake.terminate();
+            if (activePmkid != null) activePmkid.terminate();
+            if (activeBeacon != null) {
+                activeBeacon.terminate();
+                activeBeacon = null;
             }
-            ctx.json(Map.of("stopped", true));
-        });
-        app.get("/api/attack/targets", ctx -> {
-            var session = wifi.getPassiveWifi();
-            ctx.json(wifi.getProfiler().all().stream().map(profile -> Map.of(
-                    "id", session == null ? profile.mac() : session.addressId(profile.mac()),
-                    "mac", profile.mac(), "type", profile.guessedType(),
-                    "label", profile.guessedType() + " · " + profile.vendor(),
-                    "rssi", profile.lastRssi())).toList());
-        });
-        app.get("/api/attack/aps", ctx -> {
+            if (activeEvilTwin != null) {
+                activeEvilTwin.terminate();
+                activeEvilTwin = null;
+            }
+            leaseToClose = activeOpsLease;
+            activeOpsLease = null;
+        }
+        closeLeaseQuietly(leaseToClose);
+    }
+
+    private static void closeLeaseQuietly(PacketBridge.OpsLease lease) {
+        if (lease != null) {
             try {
-                ctx.json(accessPoints.all());
+                lease.close();
+            } catch (RuntimeException failure) {
+                LOG.log(System.Logger.Level.WARNING, "Failed to release radio lease", failure);
+            }
+        }
+    }
+
+    private void releaseIdleLease() {
+        PacketBridge.OpsLease stale = null;
+        synchronized (injectionLock) {
+            if (activeInjector == null && activeHandshake == null && activePmkid == null
+                    && !beaconActive() && !evilTwinActive()) {
+                stale = activeOpsLease;
+                activeOpsLease = null;
+            }
+        }
+        closeLeaseQuietly(stale);
+    }
+
+    private PacketBridge.OpsLease acquireLeaseOutsideLock(String iface, boolean pauseCapture,
+                                                          java.util.function.BooleanSupplier stillReserved,
+                                                          Runnable clearSlot) {
+        final PacketBridge.OpsLease lease;
+        try {
+            lease = wifi.acquireOpsLease(iface, pauseCapture);
+        } catch (RuntimeException failure) {
+            synchronized (injectionLock) { clearSlot.run(); }
+            throw failure;
+        }
+        boolean keep;
+        synchronized (injectionLock) {
+            keep = !closing && stillReserved.getAsBoolean();
+            if (keep) activeOpsLease = lease;
+            else clearSlot.run();
+        }
+        if (!keep) {
+            closeLeaseQuietly(lease);
+            throw new IllegalStateException("Operation was stopped while acquiring radio control");
+        }
+        return lease;
+    }
+
+    private void releaseOperation(PacketBridge.OpsLease lease, Runnable clearSlot) {
+        PacketBridge.OpsLease toClose = null;
+        synchronized (injectionLock) {
+            clearSlot.run();
+            if (lease != null && activeOpsLease == lease) {
+                toClose = lease;
+                activeOpsLease = null;
+            }
+        }
+        closeLeaseQuietly(toClose);
+    }
+
+    private FrameInjector.Status deauthStatus() {
+        FrameInjector latest = latestInjector;
+        return latest == null ? new FrameInjector.Status(false, "", "", null) : latest.status();
+    }
+
+    private HandshakeAnalyzer.Status handshakeStatus() {
+        HandshakeAnalyzer latest = latestHandshake;
+        return latest == null ? new HandshakeAnalyzer.Status(false, "Ready") : latest.status();
+    }
+
+    private PmkidCapture.Status pmkidStatus() {
+        PmkidCapture latest = latestPmkid;
+        return latest == null ? new PmkidCapture.Status(false, "Ready") : latest.status();
+    }
+
+    private BeaconFlood.Status beaconStatus() {
+        BeaconFlood latest = latestBeacon;
+        var status = latest == null ? new BeaconFlood.Status(false, "", "", "", null) : latest.status();
+        if (latest != null && !status.running()) releaseIdleLease();
+        return status;
+    }
+
+    private EvilTwin.Status evilTwinStatus() {
+        EvilTwin latest = latestEvilTwin;
+        var status = latest == null
+                ? new EvilTwin.Status(false, "Ready", null, null, List.of(), null, null, null, null)
+                : latest.status();
+        if (latest != null && !status.running()) releaseIdleLease();
+        return status;
+    }
+
+    private List<Map<String, Object>> opsTargets() {
+        var session = wifi.getPassiveWifi();
+        if (session != null) {
+            return session.evidencedTargets(wifi.getProfiler()).stream().map(target -> {
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("id", target.id());
+                row.put("mac", target.mac());
+                row.put("type", target.type());
+                row.put("vendor", target.vendor());
+                row.put("label", target.label());
+                row.put("rssi", target.rssi());
+                row.put("apId", target.apId());
+                row.put("apBssid", target.apBssid());
+                row.put("apSsid", target.apSsid());
+                row.put("channel", target.channel());
+                row.put("frequencyMhz", target.frequencyMhz());
+                row.put("evidenceSource", target.evidenceSource());
+                row.put("lastSeen", target.lastSeen());
+                row.put("sessionId", target.sessionId().toString());
+                return row;
+            }).toList();
+        }
+        return wifi.getProfiler().all().stream().map(profile -> Map.<String, Object>of(
+                "id", profile.mac(),
+                "mac", profile.mac(), "type", profile.guessedType(),
+                "label", profile.guessedType() + " · " + profile.vendor(),
+                "rssi", profile.lastRssi())).toList();
+    }
+
+    private List<WifiAccessPoints.AccessPoint> cachedAccessPoints() throws java.io.IOException {
+        return accessPoints.all();
+    }
+
+    private List<LanScanner.Device> cachedLanHosts() throws java.io.IOException {
+        return lanScanner.scan();
+    }
+
+    private Integer optionalFrequency(com.fasterxml.jackson.databind.JsonNode body) {
+        boolean hasFreq = body.has("frequencyMhz") && !body.path("frequencyMhz").isNull();
+        boolean hasChannel = body.has("channel") && !body.path("channel").isNull();
+        boolean hasBand = body.has("band") && !body.path("band").isNull();
+        if (hasFreq && (hasChannel || hasBand)) {
+            throw new IllegalArgumentException("frequencyMhz cannot be combined with channel or band");
+        }
+        if (hasFreq) return integer(body, "frequencyMhz", 2412, 2300, 7125);
+        if (hasBand && !hasChannel) throw new IllegalArgumentException("band requires channel");
+        if (!hasChannel) return null;
+        int ch = integer(body, "channel", 1, 1, 233);
+        String band = null;
+        if (hasBand) {
+            if (!body.path("band").isTextual()) throw new IllegalArgumentException("band must be a string");
+            band = body.path("band").textValue();
+        }
+        return ewave.Ewave.resolveFrequency(ch, band);
+    }
+
+    private void handleCaptureStart(Context ctx) {
+        try {
+            var body = mapper.readTree(ctx.body());
+            if (body == null || !body.isObject()) throw new IllegalArgumentException("Expected a JSON object");
+            String mode = requiredText(body, "mode").toLowerCase(Locale.ROOT);
+            String iface = body.has("interface") && !body.path("interface").isNull()
+                    ? requiredText(body, "interface")
+                    : Objects.toString(wifi.getCaptureStatus().get("captureInterface"), "wlo1");
+            Integer frequencyMhz = optionalFrequency(body);
+            Path replayFile = body.has("replayPath") && !body.path("replayPath").isNull()
+                    ? Path.of(requiredText(body, "replayPath")) : null;
+            int bands = integer(body, "bands", 13, 1, 64);
+            if ("replay".equals(mode)) {
+                if (replayFile == null) throw new IllegalArgumentException("replayPath is required for replay mode");
+                if (frequencyMhz != null) throw new IllegalArgumentException("frequencyMhz/channel cannot be combined with replay");
+            } else if (replayFile != null) {
+                throw new IllegalArgumentException("replayPath can only be used with replay mode");
+            }
+            var requireIdle = body.path("requireIdle");
+            if (!requireIdle.isMissingNode() && !requireIdle.isBoolean())
+                throw new IllegalArgumentException("requireIdle must be a boolean");
+            ctx.json(wifi.configureRuntimeCapture(mode, iface, frequencyMhz, replayFile, bands, operations,
+                    requireIdle.asBoolean(false)));
+        } catch (JsonProcessingException | IllegalArgumentException invalid) {
+            ctx.status(400).json(Map.of("error", Objects.toString(invalid.getMessage(), "Invalid capture request")));
+        } catch (IllegalStateException conflict) {
+            ctx.status(409).json(Map.of("error", Objects.toString(conflict.getMessage(), "Capture mode cannot be changed now")));
+        } catch (java.io.IOException failure) {
+            ctx.status(500).json(Map.of("error", Objects.toString(failure.getMessage(), "Failed to start capture")));
+        }
+    }
+
+    private void handleRecordingUpload(Context ctx) {
+        if (!"application/octet-stream".equalsIgnoreCase(ctx.header("Content-Type"))) {
+            ctx.status(415).json(Map.of("error", "Send an 802.11 PCAP as application/octet-stream"));
+            return;
+        }
+        if (ctx.req().getContentLengthLong() > RecordingLibrary.MAX_BYTES) {
+            ctx.status(413).json(Map.of("error", "Recording exceeds 128 MiB"));
+            return;
+        }
+        try (var input = ctx.req().getInputStream()) {
+            ctx.status(201).json(recordingLibrary.add(ctx.queryParam("name"), input));
+        } catch (RecordingLibrary.TooLarge tooLarge) {
+            ctx.status(413).json(Map.of("error", "Recording exceeds 128 MiB"));
+        } catch (IllegalArgumentException invalid) {
+            ctx.status(400).json(Map.of("error", Objects.toString(invalid.getMessage(), "Invalid recording")));
+        } catch (java.io.IOException failure) {
+            LOG.log(System.Logger.Level.WARNING, "Could not import recording", failure);
+            ctx.status(500).json(Map.of("error", "Could not save the recording"));
+        }
+    }
+
+    private void handleRecordingReplay(Context ctx) {
+        try {
+            UUID id = UUID.fromString(ctx.pathParam("id"));
+            var recording = recordingLibrary.find(id);
+            if (recording == null) {
+                ctx.status(404).json(Map.of("error", "Recording is unavailable"));
+                return;
+            }
+            ctx.json(wifi.startReplay(recordingLibrary.file(id), recording.name(), id));
+        } catch (IllegalArgumentException invalid) {
+            ctx.status(400).json(Map.of("error", "Invalid recording ID"));
+        } catch (IllegalStateException conflict) {
+            ctx.status(409).json(Map.of("error", Objects.toString(conflict.getMessage(), "Replay is unavailable")));
+        } catch (java.io.IOException failure) {
+            LOG.log(System.Logger.Level.WARNING, "Could not replay recording", failure);
+            ctx.status(500).json(Map.of("error", "Could not replay the recording"));
+        }
+    }
+
+    private void handleCaptureChannel(Context ctx) {
+        try {
+            var body = mapper.readTree(ctx.body());
+            if (body == null || !body.isObject()) throw new IllegalArgumentException("Expected a JSON object");
+            Integer frequencyMhz = optionalFrequency(body);
+            if (frequencyMhz == null) throw new IllegalArgumentException("frequencyMhz or channel is required");
+            ctx.json(wifi.tuneChannel(frequencyMhz));
+        } catch (JsonProcessingException | IllegalArgumentException invalid) {
+            ctx.status(400).json(Map.of("error", Objects.toString(invalid.getMessage(), "Invalid channel request")));
+        } catch (IllegalStateException conflict) {
+            ctx.status(409).json(Map.of("error", Objects.toString(conflict.getMessage(), "Channel cannot be tuned right now")));
+        } catch (java.io.IOException failure) {
+            ctx.status(500).json(Map.of("error", Objects.toString(failure.getMessage(), "Failed to tune channel")));
+        }
+    }
+
+    private void handleSniperStart(Context ctx) {
+        try {
+            var body = mapper.readTree(ctx.body());
+            if (body == null || !body.isObject()) throw new IllegalArgumentException("Expected a JSON object");
+            if (body.has("ssidBase64") && !body.path("ssidBase64").isNull()) {
+                byte[] bytes = Base64.getDecoder().decode(requiredText(body, "ssidBase64"));
+                String display = body.has("ssid") && body.path("ssid").isTextual() ? body.path("ssid").textValue() : null;
+                ctx.json(wifi.startSniperBySsidBytes(bytes, display));
+            } else if (body.has("apId") && !body.path("apId").isNull()) {
+                ctx.json(wifi.startSniperByApId(requiredText(body, "apId")));
+            } else if (body.has("ssid") && !body.path("ssid").isNull()) {
+                ctx.json(wifi.startSniperBySsid(requiredText(body, "ssid")));
+            } else {
+                throw new IllegalArgumentException("Provide ssid, ssidBase64, or apId");
+            }
+        } catch (JsonProcessingException | IllegalArgumentException invalid) {
+            ctx.status(400).json(Map.of("error", Objects.toString(invalid.getMessage(), "Invalid Sniper request")));
+        } catch (IllegalStateException conflict) {
+            ctx.status(409).json(Map.of("error", Objects.toString(conflict.getMessage(), "Sniper unavailable")));
+        }
+    }
+
+    private void handleSniperSelect(Context ctx) {
+        try {
+            var body = mapper.readTree(ctx.body());
+            if (body == null || !body.isObject()) throw new IllegalArgumentException("Expected a JSON object");
+            ctx.json(wifi.selectSniperCandidate(requiredText(body, "apId")));
+        } catch (JsonProcessingException | IllegalArgumentException invalid) {
+            ctx.status(400).json(Map.of("error", Objects.toString(invalid.getMessage(), "Invalid Sniper candidate")));
+        } catch (IllegalStateException conflict) {
+            ctx.status(409).json(Map.of("error", Objects.toString(conflict.getMessage(), "Sniper is not selecting candidates")));
+        }
+    }
+
+    private void registerOperations() {
+        io.javalin.http.Handler stopHandler = ctx -> {
+            stopOperations();
+            ctx.json(Map.of("stopped", true));
+        };
+        io.javalin.http.Handler targetsHandler = ctx -> ctx.json(opsTargets());
+        io.javalin.http.Handler apsHandler = ctx -> {
+            try {
+                ctx.json(cachedAccessPoints());
             } catch (java.nio.file.NoSuchFileException missing) {
                 ctx.status(404).json(Map.of("error", "No Wi-Fi AP cache found. Restore managed Wi-Fi and recreate /tmp/ewave-wifi-aps.txt; see README, 'Restoring networking after a live session'."));
             } catch (java.io.IOException failure) {
                 ctx.status(500).json(Map.of("error", "Cannot read Wi-Fi AP cache: " + failure.getMessage()));
             }
-        });
-        app.get("/api/attack/scan-lan", ctx -> {
+        };
+        io.javalin.http.Handler scanLanHandler = ctx -> {
             try {
-                ctx.json(lanScanner.scan());
+                ctx.json(cachedLanHosts());
             } catch (java.nio.file.NoSuchFileException missing) {
                 ctx.status(404).json(Map.of("error", "No LAN cache found. Restore managed Wi-Fi and recreate /tmp/ewave-lan-hosts.txt; see README, 'Restoring networking after a live session'."));
             } catch (java.io.IOException failure) {
                 ctx.status(500).json(Map.of("error", "Cannot read LAN cache: " + failure.getMessage()));
             }
-        });
-        app.get("/api/attack/status", ctx -> {
-            FrameInjector latest = latestInjector;
-            ctx.json(latest == null ? new FrameInjector.Status(false, "", "", null) : latest.status());
-        });
-        app.post("/api/attack/deauth", ctx -> {
+        };
+        io.javalin.http.Handler deauthStatusHandler = ctx -> ctx.json(deauthStatus());
+        io.javalin.http.Handler deauthHandler = ctx -> {
             final String ap, client, monitor;
             final int count;
             final WifiAccessPoints.AccessPoint target;
@@ -459,6 +825,7 @@ public final class PassiveRfServer implements AutoCloseable {
             var snapshot = Objects.equals(PacketBridge.channelFrequencyMhz(channel), target.frequencyMhz())
                     ? wifi.getChannelSnapshot() : null;
             String warning = channelWarning(snapshot, channel);
+            releaseIdleLease();
             synchronized (injectionLock) {
                 if (closing || anyActive()) {
                     ctx.status(409).json(Map.of("error", "An injection is already running or the server is stopping"));
@@ -466,6 +833,14 @@ public final class PassiveRfServer implements AutoCloseable {
                 }
                 activeInjector = injector;
                 latestInjector = injector;
+            }
+            final PacketBridge.OpsLease lease;
+            try {
+                lease = acquireLeaseOutsideLock(monitor, false,
+                        () -> activeInjector == injector, () -> { if (activeInjector == injector) activeInjector = null; });
+            } catch (IllegalStateException conflict) {
+                ctx.status(409).json(Map.of("error", conflict.getMessage()));
+                return;
             }
             try {
                 var result = injector.sendDeauthFrames(ap, client, count, target.frequencyMhz());
@@ -480,14 +855,11 @@ public final class PassiveRfServer implements AutoCloseable {
                     ctx.json(response.put("channelWarning", warning));
                 }
             } finally {
-                synchronized (injectionLock) { activeInjector = null; }
+                releaseOperation(lease, () -> { if (activeInjector == injector) activeInjector = null; });
             }
-        });
-        app.get("/api/attack/handshake/status", ctx -> {
-            HandshakeAnalyzer latest = latestHandshake;
-            ctx.json(latest == null ? new HandshakeAnalyzer.Status(false, "Ready") : latest.status());
-        });
-        app.post("/api/attack/uncloak", ctx -> {
+        };
+        io.javalin.http.Handler handshakeStatusHandler = ctx -> ctx.json(handshakeStatus());
+        io.javalin.http.Handler uncloakHandler = ctx -> {
             final String requested, monitor;
             try {
                 var body = mapper.readTree(ctx.body());
@@ -551,6 +923,7 @@ public final class PassiveRfServer implements AutoCloseable {
                 ctx.status(400).json(Map.of("error", invalid.getMessage()));
                 return;
             }
+            releaseIdleLease();
             synchronized (injectionLock) {
                 if (closing || anyActive()) {
                     ctx.status(409).json(Map.of("error", "An injection is already running or the server is stopping"));
@@ -558,6 +931,14 @@ public final class PassiveRfServer implements AutoCloseable {
                 }
                 activeInjector = injector;
                 latestInjector = injector;
+            }
+            final PacketBridge.OpsLease lease;
+            try {
+                lease = acquireLeaseOutsideLock(monitor, false,
+                        () -> activeInjector == injector, () -> { if (activeInjector == injector) activeInjector = null; });
+            } catch (IllegalStateException conflict) {
+                ctx.status(409).json(Map.of("error", conflict.getMessage()));
+                return;
             }
             try {
                 var result = injector.sendDeauthFrames(apBssid, clientMac, 8, frequency);
@@ -569,21 +950,18 @@ public final class PassiveRfServer implements AutoCloseable {
                 ctx.json(Map.of("status", "deauth_sent", "targetClient", clientMac,
                         "message", "SSID will appear in Map within 10s if client reconnects."));
             } finally {
-                synchronized (injectionLock) { activeInjector = null; }
+                releaseOperation(lease, () -> { if (activeInjector == injector) activeInjector = null; });
             }
-        });
-        app.get("/api/attack/pmkid/status", ctx -> {
-            PmkidCapture latest = latestPmkid;
-            ctx.json(latest == null ? new PmkidCapture.Status(false, "Ready") : latest.status());
-        });
-        app.post("/api/attack/pmkid", ctx -> {
+        };
+        io.javalin.http.Handler pmkidStatusHandler = ctx -> ctx.json(pmkidStatus());
+        io.javalin.http.Handler pmkidHandler = ctx -> {
             final PmkidCapture capture;
-            final String wordlist;
+            final String wordlist, monitor;
             final int duration;
             try {
                 var body = mapper.readTree(ctx.body());
                 if (body == null || !body.isObject()) throw new IllegalArgumentException("Expected a JSON object");
-                String monitor = body.has("interface") ? requiredText(body, "interface") : "wlo1";
+                monitor = body.has("interface") ? requiredText(body, "interface") : "wlo1";
                 wordlist = requiredText(body, "wordlistPath");
                 duration = integer(body, "durationSeconds", 30, 1, 300);
                 HandshakeAnalyzer.readableFile(wordlist, HandshakeAnalyzer.WORDLIST_MISSING);
@@ -595,6 +973,7 @@ public final class PassiveRfServer implements AutoCloseable {
                 ctx.status(404).json(Map.of("error", missing.getMessage()));
                 return;
             }
+            releaseIdleLease();
             synchronized (injectionLock) {
                 if (closing || anyActive()) {
                     ctx.status(409).json(Map.of("error", "An active operation is already running or the server is stopping"));
@@ -603,13 +982,18 @@ public final class PassiveRfServer implements AutoCloseable {
                 activePmkid = capture;
                 latestPmkid = capture;
             }
-            runPmkid(ctx, capture, wordlist, duration);
-        });
-        app.get("/api/attack/beacon/status", ctx -> {
-            BeaconFlood latest = latestBeacon;
-            ctx.json(latest == null ? new BeaconFlood.Status(false, "", "", "", null) : latest.status());
-        });
-        app.post("/api/attack/beacon", ctx -> {
+            final PacketBridge.OpsLease lease;
+            try {
+                lease = acquireLeaseOutsideLock(monitor, true,
+                        () -> activePmkid == capture, () -> { if (activePmkid == capture) activePmkid = null; });
+            } catch (IllegalStateException conflict) {
+                ctx.status(409).json(Map.of("error", conflict.getMessage()));
+                return;
+            }
+            runPmkid(ctx, capture, lease, wordlist, duration);
+        };
+        io.javalin.http.Handler beaconStatusHandler = ctx -> ctx.json(beaconStatus());
+        io.javalin.http.Handler beaconHandler = ctx -> {
             final BeaconSettings settings;
             final BeaconFlood flood;
             try {
@@ -625,6 +1009,7 @@ public final class PassiveRfServer implements AutoCloseable {
                 ctx.status(400).json(Map.of("error", invalid.getMessage()));
                 return;
             }
+            releaseIdleLease();
             synchronized (injectionLock) {
                 if (closing || anyActive()) {
                     ctx.status(409).json(Map.of("error", "An active operation is already running or the server is stopping"));
@@ -633,25 +1018,33 @@ public final class PassiveRfServer implements AutoCloseable {
                 activeBeacon = flood;
                 latestBeacon = flood;
             }
+            final PacketBridge.OpsLease lease;
             try {
-                ctx.json(flood.start(settings.ssid(), settings.channel(), settings.rate()));
+                lease = acquireLeaseOutsideLock(settings.monitorInterface(), false,
+                        () -> activeBeacon == flood, () -> { if (activeBeacon == flood) activeBeacon = null; });
+            } catch (IllegalStateException conflict) {
+                ctx.status(409).json(Map.of("error", conflict.getMessage()));
+                return;
+            }
+            try {
+                var status = flood.start(settings.ssid(), settings.channel(), settings.rate());
+                if (!status.running()) {
+                    releaseOperation(lease, () -> { if (activeBeacon == flood) activeBeacon = null; });
+                }
+                ctx.json(status);
             } catch (java.io.IOException failure) {
-                synchronized (injectionLock) { if (activeBeacon == flood) activeBeacon = null; }
+                releaseOperation(lease, () -> { if (activeBeacon == flood) activeBeacon = null; });
                 ctx.status(500).json(Map.of("error", Objects.toString(failure.getMessage(), "Beacon flood failed")));
             } catch (IllegalArgumentException invalid) {
-                synchronized (injectionLock) { if (activeBeacon == flood) activeBeacon = null; }
+                releaseOperation(lease, () -> { if (activeBeacon == flood) activeBeacon = null; });
                 ctx.status(400).json(Map.of("error", invalid.getMessage()));
             } catch (IllegalStateException conflict) {
-                synchronized (injectionLock) { if (activeBeacon == flood) activeBeacon = null; }
+                releaseOperation(lease, () -> { if (activeBeacon == flood) activeBeacon = null; });
                 ctx.status(409).json(Map.of("error", conflict.getMessage()));
             }
-        });
-        app.get("/api/attack/evil-twin/status", ctx -> {
-            EvilTwin latest = latestEvilTwin;
-            ctx.json(latest == null ? new EvilTwin.Status(false, "Ready", null, null, List.of(), null, null, null, null)
-                    : latest.status());
-        });
-        app.post("/api/attack/evil-twin", ctx -> {
+        };
+        io.javalin.http.Handler evilTwinStatusHandler = ctx -> ctx.json(evilTwinStatus());
+        io.javalin.http.Handler evilTwinHandler = ctx -> {
             final EvilTwinSettings settings;
             final EvilTwin twin;
             try {
@@ -667,6 +1060,7 @@ public final class PassiveRfServer implements AutoCloseable {
                 ctx.status(400).json(Map.of("error", invalid.getMessage()));
                 return;
             }
+            releaseIdleLease();
             synchronized (injectionLock) {
                 if (closing || anyActive()) {
                     ctx.status(409).json(Map.of("error", "An active operation is already running or the server is stopping"));
@@ -675,21 +1069,34 @@ public final class PassiveRfServer implements AutoCloseable {
                 activeEvilTwin = twin;
                 latestEvilTwin = twin;
             }
+            final PacketBridge.OpsLease lease;
             try {
-                ctx.json(twin.start());
+                lease = acquireLeaseOutsideLock(settings.apInterface(), true,
+                        () -> activeEvilTwin == twin, () -> { if (activeEvilTwin == twin) activeEvilTwin = null; });
+            } catch (IllegalStateException conflict) {
+                ctx.status(409).json(Map.of("error", conflict.getMessage()));
+                return;
+            }
+            try {
+                var status = twin.start();
+                if (!status.running()) {
+                    releaseOperation(lease, () -> { if (activeEvilTwin == twin) activeEvilTwin = null; });
+                }
+                ctx.json(status);
             } catch (java.io.IOException failure) {
-                synchronized (injectionLock) { if (activeEvilTwin == twin) activeEvilTwin = null; }
+                releaseOperation(lease, () -> { if (activeEvilTwin == twin) activeEvilTwin = null; });
                 ctx.status(500).json(Map.of("error", Objects.toString(failure.getMessage(), "Evil twin failed to start")));
             } catch (IllegalArgumentException invalid) {
-                synchronized (injectionLock) { if (activeEvilTwin == twin) activeEvilTwin = null; }
+                releaseOperation(lease, () -> { if (activeEvilTwin == twin) activeEvilTwin = null; });
                 ctx.status(400).json(Map.of("error", invalid.getMessage()));
             } catch (IllegalStateException conflict) {
-                synchronized (injectionLock) { if (activeEvilTwin == twin) activeEvilTwin = null; }
+                releaseOperation(lease, () -> { if (activeEvilTwin == twin) activeEvilTwin = null; });
                 ctx.status(409).json(Map.of("error", conflict.getMessage()));
             }
-        });
-        app.post("/api/attack/handshake", ctx -> {
+        };
+        io.javalin.http.Handler handshakeHandler = ctx -> {
             final HandshakeAnalyzer analyzer;
+            final String monitor;
             try {
                 var body = mapper.readTree(ctx.body());
                 if (body == null || !body.isObject()) throw new IllegalArgumentException("Expected a JSON object");
@@ -728,15 +1135,15 @@ public final class PassiveRfServer implements AutoCloseable {
                 } else {
                     frequency = requestedFrequency == null ? HandshakeAnalyzer.frequencyMhz(channel) : requestedFrequency;
                 }
-                String monitor = body.has("interface") ? requiredText(body, "interface") : "wlo1";
+                monitor = body.has("interface") ? requiredText(body, "interface") : "wlo1";
                 analyzer = handshakeFactory.apply(new HandshakeSettings(monitor, ap, client, channel, ssid, frequency));
             } catch (JsonProcessingException | IllegalArgumentException invalid) {
                 ctx.status(400).json(Map.of("error", invalid.getMessage()));
                 return;
             }
-            runHandshake(ctx, analyzer, true, analyzer::capture);
-        });
-        app.post("/api/attack/handshake/verify", ctx -> {
+            runHandshake(ctx, analyzer, monitor, true, analyzer::capture);
+        };
+        io.javalin.http.Handler handshakeVerifyHandler = ctx -> {
             final HandshakeAnalyzer analyzer;
             final String cap, wordlist;
             try {
@@ -755,8 +1162,27 @@ public final class PassiveRfServer implements AutoCloseable {
                 ctx.status(404).json(Map.of("error", missing.getMessage()));
                 return;
             }
-            runHandshake(ctx, analyzer, false, () -> analyzer.verifyPsk(cap, wordlist));
-        });
+            runHandshake(ctx, analyzer, null, false, () -> analyzer.verifyPsk(cap, wordlist));
+        };
+
+        for (String prefix : List.of("/api/ops", "/api/attack")) {
+            app.post(prefix + "/stop", stopHandler);
+            app.get(prefix + "/targets", targetsHandler);
+            app.get(prefix + "/aps", apsHandler);
+            app.get(prefix + "/scan-lan", scanLanHandler);
+            app.get(prefix + "/status", deauthStatusHandler);
+            app.post(prefix + "/deauth", deauthHandler);
+            app.post(prefix + "/uncloak", uncloakHandler);
+            app.get(prefix + "/handshake/status", handshakeStatusHandler);
+            app.post(prefix + "/handshake", handshakeHandler);
+            app.post(prefix + "/handshake/verify", handshakeVerifyHandler);
+            app.get(prefix + "/pmkid/status", pmkidStatusHandler);
+            app.post(prefix + "/pmkid", pmkidHandler);
+            app.get(prefix + "/beacon/status", beaconStatusHandler);
+            app.post(prefix + "/beacon", beaconHandler);
+            app.get(prefix + "/evil-twin/status", evilTwinStatusHandler);
+            app.post(prefix + "/evil-twin", evilTwinHandler);
+        }
     }
 
     private static void unavailable(Context ctx, String radio) {
@@ -810,32 +1236,40 @@ public final class PassiveRfServer implements AutoCloseable {
                 .findFirst().orElse(null);
     }
 
-    private void runPmkid(io.javalin.http.Context ctx, PmkidCapture capture, String wordlist, int duration) {
+    private void runPmkid(io.javalin.http.Context ctx, PmkidCapture capture, PacketBridge.OpsLease lease,
+                          String wordlist, int duration) {
         var timedOut = new AtomicBoolean();
-        ctx.async(config -> {
-            config.timeout = Math.min(900_000L, (duration + 330L) * 1000L);
-            config.onTimeout(context -> {
-                timedOut.set(true);
-                capture.terminate();
-                context.status(504).json(Map.of("error", "PMKID capture timed out"));
+        try {
+            ctx.async(config -> {
+                config.timeout = Math.min(900_000L, (duration + 330L) * 1000L);
+                config.onTimeout(context -> {
+                    timedOut.set(true);
+                    capture.terminate();
+                    context.status(504).json(Map.of("error", "PMKID capture timed out"));
+                });
+            }, () -> {
+                try {
+                    Object result = capture.run(wordlist, duration);
+                    if (!timedOut.get()) ctx.json(result);
+                } catch (Exception failure) {
+                    if (failure instanceof InterruptedException) Thread.currentThread().interrupt();
+                    int status = failure instanceof TimeoutException ? 504
+                            : failure instanceof CancellationException || failure instanceof InterruptedException ? 409 : 500;
+                    if (!timedOut.get()) ctx.status(status).json(Map.of("error",
+                            Objects.toString(failure.getMessage(), "PMKID operation failed")));
+                } finally {
+                    releaseOperation(lease, () -> { if (activePmkid == capture) activePmkid = null; });
+                }
             });
-        }, () -> {
-            try {
-                Object result = capture.run(wordlist, duration);
-                if (!timedOut.get()) ctx.json(result);
-            } catch (Exception failure) {
-                if (failure instanceof InterruptedException) Thread.currentThread().interrupt();
-                int status = failure instanceof TimeoutException ? 504
-                        : failure instanceof CancellationException || failure instanceof InterruptedException ? 409 : 500;
-                if (!timedOut.get()) ctx.status(status).json(Map.of("error",
-                        Objects.toString(failure.getMessage(), "PMKID operation failed")));
-            } finally {
-                synchronized (injectionLock) { if (activePmkid == capture) activePmkid = null; }
-            }
-        });
+        } catch (RuntimeException failure) {
+            releaseOperation(lease, () -> { if (activePmkid == capture) activePmkid = null; });
+            throw failure;
+        }
     }
 
-    private void runHandshake(io.javalin.http.Context ctx, HandshakeAnalyzer analyzer, boolean capture, Callable<?> operation) {
+    private void runHandshake(io.javalin.http.Context ctx, HandshakeAnalyzer analyzer, String monitor,
+                              boolean capture, Callable<?> operation) {
+        if (capture) releaseIdleLease();
         synchronized (injectionLock) {
             if (closing || anyActive()) {
                 ctx.status(409).json(Map.of("error", "An active operation is already running or the server is stopping"));
@@ -844,28 +1278,45 @@ public final class PassiveRfServer implements AutoCloseable {
             activeHandshake = analyzer;
             if (capture) latestHandshake = analyzer;
         }
-        var timedOut = new AtomicBoolean();
-        ctx.async(config -> {
-            // Allow time for tuning, the 90-second capture, and decoder shutdown.
-            config.timeout = capture ? 110_000 : 310_000;
-            config.onTimeout(context -> {
-                timedOut.set(true);
-                analyzer.terminate();
-                context.status(504).json(Map.of("error", capture ? "Handshake capture timed out" : "PSK verification timed out"));
-            });
-        }, () -> {
+        final PacketBridge.OpsLease lease;
+        if (capture) {
             try {
-                Object result = operation.call();
-                if (!timedOut.get()) ctx.json(result);
-            } catch (Exception failure) {
-                if (failure instanceof InterruptedException) Thread.currentThread().interrupt();
-                int status = failure instanceof TimeoutException ? 504
-                        : failure instanceof CancellationException || failure instanceof InterruptedException ? 409 : 500;
-                if (!timedOut.get()) ctx.status(status).json(Map.of("error", Objects.toString(failure.getMessage(), "Handshake operation failed")));
-            } finally {
-                synchronized (injectionLock) { activeHandshake = null; }
+                lease = acquireLeaseOutsideLock(monitor, false,
+                        () -> activeHandshake == analyzer, () -> { if (activeHandshake == analyzer) activeHandshake = null; });
+            } catch (IllegalStateException conflict) {
+                ctx.status(409).json(Map.of("error", conflict.getMessage()));
+                return;
             }
-        });
+        } else {
+            lease = null;
+        }
+        var timedOut = new AtomicBoolean();
+        try {
+            ctx.async(config -> {
+                // Allow time for tuning, the 90-second capture, and decoder shutdown.
+                config.timeout = capture ? 110_000 : 310_000;
+                config.onTimeout(context -> {
+                    timedOut.set(true);
+                    analyzer.terminate();
+                    context.status(504).json(Map.of("error", capture ? "Handshake capture timed out" : "PSK verification timed out"));
+                });
+            }, () -> {
+                try {
+                    Object result = operation.call();
+                    if (!timedOut.get()) ctx.json(result);
+                } catch (Exception failure) {
+                    if (failure instanceof InterruptedException) Thread.currentThread().interrupt();
+                    int status = failure instanceof TimeoutException ? 504
+                            : failure instanceof CancellationException || failure instanceof InterruptedException ? 409 : 500;
+                    if (!timedOut.get()) ctx.status(status).json(Map.of("error", Objects.toString(failure.getMessage(), "Handshake operation failed")));
+                } finally {
+                    releaseOperation(lease, () -> { if (activeHandshake == analyzer) activeHandshake = null; });
+                }
+            });
+        } catch (RuntimeException failure) {
+            releaseOperation(lease, () -> { if (activeHandshake == analyzer) activeHandshake = null; });
+            throw failure;
+        }
     }
 
     public PassiveRfServer start() { return start(PORT); }
@@ -931,6 +1382,7 @@ public final class PassiveRfServer implements AutoCloseable {
 
     private void pollScannerEvents(Map<Integer, Instant> suggestedAt, Map<Integer, Instant> suggestedFlags) {
         try {
+            releaseIdleLease();
             if (clients.isEmpty() && reconnectWatches.isEmpty()) return;
             var snapshot = wifi.getChannelSnapshot();
             Instant now = Instant.now();
@@ -980,6 +1432,7 @@ public final class PassiveRfServer implements AutoCloseable {
     }
 
     public synchronized void stop() {
+        PacketBridge.OpsLease leaseToClose;
         synchronized (injectionLock) {
             closing = true;
             if (activeInjector != null) activeInjector.terminate();
@@ -993,7 +1446,10 @@ public final class PassiveRfServer implements AutoCloseable {
                 activeEvilTwin.terminate();
                 activeEvilTwin = null;
             }
+            leaseToClose = activeOpsLease;
+            activeOpsLease = null;
         }
+        closeLeaseQuietly(leaseToClose);
         if (eventThread == null) return;
         eventThread.interrupt();
         if (scannerEvents != null) {

@@ -29,7 +29,11 @@ public record MyNetworkProfile(List<Entry> accessPoints, List<Entry> devices, bo
 
     public record Change(String action, UUID id, String address, String observedId, String label, Boolean restricted) { }
     public record NamedEntry(UUID id, String label, String token) { }
-    public record NearbyAp(String token, int channel, Double rssi, long lastSeen) { }
+    public record NearbyAp(String token, String ssid, int channel, int frequencyMhz, Double rssi, long lastSeen) {
+        public NearbyAp(String token, int channel, Double rssi, long lastSeen) {
+            this(token, null, channel, 0, rssi, lastSeen);
+        }
+    }
     public record View(List<NamedEntry> accessPoints, List<NamedEntry> devices, List<NearbyAp> observedAccessPoints,
                        boolean restrictCapture, boolean commandLineScope) { }
     public record SampleChange(String observedId, String hash, WifiInventory.FrameSource source, String family,

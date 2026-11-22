@@ -59,8 +59,6 @@ public final class CaptureHealth {
     int observedChannel() { return Dot11FrameDecoder.channel(observedFrequencyMhz); }
     int observedFrequencyMhz() { return observedFrequencyMhz; }
     String diagnosticError() { return diagnosticError; }
-    boolean hasFrames() { return lastPacketAt != null; }
-
     boolean diagnostics(String line, long now) {
         var matcher = DROPS.matcher(line);
         if (matcher.find()) {

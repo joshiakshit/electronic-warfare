@@ -1,7 +1,11 @@
 package ewave.capture;
 
 import ewave.fixtures.ProbeFrames;
+import ewave.fixtures.StreamingCaptureProcess;
+import ewave.passive.DeviceProfiler;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledOnOs;
+import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
@@ -17,6 +21,7 @@ import java.nio.file.Path;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -184,6 +189,41 @@ class CaptureHealthTest {
             assertEquals(0.1, health.framesPerSecond().get("control"));
             assertEquals(0.1, health.framesPerSecond().get("data"));
             assertNull(health.kernelDrops());
+        }
+    }
+
+    @Test @EnabledOnOs(OS.LINUX)
+    void retainedFramesDoNotTriggerStatisticsBeforeTheReplacementReceiverStarts(@TempDir Path directory)
+            throws Exception {
+        // A quiet stand-in with no SIGUSR1 handler models tcpdump before capture initialization.
+        Path executable = Files.copy(Path.of("/bin/sleep"), directory.resolve("tcpdump"));
+        assertTrue(executable.toFile().setExecutable(true));
+        var first = new StreamingCaptureProcess();
+        var replacement = new AtomicReference<Process>();
+        var replacementSampled = new CountDownLatch(1);
+        try (var bridge = new PacketBridge(builder -> {
+            assertEquals("tcpdump", builder.command().getFirst());
+            if (first.isAlive()) return first;
+            var process = new ProcessBuilder(executable.toString(), "30").start();
+            replacement.set(process);
+            return process;
+        }, Map.of(), new DeviceProfiler(), 100, 64, 64, iface -> {
+            if (replacement.get() != null) replacementSampled.countDown();
+            return null;
+        }, iface -> iface)) {
+            bridge.startPassive("lab0mon");
+            byte[] frame = ProbeFrames.radiotap(ProbeFrames.frame("First session"));
+            first.write(ProbeFrames.pcap(ByteOrder.LITTLE_ENDIAN, false, 127, frame));
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+            while (bridge.getCaptureHealth().decoded() == 0 && System.nanoTime() < deadline) Thread.sleep(10);
+            assertEquals(1, bridge.getCaptureHealth().decoded());
+
+            bridge.configureRuntimeCapture("watch", "lab0mon", null, null, 13, false);
+            assertTrue(replacementSampled.await(3, TimeUnit.SECONDS));
+            assertFalse(replacement.get().waitFor(750, TimeUnit.MILLISECONDS),
+                    "The new process must stay running before its first captured frame");
+            assertTrue(bridge.isRunning());
+            assertEquals(1, bridge.getCaptureHealth().decoded());
         }
     }
 

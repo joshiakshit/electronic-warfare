@@ -8,144 +8,229 @@ die() { printf 'ewave: %s\n' "$*" >&2; exit 1; }
 
 help() {
     cat <<'EOF'
-Run ./ewave for the menu, or choose a command:
+Usage:
+  ./ewave                 Open the ewave launcher menu
+  ./ewave restore IFACE   Emergency command to return an adapter to managed Wi-Fi
 
-  ./ewave watch IFACE [--freq MHz]   Listen on one frequency (default: current).
-  ./ewave scan IFACE                Discover activity across 2.4 GHz channels 1–13.
-  ./ewave ops IFACE [--freq MHz]     Open the fixed-channel API server with lab Ops.
-  ./ewave replay [FILE]             Open a recording (default: bundled demo).
-  ./ewave restore IFACE             Return the adapter to managed Wi-Fi.
-
-Watch, scan, ops and probes prepare monitor mode. Stop capture with Ctrl+C.
-Add --port PORT to a API server command (0 selects an available port).
-Utilities: probes IFACE (text probes + Ops), summary IFACE (packet summary + Ops),
-doctor (check tools), build (package and test). Run as your normal user.
-Existing full, live, demo and direct Java-flag invocations also work.
+Live Wi-Fi, Replay, and Open dashboard without capture start the API and dashboard.
+Press Ctrl+C to stop the session cleanly and restore your Wi-Fi adapter.
 EOF
 }
 
-menu() {
-    local choice iface file
-    local -a command
-    while true; do
-        cat <<'EOF'
+discover_adapters() {
+    command -v iw >/dev/null 2>&1 || return 0
+    iw dev 2>/dev/null | awk '
+        /^[[:space:]]*Unnamed\/non-netdev/ { in_iface = 0; next }
+        /^[[:space:]]*Interface[[:space:]]+/ {
+            if (iface != "") print iface "|" type "|" freq "|" ch "|" ssid
+            iface = $2; type = ""; freq = ""; ch = ""; ssid = ""; in_iface = 1; next
+        }
+        in_iface && $1 == "type" { type = $2 }
+        in_iface && $1 == "ssid" {
+            sub(/^[[:space:]]*ssid[[:space:]]+/, "", $0)
+            ssid = $0
+        }
+        in_iface && $1 == "channel" {
+            ch = $2; freq = $3; gsub(/[^0-9]/, "", freq)
+        }
+        END {
+            if (iface != "") print iface "|" type "|" freq "|" ch "|" ssid
+        }
+    ' || true
+}
 
-ewave
-  1) Live Wi-Fi
-  2) Replay a recording
-  3) Restore Wi-Fi
-  4) Tools
-  0) Exit
-EOF
-        read -r -p 'Choose an option: ' choice || return 0
-        case "$choice" in
-            0) return 0 ;;
-            1)
-                printf '1) Watch one channel   2) Scan across channels   3) Open lab Ops   0) Back\n'
-                read -r -p 'Choose: ' choice || return 0
-                case "$choice" in
-                    1) command=(watch) ;; 2) command=(scan) ;; 3) command=(ops) ;;
-                    0) continue ;; *) printf 'Choose a listed option.\n'; continue ;;
-                esac ;;
-            2)
-                read -r -p 'PCAP path (Enter for bundled demo): ' file || return 0
-                command=(replay)
-                if [[ -n "$file" ]]; then command+=("$file"); fi ;;
-            3) command=(restore) ;;
-            4)
-                printf '1) Check setup   2) Build and test   3) Probe text + Ops   4) Packet summary + Ops   0) Back\n'
-                read -r -p 'Choose: ' choice || return 0
-                case "$choice" in
-                    1) command=(doctor) ;; 2) command=(build) ;;
-                    3) command=(probes) ;; 4) command=(summary) ;;
-                    0) continue ;; *) printf 'Choose a listed option.\n'; continue ;;
-                esac ;;
-            *) printf 'Choose a listed option.\n'; continue ;;
-        esac
-        case "${command[0]}" in
-            watch|scan|ops|restore|probes|summary)
-                if command -v iw >/dev/null 2>&1; then iw dev || true; fi
-                read -r -p 'Wi-Fi interface (blank to cancel): ' iface || return 0
-                [[ -n "$iface" ]] || continue
-                command+=("$iface") ;;
-        esac
-        if [[ "${command[0]}" == watch || "${command[0]}" == ops ]]; then
-            local freq
-            read -r -p 'Frequency in MHz (Enter to keep current): ' freq || return 0
-            if [[ -n "$freq" ]]; then command+=(--freq "$freq"); fi
-        fi
-        if "$ROOT/ewave" "${command[@]}"; then
-            :
-        else
-            printf 'Action did not complete. See the error above.\n' >&2
-        fi
+discover_pcaps() {
+    local -a candidates=()
+    local f
+    for f in "$PWD"/*.pcap "$ROOT"/*.pcap "$ROOT"/src/test/resources/probes/*.pcap; do
+        [[ -f "$f" && -r "$f" ]] || continue
+        local dup=false existing
+        for existing in "${candidates[@]+"${candidates[@]}"}"; do
+            if [[ "$existing" == "$f" ]]; then dup=true; break; fi
+        done
+        if [[ "$dup" == false ]]; then candidates+=("$f"); fi
     done
+    printf '%s\n' "${candidates[@]+"${candidates[@]}"}"
 }
 
-prepare_monitor() (
-    local iface=$1 freq=$2 info old_type old_freq link flags was_up=false nm_managed=no answer
-    local changed=false nm_changed=false complete=false
-    local tool
+CHOSEN_ADAPTER=
+
+choose_adapter() {
+    local -a rows=()
+    local line
+    CHOSEN_ADAPTER=
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && rows+=("$line")
+    done < <(discover_adapters)
+
+    if (( ${#rows[@]} > 0 )); then
+        printf '\nAvailable Wi-Fi adapters:\n'
+        local i=1 iface type freq ch ssid desc
+        for line in "${rows[@]}"; do
+            IFS='|' read -r iface type freq ch ssid <<< "$line"
+            ssid=$(printf '%s' "$ssid" | tr -d '[:cntrl:]')
+            desc="${type:-unknown}"
+            if [[ -n "$ch" && -n "$freq" ]]; then
+                desc="$desc · Ch $ch · ${freq} MHz"
+            fi
+            if [[ -n "$ssid" ]]; then
+                desc="$desc · $ssid"
+            fi
+            printf '  %d) %s (%s)\n' "$i" "$iface" "$desc"
+            ((i++))
+        done
+        printf '  0) Back\n'
+        local pick
+        read -r -p 'Choose adapter # (or enter interface name): ' pick || return 1
+        [[ -n "$pick" && "$pick" != 0 ]] || return 1
+        if [[ "$pick" =~ ^[0-9]+$ ]] && (( pick >= 1 && pick <= ${#rows[@]} )); then
+            IFS='|' read -r CHOSEN_ADAPTER _ <<< "${rows[pick-1]}"
+            return 0
+        fi
+        CHOSEN_ADAPTER=$pick
+        return 0
+    fi
+    local iface
+    read -r -p 'Wi-Fi interface (blank to cancel): ' iface || return 1
+    [[ -n "$iface" ]] || return 1
+    CHOSEN_ADAPTER=$iface
+}
+
+ORIG_TYPE=
+ORIG_FREQ=
+ORIG_UP=false
+ORIG_NM_MANAGED=no
+ORIG_CONNECTION=
+NEED_RESTORE=false
+NM_CHANGED=false
+CLEANUP_DONE=false
+RESTORED_IFACE=
+FRONTEND_PID=
+
+stop_frontend() {
+    if [[ -n "${FRONTEND_PID:-}" ]]; then
+        kill "$FRONTEND_PID" 2>/dev/null || true
+        wait "$FRONTEND_PID" 2>/dev/null || true
+        FRONTEND_PID=
+    fi
+}
+
+start_frontend() {
+    if [[ ! -f "$ROOT/frontend/node_modules/vite/bin/vite.js" ]] || ! command -v node >/dev/null 2>&1; then
+        printf 'Frontend dependencies not installed; run "cd frontend && npm install" once to enable auto-started UI.\n'
+        return 0
+    fi
+
+    local log_file url attempt
+    if ! log_file=$(mktemp "${TMPDIR:-/tmp}/ewave-frontend.XXXXXXXX.log"); then
+        printf 'Could not create a dashboard log. Starting the API only.\n' >&2
+        return 0
+    fi
+    (
+        cd -- "$ROOT/frontend"
+        NO_COLOR=1 exec node node_modules/vite/bin/vite.js --configLoader runner --host 127.0.0.1 --clearScreen false
+    ) </dev/null >"$log_file" 2>&1 &
+    FRONTEND_PID=$!
+    for ((attempt = 0; attempt < 100; attempt++)); do
+        kill -0 "$FRONTEND_PID" 2>/dev/null || break
+        url=$(sed -nE 's@.*Local:[[:space:]]+(http://127\.0\.0\.1:[0-9]+/).*@\1@p' "$log_file")
+        if [[ -n "$url" ]]; then
+            printf 'Dashboard: %s (logs: %s)\n' "$url" "$log_file"
+            return 0
+        fi
+        sleep 0.1
+    done
+    stop_frontend
+    printf 'Dashboard failed to start. Starting the API only (logs: %s).\n' "$log_file" >&2
+}
+
+restore_recorded_adapter() {
+    local iface=$RESTORED_IFACE
+    local rc=0
+    [[ -n "$iface" ]] || return 0
+    printf 'Restoring %s to its pre-session state (%s)...\n' "$iface" "$ORIG_TYPE" >&2
+    if [[ "$ORIG_TYPE" == managed ]]; then
+        sudo ip link set "$iface" down || rc=1
+        sudo iw dev "$iface" set type managed || rc=1
+        if [[ "$ORIG_UP" == true ]]; then
+            sudo ip link set "$iface" up || rc=1
+        fi
+        if [[ "$NM_CHANGED" == true ]]; then
+            sudo nmcli device set "$iface" managed yes || rc=1
+        fi
+        if [[ -n "$ORIG_CONNECTION" && "$ORIG_CONNECTION" != -- ]] && command -v nmcli >/dev/null 2>&1; then
+            nmcli connection up id "$ORIG_CONNECTION" ifname "$iface" >/dev/null 2>&1 || true
+        fi
+    fi
+    return "$rc"
+}
+
+cleanup_session() {
+    if [[ "$CLEANUP_DONE" == true ]]; then return 0; fi
+    CLEANUP_DONE=true
+    stop_frontend
+    if [[ "$NEED_RESTORE" == true ]]; then
+        if ! restore_recorded_adapter; then
+            printf 'Adapter restoration failed. Recover manually with: ./ewave restore %s\n' "$RESTORED_IFACE" >&2
+        fi
+    fi
+}
+
+prepare_monitor() {
+    local iface=$1 info link flags answer tool
     [[ "$iface" =~ ^[a-zA-Z0-9_.:-]+$ && "$iface" != -* ]] || die 'Invalid interface name.'
     for tool in ip iw sudo; do
         command -v "$tool" >/dev/null 2>&1 || die "Monitor setup requires $tool."
     done
     info=$(iw dev "$iface" info) || die "Cannot inspect wireless interface: $iface"
-    old_type=$(printf '%s\n' "$info" | awk '$1 == "type" {print $2; exit}')
-    old_freq=$(printf '%s\n' "$info" | awk '$1 == "channel" {gsub(/[^0-9]/, "", $3); print $3; exit}')
-    if [[ "$old_type" == monitor ]]; then
-        if [[ -n "$freq" ]]; then
-            sudo iw dev "$iface" set freq "$freq" || die "Could not tune to $freq MHz."
-        fi
+    ORIG_TYPE=$(printf '%s\n' "$info" | awk '$1 == "type" {print $2; exit}')
+    ORIG_FREQ=$(printf '%s\n' "$info" | awk '$1 == "channel" {gsub(/[^0-9]/, "", $3); print $3; exit}')
+    RESTORED_IFACE=$iface
+
+    if [[ "$ORIG_TYPE" == monitor ]]; then
         printf '%s is already in monitor mode.\n' "$iface"
         return 0
     fi
-    [[ "$old_type" == managed ]] || die "Expected managed or monitor mode; found: $old_type"
+    [[ "$ORIG_TYPE" == managed ]] || die "Expected managed or monitor mode; found: $ORIG_TYPE"
+
     link=$(ip -o link show dev "$iface") || die 'Cannot inspect interface link state.'
     flags=${link#*<}; flags=${flags%%>*}
-    if [[ ",$flags," == *,UP,* ]]; then was_up=true; fi
+    if [[ ",$flags," == *,UP,* ]]; then ORIG_UP=true; else ORIG_UP=false; fi
     if command -v nmcli >/dev/null 2>&1; then
-        nm_managed=$(LC_ALL=C nmcli -g GENERAL.NM-MANAGED device show "$iface") ||
+        ORIG_NM_MANAGED=$(LC_ALL=C nmcli -g GENERAL.NM-MANAGED device show "$iface") ||
             die 'Cannot read NetworkManager state. Prepare monitor mode manually and retry this command.'
-        [[ "$nm_managed" == yes || "$nm_managed" == no ]] || die 'Unexpected NetworkManager managed state.'
+        [[ "$ORIG_NM_MANAGED" == yes || "$ORIG_NM_MANAGED" == no ]] || die 'Unexpected NetworkManager managed state.'
+        ORIG_CONNECTION=$(LC_ALL=C nmcli -g GENERAL.CONNECTION device show "$iface" 2>/dev/null || true)
     fi
+
     printf 'This will disconnect Wi-Fi on %s and put that adapter into monitor mode.\n' "$iface"
-    printf 'Only the selected adapter is changed; other network connections stay configured.\n'
-    printf 'After capture, use ./ewave restore %s to return to normal Wi-Fi.\n' "$iface"
-    read -r -p 'Type monitor to continue (anything else cancels): ' answer || exit 2
-    [[ "$answer" == monitor ]] || { printf 'Monitor setup cancelled.\n'; exit 2; }
+    printf 'Only the selected adapter is changed; your original state will be restored on exit.\n'
+    printf 'If needed later, run ./ewave restore %s to return to normal Wi-Fi.\n' "$iface"
+    read -r -p 'Type monitor to continue (anything else cancels): ' answer || return 2
+    [[ "$answer" == monitor ]] || { printf 'Monitor setup cancelled.\n'; return 2; }
     sudo -v || die 'Administrator authorization failed; networking was not changed.'
-    rollback_monitor() {
-        if [[ "$changed" == true && "$complete" == false ]]; then
-            printf 'Monitor setup failed; attempting to restore the selected adapter.\n' >&2
-            sudo ip link set "$iface" down || true
-            sudo iw dev "$iface" set type "$old_type" || true
-            if [[ "$was_up" == true ]]; then sudo ip link set "$iface" up || true; fi
-            if [[ "$nm_changed" == true ]]; then sudo nmcli device set "$iface" managed yes || true; fi
-            printf 'If networking is unavailable, run ./ewave restore %s.\n' "$iface" >&2
-        fi
-    }
-    trap rollback_monitor EXIT
+
+    NEED_RESTORE=true
+    trap cleanup_session EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
-    changed=true
-    if [[ "$nm_managed" == yes ]]; then
-        nm_changed=true
+
+    if [[ "$ORIG_NM_MANAGED" == yes ]]; then
+        NM_CHANGED=true
         sudo nmcli device set "$iface" managed no || die 'Could not release the adapter from NetworkManager.'
     fi
     sudo ip link set "$iface" down || die 'Could not bring the interface down.'
     sudo iw dev "$iface" set type monitor || die 'The driver could not enable monitor mode.'
     sudo ip link set "$iface" up || die 'Could not bring the monitor interface up.'
-    freq=${freq:-$old_freq}
-    if [[ "$freq" =~ ^[0-9]+$ ]]; then
-        sudo iw dev "$iface" set freq "$freq" || die "Could not tune to $freq MHz."
+    if [[ "$ORIG_FREQ" =~ ^[0-9]+$ ]]; then
+        sudo iw dev "$iface" set freq "$ORIG_FREQ" || die "Could not tune to $ORIG_FREQ MHz."
     fi
     info=$(iw dev "$iface" info) || die 'Could not verify monitor mode.'
     [[ "$(printf '%s\n' "$info" | awk '$1 == "type" {print $2; exit}')" == monitor ]] ||
         die 'The interface did not remain in monitor mode.'
-    complete=true
-    printf 'Monitor mode ready. Starting API server.\n'
-)
+    printf 'Monitor mode ready.\n'
+    return 0
+}
 
 restore_network() {
     local iface=$1 answer tool
@@ -193,104 +278,170 @@ build() {
     (cd "$ROOT" && mvn package)
 }
 
+ensure_jar() {
+    check_java
+    if [[ ! -f "$JAR" ]] || [[ "$ROOT/pom.xml" -nt "$JAR" ]] ||
+        [[ -n "$(find "$ROOT/src" -type f -newer "$JAR" -print -quit 2>/dev/null)" ]]; then
+        build
+    fi
+}
+
+run_doctor() {
+    printf 'Java: '; if (check_java); then java -version 2>&1 | head -n 1; fi
+    printf 'OS: %s (live capture requires Linux)\n' "$(uname -s)"
+    for tool in mvn javac tcpdump iw sudo npm; do
+        if command -v "$tool" >/dev/null 2>&1; then
+            printf 'Available: %s\n' "$tool"
+        else
+            printf 'Missing: %s\n' "$tool"
+        fi
+    done
+    printf 'Build: JDK 21+ and Maven. Replay: Java 21+. Live: Linux, tcpdump, capture permissions.\n'
+    printf 'Frontend: cd frontend && npm install (required once for the web dashboard).\n'
+    if command -v iw >/dev/null 2>&1; then
+        iw dev || printf 'Could not inspect wireless interfaces in this environment.\n'
+    fi
+}
+
+run_live_session() {
+    local iface=$1 rc=0
+    [[ "$(uname -s)" == Linux ]] || die 'Live capture requires Linux. Use Replay a recording for offline PCAPs.'
+    command -v tcpdump >/dev/null 2>&1 || die 'Live capture requires tcpdump on PATH.'
+    command -v sudo >/dev/null 2>&1 || die 'Starting live capture requires sudo on PATH.'
+    ensure_jar
+    if prepare_monitor "$iface"; then
+        :
+    else
+        local setup_status=$?
+        if (( setup_status == 2 )); then return 0; fi
+        return "$setup_status"
+    fi
+    trap cleanup_session EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    local java_bin
+    java_bin=$(command -v java)
+    SESSION_RAN=true
+    start_frontend
+    if (( EUID == 0 )); then
+        "$java_bin" -jar "$JAR" --iface "$iface" --adaptive --ops || rc=$?
+    else
+        sudo -H --preserve-env=JAVA_TOOL_OPTIONS -- "$java_bin" -jar "$JAR" --iface "$iface" --adaptive --ops || rc=$?
+    fi
+    return "$rc"
+}
+
+run_replay_session() {
+    local file=$1 rc=0
+    [[ -f "$file" && -r "$file" ]] || die "Replay file is not readable: $file"
+    ensure_jar
+    trap cleanup_session EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    local java_bin
+    java_bin=$(command -v java)
+    SESSION_RAN=true
+    start_frontend
+    "$java_bin" -jar "$JAR" --replay "$file" || rc=$?
+    return "$rc"
+}
+
+run_dashboard_session() {
+    ensure_jar
+    trap cleanup_session EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    start_frontend
+    java -jar "$JAR"
+}
+
+menu() {
+    local choice file SESSION_RAN=false
+    while true; do
+        cat <<'EOF'
+
+ewave
+
+1. Live Wi-Fi
+2. Replay a recording
+3. Setup and diagnostics
+4. Open dashboard without capture
+0. Exit
+EOF
+        read -r -p 'Choose an option: ' choice || return 0
+        case "$choice" in
+            0) return 0 ;;
+            1)
+                choose_adapter || continue
+                SESSION_RAN=false
+                run_live_session "$CHOSEN_ADAPTER"
+                if [[ "$SESSION_RAN" == true ]]; then return 0; fi ;;
+            2)
+                local -a pcaps=()
+                local line
+                while IFS= read -r line; do
+                    [[ -n "$line" ]] && pcaps+=("$line")
+                done < <(discover_pcaps)
+                file=
+                if (( ${#pcaps[@]} > 0 )); then
+                    printf '\nAvailable recordings:\n'
+                    local i=1 p
+                    for p in "${pcaps[@]}"; do
+                        printf '  %d) %s\n' "$i" "$p"
+                        ((i++))
+                    done
+                    printf '  c) Custom PCAP path   0) Back\n'
+                    read -r -p 'Choose recording # (Enter for first): ' choice || return 0
+                    if [[ "$choice" == 0 ]]; then continue; fi
+                    if [[ -z "$choice" ]]; then
+                        file=${pcaps[0]}
+                    elif [[ "$choice" == c ]]; then
+                        read -r -p 'PCAP path: ' file || return 0
+                        [[ -n "$file" ]] || continue
+                    elif [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#pcaps[@]} )); then
+                        file=${pcaps[choice-1]}
+                    else
+                        printf 'Choose a listed option.\n'
+                        continue
+                    fi
+                else
+                    read -r -p 'PCAP path (Enter for bundled demo): ' file || return 0
+                    if [[ -z "$file" ]]; then
+                        file="$ROOT/src/test/resources/probes/probe-requests.pcap"
+                    fi
+                fi
+                SESSION_RAN=false
+                run_replay_session "$file"
+                if [[ "$SESSION_RAN" == true ]]; then return 0; fi ;;
+            3)
+                printf '\n1) Check setup (doctor)   2) Build backend (build)   3) Restore Wi-Fi (restore)   0) Back\n'
+                read -r -p 'Choose: ' choice || return 0
+                case "$choice" in
+                    1) run_doctor ;;
+                    2) build ;;
+                    3)
+                        choose_adapter || continue
+                        restore_network "$CHOSEN_ADAPTER" ;;
+                    0) continue ;;
+                    *) printf 'Choose a listed option.\n' ;;
+                esac ;;
+            4) run_dashboard_session; return $? ;;
+            *) printf 'Choose a listed option.\n' ;;
+        esac
+    done
+}
+
 mode=${1:-menu}
-setup_iface=
-setup_freq=
 if (( $# )); then shift; fi
 case "$mode" in
     menu)
-        (( $# == 0 )) || die 'Usage: ./ewave menu'
-        menu; exit 0 ;;
+        (( $# == 0 )) || die 'Usage: ./ewave'
+        menu ;;
     restore)
         (( $# == 1 )) || die 'Usage: ./ewave restore INTERFACE'
-        restore_network "$1"; exit 0 ;;
-    help|--help|-h) help; exit 0 ;;
-    doctor)
-        printf 'Java: '; if (check_java); then java -version 2>&1 | head -n 1; fi
-        printf 'OS: %s (live capture requires Linux)\n' "$(uname -s)"
-        for tool in mvn javac tcpdump iw sudo; do
-            if command -v "$tool" >/dev/null 2>&1; then
-                printf 'Available: %s\n' "$tool"
-            else
-                printf 'Missing: %s\n' "$tool"
-            fi
-        done
-        printf 'Build: JDK 21+ and Maven. Replay: Java 21+. Live: Linux, tcpdump, capture permissions.\n'
-        printf 'Watch, scan, ops and probes prepare monitor mode; channel hopping requires iw.\n'
-        if command -v iw >/dev/null 2>&1; then
-            iw dev || printf 'Could not inspect wireless interfaces in this environment.\n'
-        fi
-        exit 0 ;;
-    build)
-        (( $# == 0 )) || die 'Usage: ./ewave build'
-        build; exit 0 ;;
-    demo)
-        args=(--replay "$ROOT/src/test/resources/probes/probe-requests.pcap" "$@") ;;
-    replay)
-        if (( $# == 0 )) || [[ "$1" == --port ]]; then
-            set -- "$ROOT/src/test/resources/probes/probe-requests.pcap" "$@"
-        fi
-        [[ -f "$1" && -r "$1" ]] || die "Replay file is not readable: $1"
-        args=(--replay "$1"); shift; args+=("$@") ;;
-    live)
-        (( $# )) && [[ "$1" != -* ]] || die 'Usage: ./ewave live INTERFACE [--adaptive | --ops] [launcher options]'
-        args=(--passive-rf --iface "$1"); shift; args+=("$@") ;;
-    watch|scan|ops|probes|summary|full)
-        (( $# )) && [[ "$1" != -* ]] || die "Usage: ./ewave $mode INTERFACE [options]"
-        iface=$1; shift
-        setup_iface=$iface
-        case "$mode" in
-            watch) args=(--passive-rf --iface "$iface") ;;
-            scan) args=(--passive-rf --adaptive --iface "$iface") ;;
-            ops|full) args=(--passive-rf --ops --iface "$iface") ;;
-            probes) args=(--probes --iface "$iface") ;;
-            summary) setup_iface=; args=(--iface "$iface") ;;
-        esac
-        while (( $# )); do
-            case "$1" in
-                --port)
-                    [[ ${2:-} =~ ^[0-9]{1,5}$ ]] && (( 10#$2 <= 65535 )) || die 'Expected port 0..65535.'
-                    args+=(--port "$2"); shift 2 ;;
-                --freq)
-                    [[ "$mode" == watch || "$mode" == ops ]] || die '--freq is available for watch and ops.'
-                    [[ ${2:-} =~ ^[1-9][0-9]{3}$ ]] || die 'Expected a Wi-Fi frequency in MHz.'
-                    setup_freq=$2; shift 2 ;;
-                *) die "Unknown $mode option: $1" ;;
-            esac
-        done ;;
-    --*) args=("$mode" "$@") ;;
-    *) die "Unknown command: $mode. Run ./ewave --help." ;;
+        restore_network "$1" ;;
+    help|--help|-h)
+        help ;;
+    *)
+        die "Unknown command: $mode. Just run ./ewave (or ./ewave --help)." ;;
 esac
-
-check_java
-offline=false
-for arg in "${args[@]}"; do
-    if [[ "$arg" == --replay ]]; then offline=true; fi
-done
-if [[ "$offline" == false ]]; then
-    [[ "$(uname -s)" == Linux ]] || die 'Live capture requires Linux. Use ./ewave demo for offline replay.'
-    command -v tcpdump >/dev/null 2>&1 || die 'Live capture requires tcpdump on PATH. Run ./ewave doctor.'
-fi
-
-if [[ ! -f "$JAR" ]] || [[ "$ROOT/pom.xml" -nt "$JAR" ]] ||
-    [[ -n "$(find "$ROOT/src" -type f -newer "$JAR" -print -quit 2>/dev/null)" ]]; then
-    build
-fi
-if [[ -n "$setup_iface" ]]; then
-    if prepare_monitor "$setup_iface" "$setup_freq"; then
-        :
-    else
-        setup_status=$?
-        if (( setup_status == 2 )); then exit 0; fi
-        exit "$setup_status"
-    fi
-fi
-# Resolve the same Java used for the build before sudo replaces PATH.
-java_bin=$(command -v java)
-if (( EUID == 0 )); then
-    exec "$java_bin" -jar "$JAR" "${args[@]}"
-fi
-command -v sudo >/dev/null 2>&1 || die 'Starting ewave requires sudo on PATH.'
-printf 'Starting ewave as administrator (API server, capture, and Ops).\n'
-# Preserve explicit Java privacy options without inheriting the entire environment.
-exec sudo -H --preserve-env=JAVA_TOOL_OPTIONS -- "$java_bin" -jar "$JAR" "${args[@]}"

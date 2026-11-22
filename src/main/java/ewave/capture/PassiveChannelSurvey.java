@@ -35,6 +35,12 @@ public final class PassiveChannelSurvey {
         return nextChannel;
     }
 
+    int listeningChannel() { return channel; }
+
+    void listenOnConfirmedChannel(long now, int confirmed) {
+        if (channel != confirmed) tuneFinished(now, confirmed, true, 0);
+    }
+
     public void frame(long now, int observedChannel) {
         if (channel == observedChannel) {
             heard = true;
@@ -49,5 +55,14 @@ public final class PassiveChannelSurvey {
         heard = false;
         // Amortize a slow command, while bounding its impact on coverage.
         minimum = Math.max(MIN_LISTEN, 2 * Math.min(elapsed, TimeUnit.MILLISECONDS.toNanos(250)));
+    }
+
+    public void reset() {
+        channel = 0;
+        nextChannel = 1;
+        arrived = 0;
+        minimum = 0;
+        lastHit = 0;
+        heard = false;
     }
 }
