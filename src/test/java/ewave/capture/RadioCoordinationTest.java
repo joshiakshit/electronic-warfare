@@ -261,6 +261,63 @@ class RadioCoordinationTest {
         }
     }
 
+    @Test void deauthUsesALiveEvidencedTargetWithoutAnApCache(@TempDir Path dir) throws Exception {
+        String prev = System.getProperty("rf.networkProfile");
+        System.setProperty("rf.networkProfile", dir.resolve("my-network.json").toString());
+        try {
+            var captureStreams = new CopyOnWriteArrayList<StreamingCaptureProcess>();
+            var injectorCommands = new CopyOnWriteArrayList<List<String>>();
+            try (var bridge = new PacketBridge(builder -> {
+                if (builder.command().getFirst().equals("tcpdump")) {
+                    var proc = new StreamingCaptureProcess();
+                    captureStreams.add(proc);
+                    return proc;
+                }
+                return new CompletedProcess("", 0);
+            }, Map.of(), new DeviceProfiler(), 20, 64, 64, iface -> null, iface -> "phy0");
+                 var server = new PassiveRfServer(bridge, true, monitor -> new FrameInjector(monitor, builder -> {
+                     injectorCommands.add(List.copyOf(builder.command()));
+                     return new CompletedProcess("injected\n", 0);
+                 }), new LanScanner(dir.resolve("missing-lan")),
+                         new WifiAccessPoints(dir.resolve("missing-aps"))).start(0);
+                 var client = HttpClient.newHttpClient()) {
+                String base = "http://127.0.0.1:" + server.port();
+                var start = postJson(client, base + "/api/capture/start",
+                        "{\"mode\":\"watch\",\"interface\":\"lab0mon\",\"channel\":6,\"band\":\"2.4\"}");
+                assertEquals(200, start.statusCode(), start.body());
+
+                byte[] beacon = rawBeacon(AP_MAC, "ewave lab".getBytes(StandardCharsets.UTF_8), 6);
+                writeFrames(captureStreams.getFirst(), 2437, beacon,
+                        rawToDsData(AP_MAC, CLIENT_MAC, "ff:ff:ff:ff:ff:ff", 1),
+                        rawToDsData(AP_MAC, CLIENT_MAC, "ff:ff:ff:ff:ff:ff", 2),
+                        rawToDsData(AP_MAC, CLIENT_MAC, "ff:ff:ff:ff:ff:ff", 3));
+                awaitCondition(() -> bridge.getPassiveWifi() != null
+                        && !bridge.getPassiveWifi().evidencedTargets(bridge.getProfiler()).isEmpty());
+
+                var targets = JSON.readTree(get(client, base + "/api/ops/targets").body());
+                assertEquals(1, targets.size());
+                String targetId = targets.at("/0/id").asText();
+                var response = postJson(client, base + "/api/ops/deauth",
+                        "{\"targetId\":\"" + targetId + "\",\"count\":2,\"interface\":\"lab0mon\"}");
+                assertEquals(200, response.statusCode(), response.body());
+                var result = JSON.readTree(response.body());
+                assertTrue(result.path("success").asBoolean(), response.body());
+                assertEquals("deauth", result.path("attackType").asText());
+                assertEquals(List.of("sudo", "iw", "dev", "lab0mon", "set", "freq", "2437"),
+                        injectorCommands.get(0));
+                assertEquals(List.of("sudo", "aireplay-ng", "--ignore-negative-one", "--deauth", "2",
+                        "-a", AP_MAC, "-c", CLIENT_MAC, "lab0mon"), injectorCommands.get(1));
+
+                var capabilities = JSON.readTree(get(client, base + "/api/ops/capabilities").body());
+                assertEquals(7, capabilities.path("operations").size());
+                assertFalse(capabilities.at("/caches/accessPoints/available").asBoolean());
+                assertFalse(capabilities.at("/caches/lanHosts/available").asBoolean());
+            }
+        } finally {
+            restoreProfileProperty(prev);
+        }
+    }
+
     @Test void runtimeCaptureControlAndModuleEndpointsWorkEndToEnd(@TempDir Path dir) throws Exception {
         String prev = System.getProperty("rf.networkProfile");
         System.setProperty("rf.networkProfile", dir.resolve("my-network.json").toString());
@@ -377,9 +434,21 @@ class RadioCoordinationTest {
 
     private static void writeInitialBeacon(StreamingCaptureProcess proc, String bssid, String ssid,
                                            int ch, int freqMhz) throws Exception {
-        byte[] radiotap = radiotapAtFreq(rawBeacon(bssid, ssid.getBytes(StandardCharsets.UTF_8), ch), freqMhz);
-        byte[] pcap = ProbeFrames.pcap(ByteOrder.LITTLE_ENDIAN, false, 127, radiotap);
-        ByteBuffer.wrap(pcap).order(ByteOrder.LITTLE_ENDIAN).putInt(24, (int) (System.currentTimeMillis() / 1000));
+        writeFrames(proc, freqMhz, rawBeacon(bssid, ssid.getBytes(StandardCharsets.UTF_8), ch));
+    }
+
+    /** Writes several radiotap frames under one PCAP header so the stream stays parseable. */
+    private static void writeFrames(StreamingCaptureProcess proc, int freqMhz, byte[]... frames) throws Exception {
+        byte[][] packets = new byte[frames.length][];
+        for (int i = 0; i < frames.length; i++) packets[i] = radiotapAtFreq(frames[i], freqMhz);
+        byte[] pcap = ProbeFrames.pcap(ByteOrder.LITTLE_ENDIAN, false, 127, packets);
+        var buffer = ByteBuffer.wrap(pcap).order(ByteOrder.LITTLE_ENDIAN);
+        int offset = 24;
+        int now = (int) (System.currentTimeMillis() / 1000);
+        for (byte[] packet : packets) {
+            buffer.putInt(offset, now);
+            offset += 16 + packet.length;
+        }
         proc.write(pcap);
     }
 

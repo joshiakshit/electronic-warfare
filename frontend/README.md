@@ -1,8 +1,8 @@
 # ewave frontend
 
-React + TypeScript desktop client for the local Java backend. The dashboard reads reports, controls passive sessions, replays local recordings, and manages My Network. Ops uses a local simulation.
+React + TypeScript desktop client for the local Java backend. The dashboard reads reports, controls passive sessions, replays local recordings, manages My Network, and runs backend Lab Ops.
 
-See [current project state](../docs/CURRENT-STATE.md) and the [confirmed eight-module map](../README.md#passive-feature-map). Sniper, Spotter, Whistleblower, De-cloaker, Inspector, Profiler, Tracker, and Lookout are final names; Ops is separate.
+See [current project state](../docs/CURRENT-STATE.md), the [practical lab guide](../docs/LAB-GUIDE.md), and the [confirmed eight-module map](../README.md#passive-feature-map). Sniper, Spotter, Whistleblower, De-cloaker, Inspector, Profiler, Tracker, and Lookout are final names; Ops is separate.
 
 ## Run locally
 
@@ -52,6 +52,7 @@ The frontend polls authoritative snapshots and uses `/ws/events` to request an e
 | Lookout | `GET /api/lookout` |
 | Settings | `GET/POST /api/profiler/network`, `POST /api/profiler/network/find`, `GET/POST/DELETE /api/profiler/fingerprints*` |
 | Saved results | `GET/POST /api/recordings`, `POST /api/recordings/{id}/replay` |
+| Ops | `GET /api/ops/capabilities`, `GET /api/ops/targets`, `POST /api/ops/{deauth,uncloak,handshake,pmkid,beacon,evil-twin}`, `GET /api/ops/{status,handshake/status,pmkid/status,beacon/status,evil-twin/status}`, `POST /api/ops/handshake/verify`, `POST /api/ops/stop` |
 | Event refresh | `WS /ws/events` |
 
 ## Current capability limits
@@ -61,7 +62,7 @@ The frontend polls authoritative snapshots and uses `/ws/events` to request an e
 - My Network manages device and AP enrollment and capture scope. Changes to the effective scope clear current observations. Profiler can save reference samples from the fingerprint evidence available for enrolled devices.
 - Lookout charts the scanner's occupancy estimates by band and uses valid sample counts to distinguish unavailable estimates from zero. AP-advertised utilization is available in Inspector's AP evidence.
 - Probe device identifiers are returned only when enabled by the backend. SSID visibility follows backend privacy configuration; the UI displays only names returned in the report.
-- Ops never invokes `POST /api/attack/*`. Operation prerequisites, targets, current real operation output, and real stop controls are not integrated. Its controls and responses are clearly marked simulations. The backend operation routes can perform real radio actions when enabled.
+- Ops endpoints are enabled automatically for live and idle sessions; replay is passive-only. The API stays on loopback. The console reads `GET /api/ops/capabilities` for tool, interface, cache, wordlist, and per-operation readiness. Deauth and handshake accept a live evidenced target, an observed AP token, or a raw BSSID; PMKID, beacon, and evil twin use explicit interface and parameter forms. All operations share one server-wide slot and one physical-radio lease, and **Stop operation** cancels the running operation.
 - WebSocket events contain device, packet, probe, attack, or channel updates. A reconnect requests a fresh snapshot, and timed polling continues while the socket is disconnected.
 
 The frontend keeps raw SSIDs as text, shows backend values without generating packet counts or identities, and opens an evidence panel for selected rows. Device family labels are presented as inferred fingerprint classifications, with confidence where supplied by the API.
@@ -77,6 +78,8 @@ Overview links capture totals and topology counts to their reports. Missing coun
 In Spotter, switch between the access point table and **Topology**. Select an access point or client in the diagram to filter the client-links table. Solid wires represent association or reassociation evidence, and dashed wires represent data-frame evidence. Large diagrams show a bounded subset and offer an endpoint picker. The client-links table provides the full matching report. AP-reported station counts and observed client counts have separate columns.
 
 During live passive capture, Sniper can search for an exact network name or follow an AP from the current capture. The AP picker includes the observed identifier and channel, including for APs whose name is unavailable. **Stop Sniper** stops the displayed run.
+
+Ops presents six live operations beside a readiness strip and target evidence. Capability chips show which backend tools are available; missing tools are listed per operation. Deauth and handshake select from live evidenced client targets or observed APs. Handshake also offers an offline PSK verification card. PMKID, beacon, and evil twin expose their explicit interface, SSID, channel, wordlist, and portal fields. The output pane polls the operation status once per second and renders command text, stage, output, deauth/handshake/PMKID results, and portal credentials.
 
 In Inspector, the evidence pane groups advertised security and load alongside the capture observations. It displays AP-reported channel utilization as a percentage. [ETSI WLAN Access Information API](https://www.etsi.org/deliver/etsi_gs/MEC/001_099/028/02.03.01_60/gs_mec028v020301p.pdf)
 

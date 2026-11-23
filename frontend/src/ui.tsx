@@ -1,8 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Activity, Radio, Wifi, Shield, Eye, Radar, ScanSearch, Network, Clock3, Settings, CircleHelp, RefreshCw, Play, CircleStop, AlertTriangle, Unplug } from 'lucide-react';
+import { Activity, Radio, Wifi, Shield, Eye, Radar, ScanSearch, Network, Clock3, Settings, CircleHelp, RefreshCw, AlertTriangle, Unplug } from 'lucide-react';
 import { get, subscribe, type AccessPointObservation, type CaptureHealth, type CaptureStatus, type ClientLink, type Json, type MyNetwork, type Recording, type SniperReport } from './api';
 import { activeRoute, captureStateLabel, channelReading, modulePath, rememberedTab, sessionSummary } from './navigation';
-import { simulatedOperation, simulatedStop } from './opsSimulation';
 import { applyTheme, rememberTheme, themes, type Theme } from './theme';
 import { channelRows, date, deviceClassification, hiddenNameRow, observationValue, observedClientsByAp, short, title } from './observations';
 import { ObservationReport } from './ObservationReport';
@@ -13,6 +12,7 @@ import { CaptureControls, SavedRecordings, type RunCaptureAction } from './Sessi
 import { MyNetworkSettings } from './MyNetworkSettings';
 import { startSnapshotPolling } from './snapshotPolling';
 import { Sniper } from './Sniper';
+import { Ops } from './Ops';
 
 type Tab = { id: string; label: string; hint: string; endpoint: string; kind: string };
 type Section = { id: string; label: string; icon: typeof Wifi; hint: string; tabs?: Tab[] };
@@ -472,4 +472,3 @@ function Health({ data }: { data: CaptureHealth }) {
     </>
   );
 }
-function Ops({status}:{status:any}){const [operation,setOperation]=useState('Handshake capture');const [target,setTarget]=useState('');const [state,setState]=useState<'idle'|'running'|'stopped'>('idle');const [output,setOutput]=useState('');const enabled=status?.operationsEnabled;const start=()=>{const result=simulatedOperation(operation,target);if(result){setState(result.state);setOutput(result.output)}};const stop=()=>{const result=simulatedStop(operation);setState(result.state);setOutput(result.output)};return <div className="ops-panel"><div className="ops-icon"><Shield size={23}/></div><div className="ops-content"><h2>Lab operations</h2><p>Simulation workspace · {enabled?'Ops enabled on backend':'Ops unavailable on backend'}</p><div className="ops-controls"><label>Operation<select value={operation} onChange={e=>setOperation(e.target.value)}><option>Handshake capture</option><option>PMKID capture</option><option>Deauthentication test</option><option>Beacon test</option><option>Evil twin test</option><option>Network name reveal</option></select></label><label>Selected target<input value={target} onChange={e=>setTarget(e.target.value)} placeholder="Target label or address"/></label><div className="ops-buttons"><button disabled={!target.trim()||state==='running'} onClick={start}><Play size={13}/> Start simulation</button><button className="secondary" disabled={state!=='running'} onClick={stop}><CircleStop size={13}/> Stop simulation</button></div></div><div className="detail-grid"><div><span>Prerequisites</span><b>Not checked</b></div><div><span>Target</span><b>{target.trim()||'None selected'}</b></div><div><span>Operation state</span><b>SIMULATED · {state.toUpperCase()}</b></div></div><div className="simulation-output" aria-live="polite"><b>Output</b><span>{output||'No simulated operation has been started.'}</span></div><div className="notice compact"><AlertTriangle size={16}/><div><b>Simulation only</b><span>Controls preview the workflow locally. No radio commands are sent.</span></div></div></div></div>}

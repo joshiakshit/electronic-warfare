@@ -33,7 +33,6 @@ public final class Ewave {
         int tickMs = PacketBridge.DEFAULT_TICK_MS;
         boolean passiveRf = false;
         boolean adaptive = false;
-        boolean ops = false;
         Integer freqMhz = null;
         Integer channel = null;
         String band = null;
@@ -52,7 +51,6 @@ public final class Ewave {
                         "--probes text capture has been removed; use De-cloaker on binary capture (--iface <iface> or --replay <pcap>)");
                 case "--passive-rf" -> passiveRf = true;
                 case "--adaptive" -> adaptive = true;
-                case "--ops" -> ops = true;
                 case "--reveal-probes" -> {
                     if (Boolean.FALSE.equals(revealProbes))
                         throw new IllegalArgumentException("--reveal-probes cannot be combined with --hide-probes");
@@ -92,8 +90,8 @@ public final class Ewave {
         Integer resolvedFreq = freqMhz != null ? freqMhz : channel == null ? null : resolveFrequency(channel, band);
         if (replay != null && replay.toString().isBlank())
             throw new IllegalArgumentException("Replay file must not be blank");
-        if (replay != null && (passiveRf || adaptive || ops || ifaceSpecified || resolvedFreq != null))
-            throw new IllegalArgumentException("--replay cannot be combined with --iface, --passive-rf, --adaptive, --ops, --freq, or --channel");
+        if (replay != null && (passiveRf || adaptive || ifaceSpecified || resolvedFreq != null))
+            throw new IllegalArgumentException("--replay cannot be combined with --iface, --passive-rf, --adaptive, --freq, or --channel");
         if (adaptive && !passiveRf && !ifaceSpecified && resolvedFreq == null)
             throw new IllegalArgumentException("--adaptive requires --iface (or --passive-rf)");
         if (adaptive && resolvedFreq != null)
@@ -106,8 +104,8 @@ public final class Ewave {
         LaunchPlan plan;
         if (replay != null) plan = new LaunchPlan(Mode.REPLAY, iface, port, bands, tickMs, false, false, replay);
         else if (passiveRf || ifaceSpecified || adaptive || resolvedFreq != null)
-            plan = new LaunchPlan(Mode.CAPTURE, iface, port, bands, tickMs, adaptive, ops, null);
-        else plan = new LaunchPlan(Mode.IDLE, iface, port, bands, tickMs, false, ops, null);
+            plan = new LaunchPlan(Mode.CAPTURE, iface, port, bands, tickMs, adaptive, true, null);
+        else plan = new LaunchPlan(Mode.IDLE, iface, port, bands, tickMs, false, true, null);
         return new LaunchConfig(plan, resolvedFreq, revealProbes, scope, profile);
     }
 
@@ -173,7 +171,6 @@ public final class Ewave {
         System.out.println("Usage: java -jar ewave-0.1.0-SNAPSHOT.jar [options]");
         System.out.println("  --iface INTERFACE     Wireless capture interface (default: wlo1)");
         System.out.println("  --adaptive            2.4 GHz channel hopping during live capture");
-        System.out.println("  --ops                 Enable Lab Ops endpoints");
         System.out.println("  --freq MHz            Initial frequency in MHz (2300..7125)");
         System.out.println("  --channel CH --band B Channel + band (2.4, 5, or 6) converted to frequency");
         System.out.println("  --replay FILE         Replay an 802.11 PCAP file offline");

@@ -21,6 +21,8 @@ public final class WifiAccessPoints {
     public WifiAccessPoints() { this(Path.of("/tmp/ewave-wifi-aps.txt")); }
     public WifiAccessPoints(Path cache) { this.cache = Objects.requireNonNull(cache); }
 
+    public Path cachePath() { return cache; }
+
     public List<AccessPoint> all() throws IOException { return parse(Files.readAllLines(cache)); }
 
     static List<AccessPoint> parse(List<String> lines) {

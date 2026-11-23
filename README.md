@@ -15,10 +15,10 @@ From the repository root:
 ```
 
 Choose:
-1. **`1. Live Wi-Fi`** — select an adapter, confirm switching it to monitor mode, and open the web dashboard (`http://127.0.0.1:5173`). The backend starts with adaptive scanning and Ops endpoints enabled; Sniper is available to select a target. Enabling Ops does not execute an operation. On exit the launcher attempts to restore the recorded managed-adapter state. An adapter already in monitor mode is left there.
+1. **`1. Live Wi-Fi`** — select an adapter, confirm switching it to monitor mode, and open the web dashboard (`http://127.0.0.1:5173`). The backend starts with adaptive scanning and Ops endpoints enabled; Sniper is available to select a target. Starting a session does not execute an operation. On exit the launcher attempts to restore the recorded managed-adapter state. An adapter already in monitor mode is left there.
 2. **`2. Replay a recording`** — select a PCAP recording to inspect it in the web dashboard as your normal user without `sudo`.
 3. **`3. Setup and diagnostics`** — use the submenu to check dependencies, build the backend JAR, or restore an adapter (`./ewave restore IFACE`).
-4. **`4. Open dashboard without capture`** — start the idle loopback API and frontend as your normal user. Import and play recordings under **Session → Saved results**.
+4. **`4. Open dashboard without capture`** — start the idle loopback API and frontend as your normal user. Import and play recordings under **Session → Saved results**. Ops readiness is available here; live radio operations require **Live Wi-Fi**.
 
 The shell accepts `./ewave`, `./ewave restore IFACE`, and `./ewave --help`. Older shortcuts such as `watch`, `scan`, `ops`, `replay`, `doctor`, and `build` are not shell subcommands now; use the menu. Direct Java flags remain available with `java -jar target/ewave-0.1.0-SNAPSHOT.jar --help`.
 
@@ -32,7 +32,7 @@ npm --prefix frontend run dev -- --host 127.0.0.1
 
 Without a backend, “No session connected” is expected. See [frontend setup and integration limits](frontend/README.md).
 
-Live capture requires Linux, `tcpdump`, compatible hardware, and `sudo` privileges. Lab operations require their external tools and an authorized lab.
+Live capture requires Linux, `tcpdump`, compatible hardware, and `sudo` privileges. Lab operations require their external tools and an authorized lab. Depending on the operation, Ops uses `iw`, `aireplay-ng`, `tcpdump`, `tshark`, `aircrack-ng`, `hcxdumptool`, `hcxpcapngtool`, `mdk4`/`mdk3`, `hostapd`, `dnsmasq`, `python3`, and a wordlist. The Ops readiness strip and `GET /api/ops/capabilities` list what is installed.
 
 ## API integration
 
@@ -50,10 +50,14 @@ The HTTP server implementation is `ewave.ui.PassiveRfServer`. Its existing packa
 | Profiler & My Network | `GET /api/profiler`, `GET /api/profiler/{id}`, `GET/POST /api/profiler/network`, `POST /api/profiler/network/find`, `GET/POST/DELETE /api/profiler/fingerprints*` | `GET /api/inventory*`, `GET/POST /api/my-network*`, `GET/POST/DELETE /api/fingerprint-samples*` |
 | Tracker | `GET /api/tracker` | `GET /api/topology` |
 | Lookout | `GET /api/lookout`, `GET /api/lookout/demo` | `GET /api/channels`, `GET /api/channels/demo` |
-| Lab Ops (`--ops`) | `/api/ops/{targets,aps,scan-lan,status,stop,deauth,uncloak,handshake*,pmkid*,beacon*,evil-twin*}` | `/api/attack/*` |
+| Lab Ops | `GET /api/ops/{capabilities,targets,aps,scan-lan,status,stop}`, `POST /api/ops/{deauth,uncloak,handshake,handshake/verify,pmkid,beacon,evil-twin}` | `/api/attack/*` |
 | WebSocket stream | `/ws/events` | `—` |
 
-Retired text-mode endpoints (`GET /api/devices`, `GET /api/profiles`, `GET /api/probes`) return `410 Gone` with their replacement route when operations are enabled. Existing request validation and same-origin loopback restrictions apply. The Vite configuration proxies `/api` and `/ws` to this backend with `changeOrigin: false`. The dashboard uses these routes for passive reports, Sniper, capture controls, recording replay, and My Network. Ops in the dashboard is a local simulation.
+Retired text-mode endpoints (`GET /api/devices`, `GET /api/profiles`, `GET /api/probes`) return `410 Gone` with their replacement route when operations are enabled. Existing request validation and same-origin loopback restrictions apply. The Vite configuration proxies `/api` and `/ws` to this backend with `changeOrigin: false`. The dashboard uses these routes for passive reports, Sniper, capture controls, recording replay, My Network, and the Ops console.
+
+`GET /api/ops/capabilities` reports tool availability, monitor/AP interfaces, cache freshness, the configured wordlist, and per-operation readiness. Deauth and handshake accept a live evidenced `targetId`, an observed AP `apId` token, or an explicit `apBssid`; the server resolves addresses and frequency from the current session. The cached AP and LAN routes remain optional legacy inputs. Set `-Drf.wordlist=/path/to/wordlist` (or `EWAVE_WORDLIST`) before `-jar` to prefill Ops wordlist requests; an explicit `wordlistPath` still overrides it.
+
+Ops endpoints are enabled automatically for live and idle sessions; replay exposes passive analysis only. The Ops console is a real local control surface. It shows command output, results, portal credentials, and the current operation state from the backend. All operations share one server-wide slot and one physical-radio lease, and `/api/ops/stop` cancels the running operation.
 
 The lab portal helper exposes JSON at GET requests and accepts its existing
 form-encoded `POST /submit`, returning `{"status":"recorded"}`. Its bundled HTML
@@ -76,7 +80,7 @@ The browser uploads the file it was given and replays it by library ID.
 java -Daudit.revealSsids=false -jar target/ewave-0.1.0-SNAPSHOT.jar --replay capture.pcap --port 0
 ```
 
-AP names returned by topology are plain observed SSIDs. The legacy `audit.revealSsids` setting and `--hide-probes` / `--reveal-probes` flags control probe-name visibility; they do not anonymize every AP name in an exported report. Review captures and exports separately before sharing. Session identifiers, scope and retention settings still apply. The reports under `tools/` document historical evaluations;
+AP names returned by topology are plain observed SSIDs. The legacy `audit.revealSsids` setting and `--hide-probes` / `--reveal-probes` flags control probe-name visibility; they do not anonymize every AP name in an exported report. Ops targets and operation results contain real client and BSSID addresses for the local console, so review Ops output before sharing it. Session identifiers, scope and retention settings still apply. The reports under `tools/` document historical evaluations;
 their screenshots and dashboard instructions describe the retired frontend.
 
 ## Passive feature map
@@ -100,7 +104,7 @@ All eight passive module names are confirmed. Use these spellings in documentati
 
 Router-name masking is no longer a pending request in the current topology path: it returns observed AP names. Distinguish same-name radios by AP identifier/BSSID; an unknown name stays unknown. Probe-name privacy remains separate.
 
-For current implementation boundaries, evidence, and the next work, read [the agent handoff](docs/CURRENT-STATE.md). Older reviews are historical evidence, not current startup instructions.
+For a step-by-step practical lab covering every module, read [the lab guide](docs/LAB-GUIDE.md). For implementation boundaries and the next work, read [the agent handoff](docs/CURRENT-STATE.md). Older reviews are historical evidence, not current startup instructions.
 
 ## Optional Wi-Fi vendor names
 
@@ -128,6 +132,7 @@ default build, package from a fresh checkout.
 | `tools/` | Offline benchmarks, scanner trials, and their results |
 | `frontend/` | React/TypeScript desktop dashboard, Vite, and frontend tests |
 | `docs/CURRENT-STATE.md` | Current agent handoff and verification boundaries |
+| `docs/LAB-GUIDE.md` | Step-by-step practical guide for every module and Ops |
 
 ## Development
 

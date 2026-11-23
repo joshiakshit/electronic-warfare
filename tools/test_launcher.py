@@ -119,7 +119,7 @@ elif name == "node":
         self.assertIn("1) lab0mon", result.stdout)
         self.assertNotIn("P2P-device", result.stdout)
         java = next(c for c in self.commands() if c[:2] == ["java", "-jar"])
-        self.assertEqual(["--iface", "lab0mon", "--adaptive", "--ops"], java[3:])
+        self.assertEqual(["--iface", "lab0mon", "--adaptive"], java[3:])
 
     @unittest.skipIf(os.geteuid() == 0, "Root invocation bypasses sudo")
     def test_live_wifi_managed_adapter_prepares_monitor_launches_after_build_and_restores_once(self):
@@ -148,7 +148,7 @@ elif name == "node":
         self.assertEqual(1, commands.count(restore_managed))
         self.assertEqual(1, commands.count(restore_nm))
         self.assertIn(["iw", "dev", "lab0mon", "set", "freq", "2412"], commands)
-        self.assertEqual(["--iface", "lab0mon", "--adaptive", "--ops"], java[3:])
+        self.assertEqual(["--iface", "lab0mon", "--adaptive"], java[3:])
         self.assertNotIn(["systemctl", "stop", "NetworkManager"], commands)
 
     def test_live_wifi_preserves_original_monitor_mode_on_exit(self):

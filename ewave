@@ -296,7 +296,16 @@ run_doctor() {
             printf 'Missing: %s\n' "$tool"
         fi
     done
+    printf 'Ops tools:\n'
+    for tool in aireplay-ng tshark aircrack-ng hcxdumptool hcxpcapngtool mdk4 mdk3 hostapd dnsmasq python3; do
+        if command -v "$tool" >/dev/null 2>&1; then
+            printf '  Available: %s\n' "$tool"
+        else
+            printf '  Missing: %s\n' "$tool"
+        fi
+    done
     printf 'Build: JDK 21+ and Maven. Replay: Java 21+. Live: Linux, tcpdump, capture permissions.\n'
+    printf 'Ops: run a live session, then use the Ops console readiness strip. Set -Drf.wordlist=/path/to/wordlist for a default wordlist.\n'
     printf 'Frontend: cd frontend && npm install (required once for the web dashboard).\n'
     if command -v iw >/dev/null 2>&1; then
         iw dev || printf 'Could not inspect wireless interfaces in this environment.\n'
@@ -324,9 +333,9 @@ run_live_session() {
     SESSION_RAN=true
     start_frontend
     if (( EUID == 0 )); then
-        "$java_bin" -jar "$JAR" --iface "$iface" --adaptive --ops || rc=$?
+        "$java_bin" -jar "$JAR" --iface "$iface" --adaptive || rc=$?
     else
-        sudo -H --preserve-env=JAVA_TOOL_OPTIONS -- "$java_bin" -jar "$JAR" --iface "$iface" --adaptive --ops || rc=$?
+        sudo -H --preserve-env=JAVA_TOOL_OPTIONS -- "$java_bin" -jar "$JAR" --iface "$iface" --adaptive || rc=$?
     fi
     return "$rc"
 }

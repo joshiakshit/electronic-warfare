@@ -27,6 +27,8 @@ public final class LanScanner {
     /** File boundary for deterministic tests without accessing the host's cache. */
     public LanScanner(Path cacheFile) { this.cacheFile = Objects.requireNonNull(cacheFile); }
 
+    public Path cachePath() { return cacheFile; }
+
     public List<Device> scan() throws IOException {
         return parse(Files.readAllLines(cacheFile), localIpv4Addresses());
     }

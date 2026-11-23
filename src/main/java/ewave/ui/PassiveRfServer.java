@@ -12,6 +12,8 @@ import ewave.active.BeaconFlood;
 import ewave.active.PmkidCapture;
 import ewave.active.EvilTwin;
 import ewave.active.LanScanner;
+import ewave.active.OpsCapabilities;
+import ewave.active.OpsTargets;
 import ewave.active.WifiAccessPoints;
 import ewave.capture.PacketBridge;
 import ewave.capture.ProbeDemo;
@@ -168,7 +170,7 @@ public final class PassiveRfServer implements AutoCloseable {
             if (!isLocal(ctx.header("Host"), ctx.header("Origin")))
                 throw new ForbiddenResponse("Same-origin loopback access required");
             if (!operations && (ctx.path().startsWith("/api/attack/") || ctx.path().startsWith("/api/ops/")))
-                throw new NotFoundResponse("Lab operations are disabled");
+                throw new NotFoundResponse("Lab operations require a live capture session");
         });
         registerReports();
         registerOperations();
@@ -757,6 +759,21 @@ public final class PassiveRfServer implements AutoCloseable {
     }
 
     private void registerOperations() {
+        io.javalin.http.Handler capabilitiesHandler = ctx -> {
+            List<String> monitors;
+            try {
+                monitors = RadioStatus.monitorInterfaces();
+            } catch (java.io.IOException unavailable) {
+                monitors = List.of();
+            }
+            Map<String, Object> capture = new LinkedHashMap<>();
+            capture.put("status", wifi.getCaptureStatus());
+            var health = wifi.getCaptureHealth();
+            if (health != null) capture.put("health", health);
+            ctx.json(OpsCapabilities.snapshot(accessPoints.cachePath(), lanScanner.cachePath(), configuredWordlist(),
+                    monitors, OpsCapabilities.systemInterfaces(), capture, activeOperation(),
+                    OpsCapabilities.systemPath()));
+        };
         io.javalin.http.Handler stopHandler = ctx -> {
             stopOperations();
             ctx.json(Map.of("stopped", true));
@@ -782,43 +799,31 @@ public final class PassiveRfServer implements AutoCloseable {
         };
         io.javalin.http.Handler deauthStatusHandler = ctx -> ctx.json(deauthStatus());
         io.javalin.http.Handler deauthHandler = ctx -> {
-            final String ap, client, monitor;
+            final String monitor;
             final int count;
-            final WifiAccessPoints.AccessPoint target;
+            final OpsTargets.Resolved target;
             final FrameInjector injector;
             try {
                 var body = mapper.readTree(ctx.body());
                 if (body == null || !body.isObject()) throw new IllegalArgumentException("Expected a JSON object");
-                var apNode = body.path("apBssid");
-                var clientNode = body.path("clientMac");
+                String targetId = optionalText(body, "targetId");
+                String apId = optionalText(body, "apId");
+                String apBssid = optionalText(body, "apBssid");
+                String clientMac = optionalText(body, "clientMac");
+                if (targetId == null && apId == null && apBssid == null)
+                    throw new IllegalArgumentException("targetId, apId, or apBssid is required");
                 var countNode = body.path("count");
-                var interfaceNode = body.path("interface");
-                if (!apNode.isTextual() || !MAC.matcher(apNode.textValue()).matches())
-                    throw new IllegalArgumentException("apBssid must be a MAC address");
-                if (!clientNode.isMissingNode() && !clientNode.isNull()
-                        && (!clientNode.isTextual() || !MAC.matcher(clientNode.textValue()).matches()))
-                    throw new IllegalArgumentException("clientMac must be a MAC address or null for broadcast");
                 if (!countNode.isIntegralNumber() || !countNode.canConvertToInt() || countNode.intValue() < 0)
                     throw new IllegalArgumentException("count must be a nonnegative integer");
-                if (!interfaceNode.isTextual()) throw new IllegalArgumentException("interface is required");
-                ap = apNode.textValue();
-                client = clientNode.isTextual() ? clientNode.textValue() : null;
+                var interfaceNode = body.path("interface");
+                if (!interfaceNode.isTextual() || interfaceNode.textValue().isBlank())
+                    throw new IllegalArgumentException("interface is required");
                 count = countNode.intValue();
                 monitor = interfaceNode.textValue();
+                target = resolveOpsTarget(targetId, apId, apBssid, clientMac, false);
                 injector = injectorFactory.apply(monitor);
             } catch (JsonProcessingException | IllegalArgumentException invalid) {
                 ctx.status(400).json(Map.of("error", invalid.getMessage()));
-                return;
-            }
-            try {
-                target = accessPoints.all().stream().filter(point -> point.bssid().equalsIgnoreCase(ap))
-                        .findFirst().orElse(null);
-                if (target == null) {
-                    ctx.status(400).json(Map.of("error", "Select an actual Wi-Fi BSSID from the cached AP list"));
-                    return;
-                }
-            } catch (java.io.IOException failure) {
-                ctx.status(400).json(Map.of("error", "Wi-Fi AP cache unavailable. Restore managed Wi-Fi and recreate /tmp/ewave-wifi-aps.txt; see README, 'Restoring networking after a live session'."));
                 return;
             }
             int channel = target.channel();
@@ -843,7 +848,7 @@ public final class PassiveRfServer implements AutoCloseable {
                 return;
             }
             try {
-                var result = injector.sendDeauthFrames(ap, client, count, target.frequencyMhz());
+                var result = injector.sendDeauthFrames(target.apBssid(), target.clientMac(), count, target.frequencyMhz());
                 if (result.success() && snapshot != null) {
                     synchronized (injectionLock) {
                         if (!closing) reconnectWatches.put(channel, Instant.now());
@@ -948,7 +953,7 @@ public final class PassiveRfServer implements AutoCloseable {
                     return;
                 }
                 ctx.json(Map.of("status", "deauth_sent", "targetClient", clientMac,
-                        "message", "SSID will appear in Map within 10s if client reconnects."));
+                        "message", "SSID will appear in Whistleblower within 10s if the client reconnects."));
             } finally {
                 releaseOperation(lease, () -> { if (activeInjector == injector) activeInjector = null; });
             }
@@ -962,7 +967,7 @@ public final class PassiveRfServer implements AutoCloseable {
                 var body = mapper.readTree(ctx.body());
                 if (body == null || !body.isObject()) throw new IllegalArgumentException("Expected a JSON object");
                 monitor = body.has("interface") ? requiredText(body, "interface") : "wlo1";
-                wordlist = requiredText(body, "wordlistPath");
+                wordlist = requiredWordlist(body);
                 duration = integer(body, "durationSeconds", 30, 1, 300);
                 HandshakeAnalyzer.readableFile(wordlist, HandshakeAnalyzer.WORDLIST_MISSING);
                 capture = pmkidFactory.apply(new PmkidSettings(monitor, wordlist, duration));
@@ -1100,19 +1105,22 @@ public final class PassiveRfServer implements AutoCloseable {
             try {
                 var body = mapper.readTree(ctx.body());
                 if (body == null || !body.isObject()) throw new IllegalArgumentException("Expected a JSON object");
-                String ap = requiredText(body, "apBssid");
-                var clientNode = body.path("clientMac");
-                String client = clientNode.isMissingNode() || clientNode.isNull() ? null : requiredText(body, "clientMac");
+                String targetId = optionalText(body, "targetId");
+                String apId = optionalText(body, "apId");
+                String ap = optionalText(body, "apBssid");
+                if (targetId == null && apId == null && ap == null)
+                    throw new IllegalArgumentException("targetId, apId, or apBssid is required");
+                String client = optionalText(body, "clientMac");
+                String ssid = optionalText(body, "ssid");
                 var channelNode = body.path("channel");
-                if (!channelNode.isMissingNode() && !channelNode.isNull()
-                        && (!channelNode.isIntegralNumber() || !channelNode.canConvertToInt()))
-                    throw new IllegalArgumentException("channel must be an integer in 1–233");
-                int channel = HandshakeAnalyzer.normalizeChannel(channelNode.asInt(6));
-                HandshakeAnalyzer.validateTarget(ap, client, channel);
-                var ssidNode = body.path("ssid");
-                if (!ssidNode.isMissingNode() && !ssidNode.isNull() && !ssidNode.isTextual())
-                    throw new IllegalArgumentException("ssid must be a string");
-                String ssid = ssidNode.isTextual() ? ssidNode.textValue() : null;
+                Integer requestedChannel = null;
+                if (!channelNode.isMissingNode() && !channelNode.isNull()) {
+                    if (!channelNode.isIntegralNumber() || !channelNode.canConvertToInt())
+                        throw new IllegalArgumentException("channel must be an integer in 1–233");
+                    requestedChannel = channelNode.intValue();
+                }
+                int hintedChannel = requestedChannel == null ? 6 : HandshakeAnalyzer.normalizeChannel(requestedChannel);
+                if (hintedChannel > 233) throw new IllegalArgumentException("channel must be an integer in 1–233");
                 var frequencyNode = body.path("frequencyMhz");
                 Integer requestedFrequency = null;
                 if (!frequencyNode.isMissingNode() && !frequencyNode.isNull()) {
@@ -1121,21 +1129,31 @@ public final class PassiveRfServer implements AutoCloseable {
                     requestedFrequency = frequencyNode.intValue();
                     HandshakeAnalyzer.validateFrequency(requestedFrequency);
                 }
-                WifiAccessPoints.AccessPoint target = null;
-                try {
-                    target = accessPoints.all().stream().filter(point -> point.bssid().equalsIgnoreCase(ap)).findFirst().orElse(null);
-                } catch (java.io.IOException ignored) { /* Explicit and legacy channel-only clients can supply a target. */ }
+                boolean liveSelector = targetId != null || apId != null;
+                OpsTargets.Resolved resolved = null;
+                if (liveSelector || ap != null) {
+                    try {
+                        resolved = resolveOpsTarget(targetId, apId, ap, client, false);
+                    } catch (IllegalArgumentException unresolved) {
+                        if (liveSelector) throw unresolved;
+                    }
+                }
+                int channel;
                 int frequency;
-                if (target != null) {
-                    if (requestedFrequency != null && requestedFrequency != target.frequencyMhz())
+                if (resolved != null) {
+                    ap = resolved.apBssid();
+                    client = resolved.clientMac();
+                    channel = resolved.channel();
+                    frequency = resolved.frequencyMhz();
+                    if (ssid == null) ssid = resolved.ssid();
+                    if (requestedFrequency != null && requestedFrequency != frequency)
                         throw new IllegalArgumentException("AP frequency changed. Select the AP again from the refreshed list.");
-                    frequency = target.frequencyMhz();
-                    channel = target.channel();
-                    if (ssid == null) ssid = target.ssid();
                 } else {
+                    HandshakeAnalyzer.validateTarget(ap, client, hintedChannel);
+                    channel = HandshakeAnalyzer.normalizeChannel(hintedChannel);
                     frequency = requestedFrequency == null ? HandshakeAnalyzer.frequencyMhz(channel) : requestedFrequency;
                 }
-                monitor = body.has("interface") ? requiredText(body, "interface") : "wlo1";
+                monitor = optionalText(body, "interface") == null ? "wlo1" : requiredText(body, "interface");
                 analyzer = handshakeFactory.apply(new HandshakeSettings(monitor, ap, client, channel, ssid, frequency));
             } catch (JsonProcessingException | IllegalArgumentException invalid) {
                 ctx.status(400).json(Map.of("error", invalid.getMessage()));
@@ -1150,7 +1168,7 @@ public final class PassiveRfServer implements AutoCloseable {
                 var body = mapper.readTree(ctx.body());
                 if (body == null || !body.isObject()) throw new IllegalArgumentException("Expected a JSON object");
                 cap = requiredText(body, "capFilePath");
-                wordlist = requiredText(body, "wordlistPath");
+                wordlist = requiredWordlist(body);
                 // Check the dictionary first to preserve the actionable missing-wordlist response.
                 HandshakeAnalyzer.readableFile(wordlist, HandshakeAnalyzer.WORDLIST_MISSING);
                 HandshakeAnalyzer.readableFile(cap, "Capture file not found or unreadable");
@@ -1167,6 +1185,7 @@ public final class PassiveRfServer implements AutoCloseable {
 
         for (String prefix : List.of("/api/ops", "/api/attack")) {
             app.post(prefix + "/stop", stopHandler);
+            app.get(prefix + "/capabilities", capabilitiesHandler);
             app.get(prefix + "/targets", targetsHandler);
             app.get(prefix + "/aps", apsHandler);
             app.get(prefix + "/scan-lan", scanLanHandler);
@@ -1205,6 +1224,64 @@ public final class PassiveRfServer implements AutoCloseable {
         if (value < min || value > max)
             throw new IllegalArgumentException(field + " must be an integer in " + min + "–" + max);
         return value;
+    }
+
+    private static String optionalText(com.fasterxml.jackson.databind.JsonNode body, String field) {
+        var node = body.path(field);
+        if (node.isMissingNode() || node.isNull()) return null;
+        if (!node.isTextual()) throw new IllegalArgumentException(field + " must be a string");
+        String value = node.textValue();
+        return value == null || value.isBlank() ? null : value;
+    }
+
+    private static String requiredWordlist(com.fasterxml.jackson.databind.JsonNode body) {
+        var node = body.path("wordlistPath");
+        if (!node.isMissingNode() && !node.isNull() && !node.isTextual())
+            throw new IllegalArgumentException("wordlistPath must be a nonempty string");
+        if (node.isTextual() && !node.textValue().isBlank()) return node.textValue();
+        String configured = configuredWordlist();
+        if (configured != null) return configured;
+        throw new IllegalArgumentException("wordlistPath is required (or set -Drf.wordlist=/path/to/wordlist)");
+    }
+
+    private static String configuredWordlist() {
+        String property = System.getProperty("rf.wordlist");
+        if (property != null && !property.isBlank()) return property;
+        String environment = System.getenv("EWAVE_WORDLIST");
+        return environment == null || environment.isBlank() ? null : environment;
+    }
+
+    /**
+     * Resolves a live Ops target before any radio lease is taken. Dashboard target ids and AP tokens
+     * keep real addresses server-side; raw MACs remain available for direct lab calls.
+     */
+    private OpsTargets.Resolved resolveOpsTarget(String targetId, String apId, String apBssid, String clientMac,
+                                                  boolean clientRequired) {
+        var session = wifi.getPassiveWifi();
+        List<PassiveWifiSession.EvidencedTarget> targets = session == null
+                ? List.of() : session.evidencedTargets(wifi.getProfiler());
+        List<TopologyBuilder.AccessPoint> observed = session == null
+                ? List.of() : session.topology().accessPoints();
+        Function<String, String> lookup = session == null ? ignored -> null : session::observedBssid;
+        List<WifiAccessPoints.AccessPoint> cached;
+        try {
+            cached = accessPoints.all();
+        } catch (java.io.IOException missing) {
+            cached = List.of();
+        }
+        return OpsTargets.resolve(targetId, apId, apBssid, clientMac, targets, observed, lookup, cached, clientRequired);
+    }
+
+    /** The single server-wide operation slot, exposed to the Ops console. */
+    private String activeOperation() {
+        synchronized (injectionLock) {
+            if (activeInjector != null) return "deauth";
+            if (activeHandshake != null) return "handshake";
+            if (activePmkid != null) return "pmkid";
+            if (beaconActive()) return "beacon";
+            if (evilTwinActive()) return "evil-twin";
+            return null;
+        }
     }
 
     /** Called while holding injectionLock so a naturally exited beacon stops blocking new operations. */
@@ -1276,7 +1353,7 @@ public final class PassiveRfServer implements AutoCloseable {
                 return;
             }
             activeHandshake = analyzer;
-            if (capture) latestHandshake = analyzer;
+            latestHandshake = analyzer;
         }
         final PacketBridge.OpsLease lease;
         if (capture) {

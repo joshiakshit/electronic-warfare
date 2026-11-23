@@ -54,7 +54,7 @@ class UncloakRoutesTest {
                 assertEquals(3, result.size());
                 assertEquals("deauth_sent", result.path("status").asText());
                 assertEquals(CLIENT, result.path("targetClient").asText());
-                assertEquals("SSID will appear in Map within 10s if client reconnects.",
+                assertEquals("SSID will appear in Whistleblower within 10s if the client reconnects.",
                         result.path("message").asText());
 
                 assertEquals(List.of("sudo", "iw", "dev", "wlo1", "set", "freq", "2417"), commands.get(0));

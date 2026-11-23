@@ -254,20 +254,14 @@ class ConsolidatedServerTest {
     @Test void parsesLaunchModesRejectsContradictoryFlagsAndDispatchesExpectedCommands(@TempDir Path dir) throws Exception {
         assertEquals(new Ewave.LaunchPlan(Ewave.Mode.HELP, "wlo1", 7070, 13, 100, false, false, null),
                 Ewave.parse("--help"));
-        assertEquals(new Ewave.LaunchPlan(Ewave.Mode.IDLE, "wlo1", 7070, 13, 100, false, false, null),
-                Ewave.parse());
         assertEquals(new Ewave.LaunchPlan(Ewave.Mode.IDLE, "wlo1", 7070, 13, 100, false, true, null),
-                Ewave.parse("--ops"));
-        assertEquals(new Ewave.LaunchPlan(Ewave.Mode.CAPTURE, "mon0", 7070, 13, 100, false, false, null),
-                Ewave.parse("--iface", "mon0"));
-        assertEquals(new Ewave.LaunchPlan(Ewave.Mode.CAPTURE, "mon0", 7070, 13, 100, false, false, null),
-                Ewave.parse("--passive-rf", "--iface", "mon0"));
-        assertEquals(new Ewave.LaunchPlan(Ewave.Mode.CAPTURE, "mon0", 7070, 13, 100, true, false, null),
-                Ewave.parse("--passive-rf", "--adaptive", "--iface", "mon0"));
+                Ewave.parse());
         assertEquals(new Ewave.LaunchPlan(Ewave.Mode.CAPTURE, "mon0", 7070, 13, 100, false, true, null),
-                Ewave.parse("--passive-rf", "--ops", "--iface", "mon0"));
+                Ewave.parse("--iface", "mon0"));
+        assertEquals(new Ewave.LaunchPlan(Ewave.Mode.CAPTURE, "mon0", 7070, 13, 100, false, true, null),
+                Ewave.parse("--passive-rf", "--iface", "mon0"));
         assertEquals(new Ewave.LaunchPlan(Ewave.Mode.CAPTURE, "mon0", 7070, 13, 100, true, true, null),
-                Ewave.parse("--passive-rf", "--adaptive", "--ops", "--iface", "mon0"));
+                Ewave.parse("--passive-rf", "--adaptive", "--iface", "mon0"));
         assertEquals(new Ewave.LaunchPlan(Ewave.Mode.REPLAY, "wlo1", 7070, 13, 100, false, false, Path.of("sample.pcap")),
                 Ewave.parse("--replay", "sample.pcap"));
 
@@ -276,7 +270,6 @@ class ConsolidatedServerTest {
                 new String[]{"--probes", "--iface", "mon0"},
                 new String[]{"--replay", "sample.pcap", "--passive-rf"},
                 new String[]{"--replay", "sample.pcap", "--iface", "wlo1"},
-                new String[]{"--replay", "sample.pcap", "--ops"},
                 new String[]{"--adaptive"},
                 new String[]{"--bands", "12"},
                 new String[]{"--tick-ms", "5"},

@@ -4,7 +4,7 @@ Updated: **22 November 2026**. This describes the working tree, including uncomm
 
 ## Read first
 
-Read [repository instructions](../AGENTS.md), [setup and module map](../README.md), and [frontend integration boundaries](../frontend/README.md). The [SET review](SET-LAB-REVIEW.md), [scanner benchmark](../tools/passive-scanner.md), [stabilization report](../tools/stabilization-report.md), and [legacy notes](../notes.md) retain dated evidence. Their old launch flags and UI names are not current instructions.
+Read [repository instructions](../AGENTS.md), [setup and module map](../README.md), [frontend integration boundaries](../frontend/README.md), and the [practical lab guide](LAB-GUIDE.md). The [SET review](SET-LAB-REVIEW.md), [scanner benchmark](../tools/passive-scanner.md), [stabilization report](../tools/stabilization-report.md), and [legacy notes](../notes.md) retain dated evidence. Their old launch flags and UI names are not current instructions.
 
 ## Confirmed names
 
@@ -22,14 +22,14 @@ Conceptual migrations: Spectrum → Lookout; Probe Lab/probe audit → De-cloake
 ## Startup and architecture
 
 - Root `./ewave` presents Live Wi-Fi, Replay a recording, Setup and diagnostics, and Open dashboard without capture.
-- Live selects an adapter, asks for monitor-mode confirmation, then runs Java with `--iface IFACE --adaptive --ops`. Sniper becomes available; the user still chooses a target. Ops enablement does not execute an operation.
+- Live selects an adapter, asks for monitor-mode confirmation, then runs Java with `--iface IFACE --adaptive`. Ops endpoints are enabled for live and idle sessions; replay is passive-only. Sniper becomes available; the user still chooses a target. Starting a session does not execute an Ops operation.
 - Replay selects a PCAP and runs Java without sudo.
 - Open dashboard without capture starts an idle loopback API and Vite for browser imports.
 - Setup contains dependency checks, build, and restore. Additional shell commands are only `restore IFACE` and help. The old watch/scan/ops/replay shell shortcuts are retired.
 - The launcher builds a missing/outdated JAR, starts Vite when frontend dependencies exist, prints its address, and stops its frontend child on exit.
 - The Java API uses port 7070 on loopback. Vite starts at port 5173 and can choose another when it is occupied. The launcher prints the bound dashboard URL and a per-launch log path. If Vite fails to start, the launcher reports the failure and starts the API by itself.
 - Cleanup attempts restoration of a recorded managed-adapter state. Already-monitor adapters stay in monitor mode. Reconnection is not guaranteed.
-- Ewave.java parses HELP/IDLE/CAPTURE/REPLAY. With no capture flags it starts an idle API. There is no current Java terminal menu for running modules.
+- Ewave.java parses HELP/IDLE/CAPTURE/REPLAY. With no capture flags it starts an idle API with Ops available for readiness checks. There is no current Java terminal menu for running modules.
 - React lives in frontend/. The old bundled web assets were removed. Java's ewave.ui package still serves APIs and must not be deleted as frontend. React production assets are not currently served from the JAR.
 - The lab portal helper remains JSON-only; no old HTML portal form is supplied by this dashboard.
 
@@ -65,15 +65,15 @@ Existing wiring:
 - Spotter’s topology diagram uses the existing client-link report. Selecting an access point or client highlights its wires and filters the table. Inspector groups advertised authentication, ciphers, management frame protection, and AP-reported load.
 - Profiler presents inferred labels, retained signal history, and fingerprint observations. Whistleblower presents hidden-name status and captured frame evidence. Tracker groups the reported AP changes by client in chronological order.
 - Capture health controls passive start, stop, and fixed-watch tuning on a launcher-prepared monitor adapter. Saved results imports, lists, and replays persistent local PCAPs. Settings manages My Network enrollments, scope, and reference fingerprint samples.
-- Explicitly simulated Ops controls; these do not send radio-operation requests.
+- Ops is wired to the real backend: capabilities/readiness, live evidenced targets, deauth, network-name reveal, handshake capture and PSK verification, PMKID, beacon, evil twin, and stop. The console polls per-operation status and renders command output, results, and portal credentials. Deauth and handshake accept a live target id, an observed AP token, or a raw BSSID, so the optional AP/LAN caches are no longer required for live operations.
 
 Incomplete work:
 
-- Real Ops targets, prerequisites, progress, cancellation and results are not integrated.
+- Next Ops work: validate each operation on the owned test AP/client, add PMKID target scoping, configure evil-twin interface addressing and a portal page, and add per-operation cancellation/history.
 - The Archer T2U has verified live capture, channel tuning, Sniper search and direct follow, and populated Spotter, De-cloaker, Inspector, Profiler, Tracker, and Lookout reports. The positive hidden-name case was verified with replay.
 - A frontend-only server correctly shows No session connected. Do not fabricate observations to hide it.
 
-The user's sequence is frontend polish first, then frontend/backend integration. Preserve existing behavior while making each integration reviewable.
+The dashboard integrates real backend requests. Keep each operation reviewable and preserve the shared operation slot and radio-lease behavior.
 
 ## Backend evidence limits
 
@@ -87,13 +87,14 @@ Router-name masking has changed in the current topology path: PassiveWifiSession
 
 ## Verification record
 
-- `mvn -o package` (system OpenJDK `25.0.5`, with loopback socket access): **153 tests run, 0 failures, 0 errors, 0 skipped** (`BUILD SUCCESS`).
-- Follow-up `mvn -o test` (same JDK and loopback access): **154 tests run, 0 failures, 0 errors, 0 skipped**. The additional test verifies a reacquisition from channel 6 to 11 through PacketBridge with a simulated receiver.
+- `mvn -o test` (system OpenJDK `25.0.5`, with loopback socket access): **164 tests run, 0 failures, 0 errors, 0 skipped** (`BUILD SUCCESS`). This includes **72 Ops-related tests** across target resolution, capabilities, route validation, process orchestration, cancellation, and radio-lease coordination.
+- Ops route tests resolve a live `targetId` without the AP/LAN caches, resolve observed AP tokens, report tool/cache/wordlist readiness, and exercise stop/cancel through simulated processes. No live radio Ops operation has been executed yet.
 - `python3 tools/test_launcher.py`: **10 tests** (`OK`).
 - `python3 tools/test_portal.py`: **3 tests** (`OK`).
-- `npm --prefix frontend test`: **7 test files, 30 tests passed**.
-- `npm --prefix frontend run build`: TypeScript check (`tsc --noEmit`) and Vite production build succeeded.
-- Historical 146/147/155-test reports describe earlier working trees; do not report them as current totals.
+- Local JAR smoke: an idle session started without a flag reports `operationsEnabled: true` and serves `/api/ops/capabilities` with **200**; a replay session returns **404** `Lab operations require a live capture session`. The Java `--help` output no longer lists an Ops flag, and the launcher starts live capture with `--iface IFACE --adaptive`.
+- `npm --prefix frontend test`: **7 test files, 31 tests passed**.
+- `npm --prefix frontend run build`: TypeScript check (`tsc --noEmit`) and Vite production build succeeded with the real Ops console.
+- Historical 146/147/153/154/155-test reports describe earlier working trees; do not report them as current totals.
 - Profiler, Whistleblower, and Tracker were checked against the bundled hidden-network replay and a synthetic browser matrix covering all three themes and populated, empty, and disconnected states. The report panes were also checked at the 1024 px desktop minimum.
 - Spotter’s topology view was checked with the bundled replay, synthetic link reports, all three themes, and the 1024 px desktop minimum.
 - Isolated browser sessions verified idle capture controls, rejection of a malformed PCAP, import and replay of a bundled PCAP, Whistleblower’s populated report, exact-name AP enrollment, and the enrolled-only scope. The restart-and-replay test verifies recording persistence.
@@ -115,13 +116,17 @@ Use a test AP and client under the operator's control. Record event counts, time
 - **Sniper.** Lock onto a test AP and change its 2.4 GHz channel through the AP's normal settings. Confirm Sniper locks onto the same AP on the new channel and records the move. The automated integration test runs this sequence through the capture reader and retune scheduler with synthetic beacons and simulated tune commands.
 - **Whistleblower.** Observe the test AP advertising a hidden SSID, then connect a test client that knows the name. Confirm the report attributes the revealed name to a captured frame for the same AP.
 
+### Ops hardware checks
+
+Use the owned test AP/client and record the operation, target, channel, duration, command, output, cancellation, and adapter restoration. Prioritize deauth/uncloak client effect, handshake validity, PMKID target scoping, beacon visibility, and evil-twin DHCP/portal reachability. Do not share captured keys or portal credentials.
+
 ## Next-agent checklist
 
 1. Inspect the working-tree diff; preserve other agents' and user changes.
 2. Verify a full JDK and frontend dependencies before diagnosing startup.
 3. Use synthetic PCAPs for routine integration; keep live radio operations explicitly scoped.
 4. Compare frontend requests with PassiveRfServer handlers and response fields.
-5. Validate populated, empty, loading, error, stopped and replay views; distinguish real reports from simulated Ops.
-6. Verify cancellation and shared-radio ownership before adding session/Ops controls.
+5. Validate populated, empty, loading, error, stopped and replay views, including real Ops results.
+6. Verify cancellation and shared-radio ownership when changing session/Ops controls.
 7. Run frontend build/tests, Java tests and relevant launcher/helper checks; report environment blockers honestly.
 8. Update this handoff and README when behavior changes; preserve historical evidence.
