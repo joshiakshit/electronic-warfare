@@ -1,7 +1,6 @@
 package ewave;
 
 import ewave.capture.PacketBridge;
-import ewave.core.AdaptiveScanner;
 import ewave.ui.PassiveRfServer;
 
 import java.io.IOException;
@@ -17,7 +16,7 @@ public final class Ewave {
                              boolean adaptive, boolean operations, Path replay) {}
 
     public record LaunchConfig(LaunchPlan plan, Integer frequencyMhz,
-                               Boolean revealProbes, String scope, Path profile) {}
+                               String scope, Path profile) {}
 
     private Ewave() { }
 
@@ -36,7 +35,6 @@ public final class Ewave {
         Integer freqMhz = null;
         Integer channel = null;
         String band = null;
-        Boolean revealProbes = null;
         String scope = null;
         Path profile = null;
         Path replay = null;
@@ -45,22 +43,12 @@ public final class Ewave {
             switch (option) {
                 case "--help", "-h" -> {
                     var helpPlan = new LaunchPlan(Mode.HELP, iface, port, bands, tickMs, false, false, null);
-                    return new LaunchConfig(helpPlan, null, null, null, null);
+                    return new LaunchConfig(helpPlan, null, null, null);
                 }
                 case "--probes" -> throw new IllegalArgumentException(
                         "--probes text capture has been removed; use De-cloaker on binary capture (--iface <iface> or --replay <pcap>)");
                 case "--passive-rf" -> passiveRf = true;
                 case "--adaptive" -> adaptive = true;
-                case "--reveal-probes" -> {
-                    if (Boolean.FALSE.equals(revealProbes))
-                        throw new IllegalArgumentException("--reveal-probes cannot be combined with --hide-probes");
-                    revealProbes = Boolean.TRUE;
-                }
-                case "--hide-probes" -> {
-                    if (Boolean.TRUE.equals(revealProbes))
-                        throw new IllegalArgumentException("--reveal-probes cannot be combined with --hide-probes");
-                    revealProbes = Boolean.FALSE;
-                }
                 case "--iface" -> {
                     iface = optionValue(args, ++i, option);
                     ifaceSpecified = true;
@@ -106,7 +94,7 @@ public final class Ewave {
         else if (passiveRf || ifaceSpecified || adaptive || resolvedFreq != null)
             plan = new LaunchPlan(Mode.CAPTURE, iface, port, bands, tickMs, adaptive, true, null);
         else plan = new LaunchPlan(Mode.IDLE, iface, port, bands, tickMs, false, true, null);
-        return new LaunchConfig(plan, resolvedFreq, revealProbes, scope, profile);
+        return new LaunchConfig(plan, resolvedFreq, scope, profile);
     }
 
     public static int resolveFrequency(int channel, String band) {
@@ -149,20 +137,16 @@ public final class Ewave {
     }
 
     public static void startCapture(LaunchPlan plan, PacketBridge bridge) throws IOException {
-        startCapture(new LaunchConfig(plan, null, null, null, null), bridge);
+        startCapture(new LaunchConfig(plan, null, null, null), bridge);
     }
 
     public static void startCapture(LaunchConfig config, PacketBridge bridge) throws IOException {
         LaunchPlan plan = config.plan();
-        int anomalyHistory = Math.max(60, Math.ceilDiv(6000, plan.tickMs()));
-        if (config.frequencyMhz() != null) {
-            bridge.setFixedFrequencyMhz(config.frequencyMhz());
-        }
         switch (plan.mode()) {
             case IDLE -> { }
             case REPLAY -> bridge.startReplay(plan.replay());
-            case CAPTURE -> bridge.startPassive(plan.iface(), plan.operations(), plan.adaptive()
-                    ? new AdaptiveScanner(AdaptiveScanner.Config.defaults(plan.bands(), 2048, 42L), anomalyHistory) : null);
+            case CAPTURE -> bridge.configureRuntimeCapture(plan.adaptive() ? "scan" : "watch", plan.iface(),
+                    config.frequencyMhz(), null, plan.bands(), plan.operations(), true);
             case HELP -> throw new IllegalArgumentException("Cannot start capture for help mode");
         }
     }
@@ -170,22 +154,17 @@ public final class Ewave {
     private static void printHelp() {
         System.out.println("Usage: java -jar ewave-0.1.0-SNAPSHOT.jar [options]");
         System.out.println("  --iface INTERFACE     Wireless capture interface (default: wlo1)");
-        System.out.println("  --adaptive            2.4 GHz channel hopping during live capture");
+        System.out.println("  --adaptive            Channel hopping across discovered 2.4/5/6 GHz frequencies");
         System.out.println("  --freq MHz            Initial frequency in MHz (2300..7125)");
         System.out.println("  --channel CH --band B Channel + band (2.4, 5, or 6) converted to frequency");
         System.out.println("  --replay FILE         Replay an 802.11 PCAP file offline");
-        System.out.println("  --reveal-probes       Reveal client-probed SSIDs in De-cloaker");
-        System.out.println("  --hide-probes         Mask client-probed SSIDs in De-cloaker");
         System.out.println("  --scope BSSID,...     Restrict passive scope to comma-separated BSSIDs");
         System.out.println("  --profile FILE        Path to My Network JSON profile");
         System.out.println("  --port PORT           Loopback HTTP/WebSocket port (default: 7070, 0 = auto)");
-        System.out.println("Advanced: --tick-ms MS (10..2000), --bands BANDS (>= 13), --passive-rf (compat)");
+        System.out.println("Advanced: --tick-ms MS (default 20, 10..2000), --bands BANDS (>= 13), --passive-rf (compat)");
     }
 
     private static void applySystemProperties(LaunchConfig config) {
-        if (config.revealProbes() != null) {
-            System.setProperty("audit.revealSsids", Boolean.toString(config.revealProbes()));
-        }
         if (config.scope() != null) {
             System.setProperty("rf.bssids", config.scope());
         }

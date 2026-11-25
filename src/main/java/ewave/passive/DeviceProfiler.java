@@ -23,7 +23,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.regex.Pattern;
 
 /** Session-local, MAC-keyed observations. Guesses and distance estimates are not verified facts.
- * Only transmitters contribute signal readings. Rotating addresses are never correlated.
+ * Only transmitters contribute signal readings. Binary probe correlations live in PassiveWifiSession.
  */
 public final class DeviceProfiler {
     public static final int UNKNOWN_RSSI = 127;

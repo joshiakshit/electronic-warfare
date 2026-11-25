@@ -1,7 +1,9 @@
 package ewave.ui;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import ewave.capture.MonitorPcapReader;
+import ewave.passive.FileOwnership;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -21,8 +23,7 @@ final class RecordingLibrary {
     static final long MAX_BYTES = 128L * 1024 * 1024;
     private static final String DATA = "capture.pcap";
     private static final String ENTRY = "recording.json";
-    private final Path directory = Path.of(System.getProperty("rf.recordingDirectory",
-            Path.of(System.getProperty("user.home"), ".local", "share", "ewave", "recordings").toString()));
+    private final Path directory = FileOwnership.storagePath("rf.recordingDirectory", ".local", "share", "ewave", "recordings");
     private final ObjectMapper mapper;
 
     record Recording(UUID id, String name, long bytes, long importedAt) { }
@@ -58,7 +59,12 @@ final class RecordingLibrary {
         if (!Files.isDirectory(entry, LinkOption.NOFOLLOW_LINKS)
                 || !Files.isRegularFile(metadata, LinkOption.NOFOLLOW_LINKS)
                 || !Files.isRegularFile(file(id), LinkOption.NOFOLLOW_LINKS)) return null;
-        Recording recording = mapper.readValue(metadata.toFile(), Recording.class);
+        Recording recording;
+        try {
+            recording = mapper.readValue(metadata.toFile(), Recording.class);
+        } catch (JsonProcessingException corrupt) {
+            return null;
+        }
         return recording != null && id.equals(recording.id()) ? recording : null;
     }
 
@@ -71,7 +77,7 @@ final class RecordingLibrary {
                 || name.indexOf('/') >= 0 || name.indexOf('\\') >= 0
                 || name.codePoints().anyMatch(Character::isISOControl))
             throw new IllegalArgumentException("Provide a valid recording filename");
-        Files.createDirectories(directory, privatePermissions("rwx------"));
+        FileOwnership.createPrivateDirectories(directory);
         Path staged = Files.createTempDirectory(directory, ".import-", privatePermissions("rwx------"));
         Path data = staged.resolve(DATA);
         Path metadata = staged.resolve(ENTRY);
@@ -96,6 +102,9 @@ final class RecordingLibrary {
             Recording recording = new Recording(id, name, size, System.currentTimeMillis());
             Files.createFile(metadata, privatePermissions("rw-------"));
             mapper.writeValue(metadata.toFile(), recording);
+            FileOwnership.restoreSudoOwner(data);
+            FileOwnership.restoreSudoOwner(metadata);
+            FileOwnership.restoreSudoOwner(staged);
             Files.move(staged, directory.resolve(id.toString()), StandardCopyOption.ATOMIC_MOVE);
             return recording;
         } finally {

@@ -2,13 +2,17 @@ package ewave.capture;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import ewave.core.AdaptiveScanner;
+import ewave.decoder.Dot11FrameDecoder;
+import ewave.fixtures.CompletedProcess;
 import ewave.fixtures.ProbeFrames;
 import ewave.fixtures.StreamingCaptureProcess;
+import ewave.passive.DeviceProfiler;
 import ewave.ui.PassiveRfServer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -18,7 +22,9 @@ import java.nio.ByteOrder;
 import java.nio.file.Path;
 import java.nio.file.Files;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
@@ -30,6 +36,410 @@ import static org.junit.jupiter.api.Assertions.*;
 
 @Timeout(15)
 class PassiveRfCaptureTest {
+    @Test void sharesTheDiscoveredFrequencyPlanAcrossSniperLookoutAndInspector() throws Exception {
+        var capture = new StreamingCaptureProcess();
+        var tunes = new LinkedBlockingQueue<Integer>();
+        try (var wifi = new PacketBridge(builder -> {
+            if (builder.command().getFirst().equals("tcpdump")) return capture;
+            assertEquals(List.of("sudo", "iw", "dev", "lab0mon", "set", "freq"), builder.command().subList(0, 6));
+            tunes.add(Integer.parseInt(builder.command().getLast()));
+            return new CompletedProcess("", 0);
+        }, Map.of(), new DeviceProfiler(), 100, 64, 64, iface -> null, iface -> "phy8",
+                iface -> RadioStatus.readChannels(iface, ignored -> "phy8", command -> RadioStatusTest.PHY_INFO));
+             var server = new PassiveRfServer(wifi).start(0);
+             var client = HttpClient.newHttpClient()) {
+            wifi.configureRuntimeCapture("scan", "lab0mon", null, null, 13, false);
+            wifi.startSniperBySsid("Synthetic 6 GHz");
+            for (int frequency : List.of(2412, 5260, 5955)) {
+                assertEquals(frequency, tunes.poll(3, TimeUnit.SECONDS));
+            }
+            await(() -> Integer.valueOf(5955).equals(wifi.getChannelSnapshot().radio().lastConfirmedFrequencyMhz()));
+
+            byte[] beacon = beacon("001122334455", "Synthetic 6 GHz");
+            byte[] ies = HexFormat.of().parseHex("30140100000fac040100000fac040100000fac12c000460502000000007f030000083603123400");
+            byte[] packet = Arrays.copyOf(beacon, beacon.length + ies.length);
+            System.arraycopy(ies, 0, packet, beacon.length, ies.length);
+            ByteBuffer.wrap(packet).order(ByteOrder.LITTLE_ENDIAN).putShort(8, (short) 5955);
+            capture.write(timedPcap(packet));
+            await(() -> wifi.sniperState().run().state() == SniperController.State.LOCKED);
+            assertEquals(5955, wifi.sniperState().run().lockedFrequencyMhz());
+            assertEquals(3, wifi.sniperState().run().channelsSwept());
+
+            var mapper = new ObjectMapper();
+            var lookout = mapper.readTree(get(client, server, "/api/lookout").body());
+            assertEquals(3, lookout.path("channels").size());
+            assertEquals(3, lookout.path("counts").size());
+            assertEquals(2412, lookout.at("/channels/0/freqMhz").asInt());
+            assertEquals(52, lookout.at("/channels/1/channel").asInt());
+            assertTrue(lookout.at("/channels/1/radarDetection").asBoolean());
+            assertEquals(1, lookout.at("/channels/0/channel").asInt());
+            assertEquals(1, lookout.at("/channels/2/channel").asInt());
+            assertEquals(5955, lookout.at("/channels/2/freqMhz").asInt());
+            assertTrue(lookout.at("/channels/2/noIr").asBoolean());
+            assertEquals(lookout.at("/counts/2").asLong(), lookout.at("/channels/2/sampleCount").asLong());
+            assertTrue(lookout.at("/radio/coverage/0/lastFrameAtMs").isNull());
+            assertTrue(lookout.at("/radio/coverage/2/lastFrameWhileTunedAtMs").isNumber());
+            assertEquals(0, lookout.at("/channels/0/apCount").asInt(-1));
+            assertEquals(1, lookout.at("/channels/2/apCount").asInt(-1));
+            assertEquals(5955, lookout.path("activeFrequencyMhz").asInt());
+
+            var inspector = mapper.readTree(get(client, server, "/api/inspector").body()).at("/accessPoints/0");
+            assertEquals("OWE (Enhanced Open)", inspector.at("/securityModes/0").asText());
+            assertTrue(inspector.at("/managementFeatures/neighborReport").asBoolean());
+            assertTrue(inspector.at("/managementFeatures/bssTransition").asBoolean());
+            assertTrue(inspector.at("/managementFeatures/fastTransition").asBoolean());
+            assertEquals("1234", inspector.at("/managementFeatures/mobilityDomain").asText());
+            assertEquals(5955, inspector.at("/radioObservation/frequencyMhz").asInt());
+        }
+    }
+
+    @Test void completesTheInitialSurveyThenSelectsActiveChannelsAtDwellBoundaries() throws Exception {
+        var capture = new StreamingCaptureProcess();
+        record Tune(int frequency, long time) {}
+        var tunes = new LinkedBlockingQueue<Tune>();
+        try (var wifi = new PacketBridge(builder -> {
+            if (builder.command().getFirst().equals("tcpdump")) return capture;
+            tunes.add(new Tune(Integer.parseInt(builder.command().getLast()), System.nanoTime()));
+            return new CompletedProcess("", 0);
+        }, Map.of(), new DeviceProfiler(), 20, 64, 64, iface -> null, iface -> "phy8",
+                iface -> RadioStatus.parseChannels("* 2412 MHz [1]\n* 2437 MHz [6]\n* 2462 MHz [11]"))) {
+            wifi.configureRuntimeCapture("scan", "lab0mon", null, null, 13, false);
+            var first = tunes.poll(3, TimeUnit.SECONDS);
+            var second = tunes.poll(3, TimeUnit.SECONDS);
+            assertNotNull(first);
+            assertNotNull(second);
+            assertEquals(2412, first.frequency());
+            assertEquals(2437, second.frequency());
+            await(() -> Integer.valueOf(2437).equals(wifi.getChannelSnapshot().radio().lastConfirmedFrequencyMhz()));
+
+            byte[] active = ProbeFrames.radiotap(ProbeFrames.frame(""));
+            for (int sample = 0; sample < 18; sample++) {
+                writeTimedFrames(capture, sample == 0, active);
+                Thread.sleep(25);
+            }
+            var third = tunes.poll(3, TimeUnit.SECONDS);
+            var fourth = tunes.poll(3, TimeUnit.SECONDS);
+            var fifth = tunes.poll(3, TimeUnit.SECONDS);
+            assertNotNull(third);
+            assertNotNull(fourth);
+            assertNotNull(fifth);
+            assertEquals(2462, third.frequency());
+            assertEquals(2437, fourth.frequency());
+            assertNotEquals(fourth.frequency(), fifth.frequency());
+            var hops = List.of(first, second, third, fourth, fifth);
+            for (int index = 1; index < hops.size(); index++) {
+                assertTrue(hops.get(index).time() - hops.get(index - 1).time() >= TimeUnit.MILLISECONDS.toNanos(100));
+            }
+        }
+    }
+
+    @Test void reportsTunedAirtimeAndNoiseWithFrequencyMatchedQbssAndClients() throws Exception {
+        var capture = new StreamingCaptureProcess();
+        try (var wifi = singleChannelScanner(capture);
+             var server = new PassiveRfServer(wifi).start(0);
+             var client = HttpClient.newHttpClient()) {
+            wifi.configureRuntimeCapture("scan", "lab0mon", null, null, 13, false);
+            await(() -> Integer.valueOf(2437).equals(wifi.getChannelSnapshot().radio().lastConfirmedFrequencyMhz()));
+            byte[] strongLoad = withNoiseAndRate(beacon("001122334455", "Load Fixture"), -94, "0b050200cc0000");
+            byte[] weakLoad = withNoiseAndRate(beacon("001122334466", "Second AP"), -96, "0b050100400000");
+            byte[] clientFrame = assocResponse("001122334455", "021122334455");
+            writeTimedFrames(capture, true, strongLoad, weakLoad, clientFrame);
+            await(() -> wifi.getPassiveWifi().topology().edges().size() == 1);
+            await(() -> wifi.getChannelSnapshot().radio().dwellMs().getFirst() >= 500);
+
+            long expectedAirtime = Math.round((strongLoad.length - 16) * 8.0 / 12) + 44L
+                    + Math.round((weakLoad.length - 16) * 8.0 / 12) + 44L
+                    + Math.round((clientFrame.length - 13) * 8.0 / 6) + 44L;
+            var lookout = new ObjectMapper().readTree(get(client, server, "/api/lookout").body());
+            var channel = lookout.at("/channels/0");
+            assertEquals(expectedAirtime, lookout.at("/radio/coverage/0/airtimeMicrosWhileTuned").asLong());
+            assertEquals(-95, lookout.at("/radio/coverage/0/medianNoiseDbm").asInt());
+            assertEquals(-95, channel.path("medianNoiseDbm").asInt());
+            assertEquals(2, channel.path("apCount").asInt());
+            assertEquals(1, channel.path("activeClientCount").asInt());
+            assertEquals(0.8, channel.path("qbssUtilization").asDouble(), 1e-9);
+            assertEquals(expectedAirtime / (1000.0 * channel.path("dwellMs").asLong()),
+                    channel.path("estimatedAirtime").asDouble(), 1e-9);
+            assertTrue(channel.path("nonWifiInterferenceSuspected").asBoolean());
+        }
+    }
+
+    @Test void servesActiveAndHeldFloodEvidenceFromSyntheticCapture() throws Exception {
+        var capture = new StreamingCaptureProcess();
+        try (var wifi = singleChannelScanner(capture);
+             var server = new PassiveRfServer(wifi).start(0);
+             var client = HttpClient.newHttpClient()) {
+            wifi.configureRuntimeCapture("scan", "lab0mon", null, null, 13, false);
+            await(() -> wifi.getChannelSnapshot().scanner().counts()[0] >= 10);
+
+            var deauthFrames = new byte[8][];
+            Arrays.fill(deauthFrames, syntheticDisconnect());
+            writeTimedFrames(capture, true, deauthFrames);
+            await(() -> wifi.getCaptureHealth().decoded() == deauthFrames.length);
+            var mapper = new ObjectMapper();
+            var active = mapper.readTree(get(client, server, "/api/lookout").body());
+            assertEquals("DEAUTH_FLOOD", active.at("/channels/0/anomaly/floodType").asText());
+            assertTrue(active.at("/channels/0/anomaly/activeNow").asBoolean());
+            assertEquals(2437, active.at("/recentAnomalies/0/freqMhz").asInt());
+
+            await(() -> {
+                var anomaly = wifi.getChannelSnapshot().heldAnomalies().get(2437);
+                return anomaly != null && !anomaly.activeNow();
+            });
+            var quiet = mapper.readTree(get(client, server, "/api/lookout").body());
+            assertTrue(quiet.path("anomalies").isEmpty());
+            assertEquals("DEAUTH_FLOOD", quiet.at("/channels/0/anomaly/floodType").asText());
+            assertFalse(quiet.at("/channels/0/anomaly/activeNow").asBoolean(true));
+            assertEquals(active.at("/recentAnomalies/0/detectedAt"), quiet.at("/recentAnomalies/0/detectedAt"));
+
+            var beaconFrames = new byte[50][];
+            Arrays.fill(beaconFrames, withNoiseAndRate(beacon("001122334455", "Beacon Fixture"), -74, ""));
+            writeTimedFrames(capture, false, beaconFrames);
+            await(() -> {
+                var anomaly = wifi.getChannelSnapshot().heldAnomalies().get(2437);
+                return anomaly != null && "BEACON_FLOOD".equals(anomaly.floodType());
+            });
+            var beaconReport = mapper.readTree(get(client, server, "/api/lookout").body());
+            assertEquals("BEACON_FLOOD", beaconReport.at("/channels/0/anomaly/floodType").asText());
+            assertTrue(beaconReport.at("/channels/0/anomaly/activeNow").asBoolean());
+            assertEquals(-74, beaconReport.at("/channels/0/medianNoiseDbm").asInt());
+            assertTrue(beaconReport.at("/channels/0/qbssUtilization").isNull());
+            assertTrue(beaconReport.at("/channels/0/nonWifiInterferenceSuspected").asBoolean());
+            assertEquals(2, beaconReport.path("recentAnomalies").size());
+        }
+    }
+
+    @Test void opensAndHoldsABeaconFloodWithoutAFlagFromTheScanner() {
+        var anomalies = new LookoutAnomalies(List.of(new RadioStatus.Channel(6, 2437, false, false)));
+        var frame = Dot11FrameDecoder.decodeAny(beacon("001122334455", "Beacon Fixture"), 127, 0);
+        var now = Instant.parse("2026-01-01T00:00:00Z");
+        long second = TimeUnit.SECONDS.toNanos(1);
+        long interval = TimeUnit.MILLISECONDS.toNanos(20);
+        for (int index = 0; index < 49; index++) {
+            assertFalse(anomalies.observeFrame(0, frame, index * interval));
+        }
+        anomalies.update(0, null, 48 * interval, now.plusMillis(960));
+        assertNull(anomalies.onChannel(0, 48 * interval));
+
+        long crossing = 49 * interval;
+        assertTrue(anomalies.observeFrame(0, frame, crossing));
+        anomalies.update(0, null, crossing, now.plusMillis(980));
+        var active = anomalies.onChannel(0, crossing);
+        assertTrue(active.activeNow());
+        assertEquals("BEACON_FLOOD", active.reason());
+        assertEquals("BEACON_FLOOD", active.floodType());
+
+        anomalies.update(0, null, second, now.plusSeconds(1));
+        var held = anomalies.onChannel(0, second);
+        assertFalse(held.activeNow());
+        assertEquals("BEACON_FLOOD", held.floodType());
+        assertEquals(active.detectedAt(), held.detectedAt());
+        assertEquals(List.of(held), anomalies.recent(second));
+        assertNull(anomalies.onChannel(0, crossing + 15 * second));
+    }
+
+    @Test void rollingDisconnectThresholdAndHoldExpireOnMonotonicBoundaries() {
+        var anomalies = new LookoutAnomalies(List.of(new RadioStatus.Channel(6, 2437, false, false)));
+        var frame = Dot11FrameDecoder.decodeAny(syntheticDisconnect(), 127, 0);
+        long second = TimeUnit.SECONDS.toNanos(1);
+        var wallTime = Instant.parse("2026-01-01T00:00:00Z");
+        for (int index = 0; index < 7; index++) {
+            assertFalse(anomalies.observeFrame(0, frame, 0));
+        }
+        // Seven older frames fall out of the window even when the next one arrives.
+        assertFalse(anomalies.observeFrame(0, frame, second));
+        anomalies.update(0, null, second, wallTime);
+        assertNull(anomalies.onChannel(0, second));
+        for (int index = 0; index < 7; index++) anomalies.observeFrame(0, frame, second);
+        anomalies.update(0, null, second, wallTime);
+        assertTrue(anomalies.onChannel(0, second).activeNow());
+        anomalies.update(0, null, 2 * second, wallTime.plusSeconds(1));
+        assertFalse(anomalies.onChannel(0, 16 * second - 1).activeNow());
+        assertEquals(wallTime, anomalies.recent(16 * second - 1).getFirst().lastActiveAt());
+        assertNull(anomalies.onChannel(0, 16 * second));
+        assertTrue(anomalies.recent(16 * second).isEmpty());
+    }
+
+    @Test void retainsFloodEvidenceAfterTheLiveClassifierClearsAndBoundsEpisodeHistory() {
+        var anomalies = new LookoutAnomalies(List.of(new RadioStatus.Channel(6, 2437, false, false)));
+        var frame = Dot11FrameDecoder.decodeAny(beacon("001122334455", "Beacon Fixture"), 127, 0);
+        long second = TimeUnit.SECONDS.toNanos(1);
+        var now = Instant.parse("2026-01-01T00:00:00Z");
+        var flag = new AdaptiveScanner.AnomalyFlag(1, 3.2, now, "UNUSUAL_BURST");
+        for (int index = 0; index < 40; index++) anomalies.observeFrame(0, frame, 0);
+        anomalies.update(0, flag, 0, now);
+        assertEquals("BEACON_FLOOD", anomalies.onChannel(0, 0).floodType());
+        anomalies.update(0, flag, second, now.plusSeconds(1));
+        assertNull(anomalies.onChannel(0, second).floodType());
+        anomalies.update(0, null, 2 * second, now.plusSeconds(2));
+        assertEquals("BEACON_FLOOD", anomalies.onChannel(0, 2 * second).floodType());
+        for (int episode = 1; episode <= 32; episode++) {
+            long elapsedMs = 2_000L + 2 * episode;
+            long elapsed = TimeUnit.MILLISECONDS.toNanos(elapsedMs);
+            var started = now.plusMillis(elapsedMs);
+            anomalies.update(0, new AdaptiveScanner.AnomalyFlag(1, 3.2, started, "UNUSUAL_BURST"), elapsed, started);
+            anomalies.update(0, null, elapsed + 1, started);
+        }
+        var recent = anomalies.recent(3 * second);
+        assertEquals(32, recent.size());
+        assertEquals(now.plusMillis(2064), recent.getFirst().detectedAt());
+        assertTrue(recent.stream().noneMatch(anomaly -> "BEACON_FLOOD".equals(anomaly.floodType())));
+    }
+
+    private static PacketBridge singleChannelScanner(StreamingCaptureProcess capture) {
+        return new PacketBridge(builder -> builder.command().getFirst().equals("tcpdump")
+                ? capture : new CompletedProcess("", 0), Map.of(), new DeviceProfiler(), 20, 64, 64,
+                iface -> null, iface -> "phy8", iface -> RadioStatus.parseChannels("* 2437 MHz [6]"));
+    }
+
+    private static byte[] syntheticDisconnect() {
+        byte[] frame = assocResponse("001122334455", "021122334455");
+        frame[13] = (byte) 0xc0;
+        return frame;
+    }
+
+    private static byte[] withNoiseAndRate(byte[] radiotapFrame, int noise, String extraElements) {
+        byte[] extra = HexFormat.of().parseHex(extraElements);
+        return ByteBuffer.allocate(radiotapFrame.length + 3 + extra.length).order(ByteOrder.LITTLE_ENDIAN)
+                .putShort((short) 0).putShort((short) 16).putInt(0x6c)
+                .put((byte) 24).put((byte) 0).putShort((short) 2437).putShort((short) 0xa0)
+                .put((byte) -47).put((byte) noise)
+                .put(radiotapFrame, 13, radiotapFrame.length - 13).put(extra).array();
+    }
+
+    private static void writeTimedFrames(StreamingCaptureProcess capture, boolean header, byte[]... frames) throws IOException {
+        byte[] pcap = ProbeFrames.pcap(ByteOrder.LITTLE_ENDIAN, false, 127, frames);
+        var buffer = ByteBuffer.wrap(pcap).order(ByteOrder.LITTLE_ENDIAN);
+        long now = System.currentTimeMillis();
+        int offset = 24;
+        for (byte[] frame : frames) {
+            buffer.putInt(offset, (int) (now / 1000)).putInt(offset + 4, (int) (now % 1000) * 1000);
+            offset += 16 + frame.length;
+        }
+        capture.write(header ? pcap : Arrays.copyOfRange(pcap, 24, pcap.length));
+    }
+
+    @Test void replayServesProbabilisticProbeClustersWithPrivacyAndCapabilityEvidence(@TempDir Path dir) throws Exception {
+        String first = "02:11:22:33:44:01", second = "02:11:22:33:44:02";
+        byte[] elements = HexFormat.of().parseHex("30180100000fac040100000fac040200000fac02000fac08c0007f03000008");
+        byte[][] frames = new byte[2][];
+        for (int index = 0; index < frames.length; index++) {
+            byte[] probe = ProbeFrames.frame("Fixture-private-name", index == 0 ? first : second, index);
+            byte[] frame = Arrays.copyOf(probe, probe.length + elements.length);
+            System.arraycopy(elements, 0, frame, probe.length, elements.length);
+            frames[index] = ProbeFrames.radiotap(frame);
+        }
+        Path path = dir.resolve("correlation.pcap");
+        Files.write(path, ProbeFrames.pcap(ByteOrder.LITTLE_ENDIAN, false, 127, frames));
+
+        try (var wifi = new PacketBridge(builder -> { throw new AssertionError("Unexpected process " + builder.command()); }, Map.of());
+             var server = new PassiveRfServer(wifi).start(0);
+             var client = HttpClient.newHttpClient()) {
+            wifi.startReplay(path);
+            await(() -> !wifi.isRunning());
+            assertEquals(2, wifi.getCaptureHealth().decoded());
+            String id = wifi.getPassiveWifi().addressId(first);
+            String otherId = wifi.getPassiveWifi().addressId(second);
+            var mapper = new ObjectMapper();
+            var response = get(client, server, "/api/profiler");
+            assertEquals(200, response.statusCode());
+            var rows = mapper.readTree(response.body());
+            assertEquals(2, rows.size());
+            String clusterId = rows.get(0).at("/inferredCorrelation/id").asText();
+            assertFalse(clusterId.isBlank());
+            for (var row : rows) {
+                assertTrue(List.of(id, otherId).contains(row.path("id").asText()));
+                assertEquals(clusterId, row.at("/inferredCorrelation/id").asText());
+                assertEquals(2, row.at("/inferredCorrelation/memberCount").asInt());
+                assertEquals("PSK", row.at("/capabilities/rsnAkmSuites/0").asText());
+                assertEquals("SAE", row.at("/capabilities/rsnAkmSuites/1").asText());
+                assertEquals("WPA2/WPA3-Personal transition", row.at("/capabilities/securityModes/0").asText());
+                assertTrue(row.at("/capabilities/managementFeatures/bssTransition").asBoolean());
+            }
+            var detailResponse = get(client, server, "/api/profiler/" + id);
+            assertEquals(200, detailResponse.statusCode());
+            var detail = mapper.readTree(detailResponse.body());
+            assertEquals(0, detail.path("fingerprints").size());
+            assertEquals(clusterId, detail.at("/inferredCorrelation/id").asText());
+            assertEquals("Probabilistic inferred correlation", detail.at("/inferredCorrelation/inference").asText());
+            assertEquals(0.85, detail.at("/inferredCorrelation/confidence").asDouble());
+            assertEquals(otherId, detail.at("/inferredCorrelation/memberIds/1").asText());
+            assertEquals(1, detail.at("/inferredCorrelation/evidence/0/sharedDirectedSsidCount").asInt());
+            assertEquals(-47, detail.at("/radioObservation/metadata/signalDbm").asInt());
+            for (String data : List.of(response.body(), detailResponse.body())) {
+                assertFalse(data.contains(first) || data.contains(second) || data.contains("Fixture-private-name"));
+            }
+        }
+    }
+
+    @Test void replayServesInspectorFindingsAndAdvertisedDetailsWithTokenizedApIds(@TempDir Path dir) throws Exception {
+        String secureBssid = "00:aa:bb:cc:dd:ee", openBssid = "02:aa:bb:cc:dd:ef";
+        byte[] secure = beacon("00aabbccddee", "Test ESS");
+        byte[] elements = HexFormat.of().parseHex("301a0100000fac040100000fac040100000fac08c0400000000fac06"
+                + "f40170" + "3d022405");
+        byte[] advertised = Arrays.copyOf(secure, secure.length + elements.length);
+        System.arraycopy(elements, 0, advertised, secure.length, elements.length);
+        Path recording = dir.resolve("inspector.pcap");
+        Files.write(recording, ProbeFrames.pcap(ByteOrder.LITTLE_ENDIAN, false, 127,
+                advertised, beacon("02aabbccddef", "Test ESS")));
+
+        try (var wifi = new PacketBridge(builder -> { throw new AssertionError("Unexpected process " + builder.command()); }, Map.of());
+             var server = new PassiveRfServer(wifi).start(0);
+             var client = HttpClient.newHttpClient()) {
+            wifi.startReplay(recording);
+            await(() -> !wifi.isRunning());
+            var response = get(client, server, "/api/inspector");
+            assertEquals(200, response.statusCode(), response.body());
+            assertFalse(response.body().contains(secureBssid));
+            assertFalse(response.body().contains(openBssid));
+            var report = new ObjectMapper().readTree(response.body());
+            assertEquals(2, report.path("essGroups").size());
+            assertEquals(2, report.path("findingsCount").asInt());
+            assertEquals(1, report.path("evilTwinSuspects").asInt());
+            String secureId = wifi.getPassiveWifi().addressId(secureBssid);
+            String openId = wifi.getPassiveWifi().addressId(openBssid);
+            var rows = report.path("accessPoints");
+            assertEquals(2, rows.size());
+            for (var row : rows) {
+                assertEquals("Test ESS", row.path("ssid").asText());
+                if (secureId.equals(row.path("bssid").asText())) {
+                    assertEquals("BIP-CMAC-128", row.path("groupManagementCipher").asText());
+                    assertTrue(row.path("ocvc").asBoolean());
+                    assertEquals("SAE H2E", row.at("/rsnxeFeatures/0").asText());
+                    assertEquals(40, row.at("/apRadio/operatingWidthMhz").asInt());
+                    assertTrue(row.path("securityFindings").isArray());
+                    assertTrue(row.path("securityFindings").isEmpty());
+                } else {
+                    assertEquals(openId, row.path("bssid").asText());
+                    assertEquals("ESS_SECURITY_DOWNGRADE", row.at("/securityFindings/0/code").asText());
+                    assertEquals("HIGH", row.at("/securityFindings/0/severity").asText());
+                }
+            }
+        }
+    }
+
+    @Test void reportsAnExplicitEmptyPlanWithoutFallingBackToDisabledFrequencies() throws Exception {
+        var capture = new StreamingCaptureProcess();
+        var tuneAttempts = new java.util.concurrent.atomic.AtomicInteger();
+        try (var wifi = new PacketBridge(builder -> {
+            if (builder.command().getFirst().equals("tcpdump")) return capture;
+            tuneAttempts.incrementAndGet();
+            return new CompletedProcess("", 1);
+        }, Map.of(), new DeviceProfiler(), 20, 64, 64, iface -> null, iface -> "phy8",
+                iface -> RadioStatus.parseChannels("* 2412 MHz [1] (disabled)"));
+             var server = new PassiveRfServer(wifi).start(0);
+             var client = HttpClient.newHttpClient()) {
+            wifi.configureRuntimeCapture("scan", "lab0mon", null, null, 13, false);
+            var sniper = wifi.startSniperBySsid("Fixture").run();
+            assertEquals(0, sniper.sweepChannelCount());
+            assertTrue(sniper.initialSweepComplete());
+            await(() -> wifi.getChannelSnapshot().scanner().tick() >= 4);
+            var report = new ObjectMapper().readTree(get(client, server, "/api/lookout").body());
+            assertTrue(report.path("channels").isEmpty());
+            assertTrue(report.path("counts").isEmpty());
+            assertEquals(0, tuneAttempts.get());
+        }
+    }
     @Test void servesInventoryAndAdaptiveChannelsFromOneMonitorCapture() throws Exception {
         var capture = new StreamingCaptureProcess();
         var tune = new StreamingCaptureProcess();
@@ -120,11 +530,13 @@ class PassiveRfCaptureTest {
             for (var response : List.of(inventory, audit)) {
                 assertEquals(200, response.statusCode());
                 assertEquals("no-store", response.headers().firstValue("Cache-Control").orElseThrow());
-                for (String privateData : List.of("PrivateLabSSID", "02:11:22:33:44:55"))
-                    assertFalse(response.body().contains(privateData));
+                assertFalse(response.body().contains("02:11:22:33:44:55"));
             }
+            assertFalse(inventory.body().contains("PrivateLabSSID"));
             assertEquals(1, mapper.readTree(inventory.body()).size());
             var report = mapper.readTree(audit.body());
+            assertEquals("PrivateLabSSID", report.at("/corpus/0/name").asText());
+            assertEquals(1, report.at("/corpus/0/deviceCount").asInt());
             assertEquals(2, report.path("totalProbes").asInt());
             assertEquals(1, report.path("directedProbes").asInt());
             assertEquals(1, report.path("distinctDirectedSsids").asInt());
@@ -273,6 +685,13 @@ class PassiveRfCaptureTest {
                 assertEquals(200, pin.statusCode(), pin.body());
                 details = mapper.readTree(get(client, server, path).body());
                 assertEquals(2, details.at("/fingerprints/0/observations").asInt());
+                var profilerDetail = get(client, server, "/api/profiler/" + device.id());
+                assertEquals(200, profilerDetail.statusCode());
+                assertFalse(profilerDetail.body().contains("02:11:22:33:44:55"));
+                var enriched = mapper.readTree(profilerDetail.body());
+                assertEquals("Fixture phone", enriched.path("enrolledLabel").asText());
+                assertEquals(mapper.readTree("[\"1\",\"50\",\"221\"]"), enriched.at("/fingerprints/0/ieOrder"));
+                assertEquals("00:11:22:01", enriched.at("/fingerprints/0/vendorElements/0").asText());
                 assertEquals(400, post(client, server, "/api/fingerprint-samples",
                         sample.replace("PROBE_REQUEST", "PROBE_RESPONSE")).statusCode());
                 var saved = post(client, server, "/api/fingerprint-samples", sample);
@@ -282,7 +701,14 @@ class PassiveRfCaptureTest {
                 assertEquals(saved.body(), exported.body());
                 for (String privateData : List.of("02:11:22:33:44:55", device.id(), "PrivateFixture", "Fixture phone"))
                     assertFalse(exported.body().contains(privateData));
-                assertNull(wifi.getPassiveWifi().inventory().getFirst().fingerprintHint());
+                var hint = wifi.getPassiveWifi().inventory().getFirst().fingerprintHint();
+                assertEquals("Phone", hint.family());
+                assertEquals("Fixture OS", hint.osHint());
+                assertEquals("Phone", wifi.getPassiveWifi().inventory().getFirst().classLabel());
+                var profiler = get(client, server, "/api/profiler");
+                assertFalse(profiler.body().contains("02:11:22:33:44:55"));
+                assertEquals("SAVED_SAMPLE", mapper.readTree(profiler.body()).at("/0/classificationBasis").asText());
+                assertEquals("Fixture phone", mapper.readTree(profiler.body()).at("/0/enrolledLabel").asText());
                 var pinId = mapper.readTree(pin.body()).at("/devices/0/id").asText();
                 assertEquals(200, post(client, server, "/api/my-network",
                         "{\"action\":\"remove-device\",\"id\":\"" + pinId + "\"}").statusCode());
@@ -294,6 +720,7 @@ class PassiveRfCaptureTest {
                 var delete = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + server.port() + "/api/fingerprint-samples/" + id))
                         .DELETE().build();
                 assertEquals("[]", client.send(delete, HttpResponse.BodyHandlers.ofString()).body());
+                assertNull(wifi.getPassiveWifi().inventory().getFirst().fingerprintHint());
             }
         } finally {
             restoreProperty("rf.networkProfile", previous);

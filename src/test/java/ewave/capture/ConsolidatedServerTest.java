@@ -185,18 +185,20 @@ class ConsolidatedServerTest {
             WebSocket one = connect(client, server, first);
             WebSocket two = connect(client, server, second);
             try {
+                assertEnvelope(first.next(mapper), "summary", 1, null);
+                assertEnvelope(second.next(mapper), "summary", 1, null);
                 var device = new DeviceRecord(MAC, "Lab", null, DeviceRecord.DeviceType.IOT,
                         -45, 1000, 2000, null, null);
                 var appeared = EwaveEvent.deviceAppeared(device);
                 bridge.getEventQueue().put(appeared);
                 JsonNode expected = wire(appeared);
-                assertEquals(expected, first.next(mapper));
-                assertEquals(expected, second.next(mapper));
+                assertEquals(expected, legacyEvent(first.next(mapper), 2));
+                assertEquals(expected, legacyEvent(second.next(mapper), 2));
 
                 var updated = EwaveEvent.deviceUpdated(device);
                 server.broadcast(updated);
-                assertEquals(wire(updated), first.next(mapper));
-                assertEquals(wire(updated), second.next(mapper));
+                assertEquals(wire(updated), legacyEvent(first.next(mapper), 3));
+                assertEquals(wire(updated), legacyEvent(second.next(mapper), 3));
 
                 server.broadcast(new EwaveEvent("DATE_FORMAT", 0, new Date(0)));
                 assertTrue(first.next(mapper).path("payload").isTextual());
@@ -207,14 +209,16 @@ class ConsolidatedServerTest {
                 // Serialization failures are isolated to the bad event, not the consumer thread.
                 bridge.getEventQueue().put(new EwaveEvent("INVALID", 0, new Object()));
                 bridge.getEventQueue().put(updated);
-                assertEquals(wire(updated), second.next(mapper));
+                assertEquals(wire(updated), legacyEvent(second.next(mapper), 5));
             } finally {
                 one.abort();
                 two.abort();
             }
+            assertTrue(Thread.getAllStackTraces().keySet().stream()
+                    .anyMatch(thread -> thread.isAlive() && thread.getName().equals("ewave-api-events")));
             server.stop();
             assertTrue(Thread.getAllStackTraces().keySet().stream()
-                    .noneMatch(thread -> thread.isAlive() && thread.getName().equals("ewave-ui-events")));
+                    .noneMatch(thread -> thread.isAlive() && thread.getName().equals("ewave-api-events")));
             var pending = EwaveEvent.attackStarted(Map.of("targetMac", MAC));
             bridge.getEventQueue().put(pending);
             assertSame(pending, bridge.getEventQueue().poll(1, TimeUnit.SECONDS));
@@ -233,14 +237,27 @@ class ConsolidatedServerTest {
             var events = new Events();
             var socket = connect(client, server, events);
             try {
+                assertEnvelope(events.next(mapper), "summary", 1, null);
                 bridge.startPassive("wlo1", false);
-                process.write(pcap);
-                var first = events.next(mapper).path("type").asText();
-                var second = events.next(mapper).path("type").asText();
-                assertEquals(List.of("WIFI_DEVICE_SEEN", "PROBE_RECEIVED"), List.of(first, second));
+                String sessionId = bridge.getPassiveWifi().sessionId().toString();
+                assertEnvelope(events.next(mapper), "summary", 2, sessionId);
+                var burst = new java.io.ByteArrayOutputStream();
+                burst.write(pcap, 0, 24);
+                for (int packet = 0; packet < 50; packet++) burst.write(pcap, 24, pcap.length - 24);
+                process.write(burst.toByteArray());
+                JsonNode delta = events.next(mapper);
+                assertEnvelope(delta, "delta", 3, sessionId);
+                assertEquals(mapper.readTree("[\"status\",\"profiler\",\"spotter\",\"tracker\",\"decloaker\"]"),
+                        delta.path("payload").path("modules"));
                 var decloaker = mapper.readTree(get(client, server, "/api/decloaker").body());
-                assertEquals(1, decloaker.path("totalProbes").asInt());
-                assertEquals(1, decloaker.path("directedProbes").asInt());
+                assertEquals(50, decloaker.path("totalProbes").asInt());
+                assertEquals(50, decloaker.path("directedProbes").asInt());
+                assertEquals("Lab (guest)", decloaker.at("/corpus/0/name").asText());
+                assertEquals("PLAINTEXT_SSID", decloaker.at("/corpus/0/source").asText());
+                assertEquals(1, decloaker.at("/corpus/0/deviceCount").asInt());
+                assertEquals(bridge.getPassiveWifi().addressId("02:11:22:33:44:55"),
+                        decloaker.at("/corpus/0/devices/0/id").asText());
+                assertNull(events.messages.poll(250, TimeUnit.MILLISECONDS), "The burst should yield one delta");
                 assertEquals(410, get(client, server, "/api/probes").statusCode());
                 assertEquals("watch", mapper.readTree(get(client, server, "/api/status").body())
                         .path("wifi").path("captureMode").asText());
@@ -252,17 +269,17 @@ class ConsolidatedServerTest {
     }
 
     @Test void parsesLaunchModesRejectsContradictoryFlagsAndDispatchesExpectedCommands(@TempDir Path dir) throws Exception {
-        assertEquals(new Ewave.LaunchPlan(Ewave.Mode.HELP, "wlo1", 7070, 13, 100, false, false, null),
+        assertEquals(new Ewave.LaunchPlan(Ewave.Mode.HELP, "wlo1", 7070, 13, PacketBridge.DEFAULT_TICK_MS, false, false, null),
                 Ewave.parse("--help"));
-        assertEquals(new Ewave.LaunchPlan(Ewave.Mode.IDLE, "wlo1", 7070, 13, 100, false, true, null),
+        assertEquals(new Ewave.LaunchPlan(Ewave.Mode.IDLE, "wlo1", 7070, 13, PacketBridge.DEFAULT_TICK_MS, false, true, null),
                 Ewave.parse());
-        assertEquals(new Ewave.LaunchPlan(Ewave.Mode.CAPTURE, "mon0", 7070, 13, 100, false, true, null),
+        assertEquals(new Ewave.LaunchPlan(Ewave.Mode.CAPTURE, "mon0", 7070, 13, PacketBridge.DEFAULT_TICK_MS, false, true, null),
                 Ewave.parse("--iface", "mon0"));
-        assertEquals(new Ewave.LaunchPlan(Ewave.Mode.CAPTURE, "mon0", 7070, 13, 100, false, true, null),
+        assertEquals(new Ewave.LaunchPlan(Ewave.Mode.CAPTURE, "mon0", 7070, 13, PacketBridge.DEFAULT_TICK_MS, false, true, null),
                 Ewave.parse("--passive-rf", "--iface", "mon0"));
-        assertEquals(new Ewave.LaunchPlan(Ewave.Mode.CAPTURE, "mon0", 7070, 13, 100, true, true, null),
+        assertEquals(new Ewave.LaunchPlan(Ewave.Mode.CAPTURE, "mon0", 7070, 13, PacketBridge.DEFAULT_TICK_MS, true, true, null),
                 Ewave.parse("--passive-rf", "--adaptive", "--iface", "mon0"));
-        assertEquals(new Ewave.LaunchPlan(Ewave.Mode.REPLAY, "wlo1", 7070, 13, 100, false, false, Path.of("sample.pcap")),
+        assertEquals(new Ewave.LaunchPlan(Ewave.Mode.REPLAY, "wlo1", 7070, 13, PacketBridge.DEFAULT_TICK_MS, false, false, Path.of("sample.pcap")),
                 Ewave.parse("--replay", "sample.pcap"));
 
         for (String[] invalid : List.of(
@@ -310,18 +327,16 @@ class ConsolidatedServerTest {
         }
     }
 
-    @Test void parsesChannelBandRevealAndScopeFlagsAndMatchesExactSsidBytes() throws Exception {
+    @Test void parsesChannelBandAndScopeFlagsAndMatchesExactSsidBytes() throws Exception {
         var c1 = Ewave.parseConfig("--passive-rf", "--iface", "wlo1", "--channel", "6", "--band", "2.4",
-                "--reveal-probes", "--scope", "00:11:22:33:44:55");
+                "--scope", "00:11:22:33:44:55");
         assertEquals(2437, c1.frequencyMhz());
-        assertEquals(Boolean.TRUE, c1.revealProbes());
         assertEquals("00:11:22:33:44:55", c1.scope());
 
         assertEquals(5500, Ewave.parseConfig("--passive-rf", "--channel", "100", "--band", "5").frequencyMhz());
         assertEquals(5955, Ewave.parseConfig("--passive-rf", "--channel", "1", "--band", "6").frequencyMhz());
         assertEquals(2484, Ewave.parseConfig("--passive-rf", "--channel", "14").frequencyMhz());
         assertEquals(5180, Ewave.parseConfig("--passive-rf", "--channel", "36").frequencyMhz());
-        assertEquals(Boolean.FALSE, Ewave.parseConfig("--replay", "sample.pcap", "--hide-probes").revealProbes());
 
         for (String[] invalid : List.of(
                 new String[]{"--passive-rf", "--channel", "6"},
@@ -330,7 +345,6 @@ class ConsolidatedServerTest {
                 new String[]{"--passive-rf", "--freq", "2437", "--channel", "6", "--band", "2.4"},
                 new String[]{"--passive-rf", "--adaptive", "--freq", "2437"},
                 new String[]{"--replay", "sample.pcap", "--freq", "2437"},
-                new String[]{"--passive-rf", "--reveal-probes", "--hide-probes"},
                 new String[]{"--interactive"},
                 new String[]{"--report-dir", "reports"}
         )) {
@@ -360,6 +374,19 @@ class ConsolidatedServerTest {
 
     private static URI uri(PassiveRfServer server, String path) {
         return URI.create("http://localhost:" + server.port() + path);
+    }
+
+    private static void assertEnvelope(JsonNode message, String type, long seq, String sessionId) {
+        assertEquals(type, message.path("type").asText());
+        assertEquals(seq, message.path("seq").asLong());
+        if (sessionId == null) assertTrue(message.path("sessionId").isNull());
+        else assertEquals(sessionId, message.path("sessionId").asText());
+    }
+
+    private static JsonNode legacyEvent(JsonNode message, long seq) {
+        assertEnvelope(message, message.path("type").asText(), seq, null);
+        ((com.fasterxml.jackson.databind.node.ObjectNode) message).remove(List.of("seq", "sessionId"));
+        return message;
     }
 
     private JsonNode wire(Object value) throws Exception {

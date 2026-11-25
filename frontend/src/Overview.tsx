@@ -1,16 +1,17 @@
 import { ArrowUpRight } from 'lucide-react';
 import type { CaptureHealth, CaptureStatus, TopologyReport } from './api';
-import { date, observationKey } from './observations';
+import { date, observationKey, observationValue, roamApLabel } from './observations';
 
-export function Overview({ status, health, topology, onNavigate }: {
-  status?: CaptureStatus; health?: CaptureHealth | null;
+export function Overview({ status, health, topology, probes, onNavigate }: {
+  probes?: number; status?: CaptureStatus; health?: CaptureHealth | null;
   topology?: TopologyReport | null; onNavigate: (id: string) => void;
 }) {
   const recent = (topology?.roams ?? []).slice().sort((a, b) => b.time - a.time).slice(0, 5);
+  const aps = new Map(topology?.accessPoints?.map(ap => [ap.bssid, ap]));
   const counts = [
     { label: 'Decoded frames', value: health?.decoded, target: 'capture-health' },
-    { label: 'Probe requests', value: status?.wifi.captureMode === 'idle' ? undefined : status?.wifi.probeRequests, target: 'de-cloaker' },
-    { label: 'Observed access points', value: topology?.accessPoints.length, target: 'inspector' },
+    { label: 'Probe requests', value: probes ?? (status?.wifi.captureMode === 'idle' ? undefined : status?.wifi.probeRequests), target: 'de-cloaker' },
+    { label: 'Observed access points', value: topology?.accessPoints?.length, target: 'inspector' },
     { label: 'Confirmed client links', value: topology?.edges.length, target: 'spotter' },
   ];
 
@@ -47,9 +48,9 @@ export function Overview({ status, health, topology, onNavigate }: {
                 {recent.map(item => (
                   <tr key={observationKey('roams', item)}>
                     <td className="mono">{item.clientId}</td>
-                    <td className="mono">{item.fromBssid}</td>
-                    <td className="mono">{item.toBssid}</td>
-                    <td>{item.method}</td>
+                    <td><span className="roam-ap">{roamApLabel(aps.get(item.fromBssid), item.fromChannel, item.fromBand)}<code>{item.fromBssid}</code></span></td>
+                    <td><span className="roam-ap">{roamApLabel(aps.get(item.toBssid), item.toChannel, item.toBand)}<code>{item.toBssid}</code></span></td>
+                    <td>{observationValue('method', item)}</td>
                     <td className="mono" title={date(item.time)}>{date(item.time, true)}</td>
                   </tr>
                 ))}

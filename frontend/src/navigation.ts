@@ -52,3 +52,13 @@ export function captureStateLabel(session: { mode: string; running: boolean; rep
 export function sniperStartRequest(ssid: string, available: boolean): { ssid: string } | null {
   return available && ssid && new TextEncoder().encode(ssid).length <= 32 ? { ssid } : null;
 }
+
+export function readTab(category: string): string | null {
+  try { return localStorage.getItem(`ewave.tab.${category}`); }
+  catch { return null; }
+}
+
+export function rememberTab(category: string, tab: string): void {
+  try { localStorage.setItem(`ewave.tab.${category}`, tab); }
+  catch { /* Navigation still works when browser storage is unavailable. */ }
+}

@@ -26,11 +26,14 @@ class OpsCapabilitiesTest {
                 present.contains(name) ? Path.of("/usr/bin", name) : null;
 
         Map<String, Object> report = OpsCapabilities.snapshot(aps, lan, wordlist.toString(),
-                List.of("wlo1"), List.of(new OpsCapabilities.Interface("wlo1", true, false, false)),
-                Map.of("status", Map.of("captureMode", "watch")), "deauth", locator);
+                List.of("wlo1"), List.of(new OpsCapabilities.Interface("wlo1", true, false, false, List.of("10.0.0.1"))),
+                Map.of("status", Map.of("captureMode", "watch")), "deauth", "run-123", locator);
 
         assertEquals(true, report.get("operationsEnabled"));
         assertEquals("deauth", report.get("activeOperation"));
+        assertEquals("run-123", report.get("activeOperationId"));
+        var interfaces = OpsCapabilities.systemInterfaces();
+        assertTrue(interfaces.stream().anyMatch(iface -> iface.loopback() && iface.ipv4Addresses().contains("127.0.0.1")));
         var caches = (Map<?, ?>) report.get("caches");
         var apCache = (OpsCapabilities.Cache) caches.get("accessPoints");
         var lanCache = (OpsCapabilities.Cache) caches.get("lanHosts");

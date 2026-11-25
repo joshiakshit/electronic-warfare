@@ -30,11 +30,16 @@ with open(os.environ["COMMAND_LOG"], "a") as log:
     log.write(json.dumps([name, *args]) + "\\n")
 if name == "uname": print("Linux")
 elif name == "java" and args == ["-version"]: print('openjdk version "21.0.1"')
+elif name == "java" and "-jar" in args and os.environ.get("JAVA_ENV_LOG"):
+    pathlib.Path(os.environ["JAVA_ENV_LOG"]).write_text(json.dumps({"home": os.environ["HOME"], "args": args}))
 elif name == "javac": print("javac 21.0.1")
 elif name == "sudo":
     if os.environ.get("DENY_SUDO"): sys.exit(1)
     if "--" in args: args = args[args.index("--") + 1:]
-    if args != ["-v"]: sys.exit(subprocess.run(args).returncode)
+    if args != ["-v"]:
+        child_env = dict(os.environ)
+        if "-H" in sys.argv[1:]: child_env["HOME"] = os.environ.get("FAKE_ROOT_HOME", "/root")
+        sys.exit(subprocess.run(args, env=child_env).returncode)
 elif name == "iw" and "managed" in args and os.environ.get("FAIL_MANAGED"):
     sys.exit(1)
 elif name == "iw":
@@ -118,8 +123,8 @@ elif name == "node":
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertIn("1) lab0mon", result.stdout)
         self.assertNotIn("P2P-device", result.stdout)
-        java = next(c for c in self.commands() if c[:2] == ["java", "-jar"])
-        self.assertEqual(["--iface", "lab0mon", "--adaptive"], java[3:])
+        java = next(c for c in self.commands() if c[0] == "java" and "-jar" in c)
+        self.assertEqual(["--iface", "lab0mon", "--adaptive"], java[java.index("-jar") + 2:])
 
     @unittest.skipIf(os.geteuid() == 0, "Root invocation bypasses sudo")
     def test_live_wifi_managed_adapter_prepares_monitor_launches_after_build_and_restores_once(self):
@@ -134,10 +139,10 @@ elif name == "node":
         up = ["ip", "link", "set", "lab0mon", "up"]
         restore_managed = ["iw", "dev", "lab0mon", "set", "type", "managed"]
         restore_nm = ["nmcli", "device", "set", "lab0mon", "managed", "yes"]
-        java = next(c for c in commands if c[:2] == ["java", "-jar"])
+        java = next(c for c in commands if c[0] == "java" and "-jar" in c)
         elevated = next(c for c in commands if c[0] == "sudo" and any("java" in arg for arg in c))
         self.assertEqual(["sudo", "-H", "--preserve-env=JAVA_TOOL_OPTIONS", "--",
-                          str(self.root / "bin/java"), "-jar"], elevated[:6])
+                          str(self.root / "bin/java"), "-Drf.userHome=" + self.env["HOME"], "-jar"], elevated[:7])
         self.assertLess(commands.index(["mvn", "package"]), commands.index(release))
         self.assertLess(commands.index(release), commands.index(down))
         self.assertLess(commands.index(down), commands.index(mode))
@@ -148,8 +153,22 @@ elif name == "node":
         self.assertEqual(1, commands.count(restore_managed))
         self.assertEqual(1, commands.count(restore_nm))
         self.assertIn(["iw", "dev", "lab0mon", "set", "freq", "2412"], commands)
-        self.assertEqual(["--iface", "lab0mon", "--adaptive"], java[3:])
+        self.assertEqual(["--iface", "lab0mon", "--adaptive"], java[java.index("-jar") + 2:])
         self.assertNotIn(["systemctl", "stop", "NetworkManager"], commands)
+
+    @unittest.skipIf(os.geteuid() == 0, "Root invocation bypasses sudo")
+    def test_sudo_home_reset_preserves_the_callers_storage_home(self):
+        self.env["HOME"] = str(self.root / "operator home")
+        self.env["FAKE_ROOT_HOME"] = str(self.root / "root home")
+        self.env["JAVA_ENV_LOG"] = str(self.root / "java-env.json")
+        self.env["INITIAL_MODE"] = "monitor"
+        self.env["IW_DEV_LIST"] = "phy#0\n\tInterface lab0mon\n\t\ttype monitor\n"
+        result = self.run_launcher(input="1\n1\n")
+        self.assertEqual(0, result.returncode, result.stderr)
+        launched = json.loads(Path(self.env["JAVA_ENV_LOG"]).read_text())
+        self.assertEqual(self.env["FAKE_ROOT_HOME"], launched["home"])
+        self.assertIn("-Drf.userHome=" + self.env["HOME"], launched["args"])
+        self.assertEqual("-jar", launched["args"][1])
 
     def test_live_wifi_preserves_original_monitor_mode_on_exit(self):
         self.env["INITIAL_MODE"] = "monitor"

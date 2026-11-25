@@ -1,18 +1,21 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
-import { LockKeyhole, Search, X } from 'lucide-react';
-import { get, type AdvertisedSecurity, type ApChange, type DeviceProfileDetail, type Json } from './api';
+import { Search, X } from 'lucide-react';
+import { get, type AdvertisedSecurity, type ApChange, type DeviceProfileContext, type DeviceProfileDetail, type Json, type SecurityFinding } from './api';
 import {
-  channelBand, date, groupApChanges, isIdentifier, isTimestamp, observationColumns, observationKey,
-  observationLabel, observationValue, occupancyEstimate, occupancyLabel, primaryEvidence, short,
+  apHardwareSubtitle, channelBand, classificationBasisLabel, date, groupApChanges, highestSeverity, isIdentifier, isTimestamp, observationColumns, observationKey, roamDwellLabel,
+  observationLabel, observationMatches, observationValue, occupancyEstimate, occupancyLabel, primaryEvidence, short,
 } from './observations';
-import { ProfilerEvidence } from './ProfilerEvidence';
+import { ProfilerContext, ProfilerEvidence } from './ProfilerEvidence';
+import { FrameFields, ManagementEvidence, RadioFrameEvidence } from './FrameEvidence';
 import { startSnapshotPolling } from './snapshotPolling';
 
-export function ObservationReport({ kind, rows, running, stale, emptyMessage = 'No observations recorded' }: {
-  kind: string; rows: Json[]; running: boolean; stale: boolean; emptyMessage?: string;
+export function ObservationReport({ kind, rows, running, stale, archived = false,
+  emptyMessage = 'No observations recorded', initialSelectedKey = null, activeFrequencyMhz }: {
+  kind: string; rows: Json[]; running: boolean; stale: boolean; archived?: boolean; emptyMessage?: string;
+  initialSelectedKey?: string | null; activeFrequencyMhz?: number | null;
 }) {
   const [query, setQuery] = useState('');
-  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [selectedKey, setSelectedKey] = useState(initialSelectedKey);
   const rowButtons = useRef(new Map<string, HTMLButtonElement>());
   const filter = useRef<HTMLInputElement>(null);
   const evidenceHeading = useRef<HTMLHeadingElement>(null);
@@ -20,8 +23,7 @@ export function ObservationReport({ kind, rows, running, stale, emptyMessage = '
   const columns = useMemo(() => observationColumns(kind, rows), [kind, rows]);
   const search = query.trim().toLowerCase();
   const visible = useMemo(() => rows.filter(row => (
-    !search || JSON.stringify(row).toLowerCase().includes(search)
-    || columns.some(key => observationValue(key, row, true).toLowerCase().includes(search))
+    observationMatches(row, columns, search)
   )), [columns, rows, search]);
   const groups = useMemo<{ clientId: string | null; rows: Json[] }[]>(() => kind === 'roams'
     ? groupApChanges(visible as ApChange[])
@@ -77,7 +79,7 @@ export function ObservationReport({ kind, rows, running, stale, emptyMessage = '
         </label>
       </div>
       {kind === 'channels' && visible.length > 0 && (
-        <ChannelChart channels={visible} selectedKey={selectedKey} onSelect={selectChannel} />
+        <ChannelChart channels={visible} selectedKey={selectedKey} onSelect={selectChannel} activeFrequencyMhz={activeFrequencyMhz} />
       )}
       {visible.length > 0 ? (
         <div className={selected ? 'report-layout has-evidence' : 'report-layout'}>
@@ -91,7 +93,7 @@ export function ObservationReport({ kind, rows, running, stale, emptyMessage = '
                 {group.clientId && (
                   <tr className="report-group">
                     <th colSpan={columns.length} scope="rowgroup">
-                      <span>Client <code>{group.clientId}</code></span>
+                      <span>{group.rows[0]?.clientLabel || 'Client'} <code>{group.clientId}</code></span>
                       <span>{group.rows.length} {group.rows.length === 1 ? 'change' : 'changes'}</span>
                     </th>
                   </tr>
@@ -103,14 +105,14 @@ export function ObservationReport({ kind, rows, running, stale, emptyMessage = '
                     <tr key={rowKey} className={isSelected ? 'is-selected' : undefined} onClick={() => setSelectedKey(rowKey)}>
                       {columns.map((key, columnIndex) => {
                         const value = observationValue(key, row, true);
-                        const isMasked = key === 'name' && !row.name;
+                        const hardwareSubtitle = kind === 'aps' && key === 'vendor' ? apHardwareSubtitle(row) : '';
                         return (
-                          <td key={key} className={isTimestamp(key) || isIdentifier(key) ? 'mono' : undefined}
-                              title={isTimestamp(key) ? date(row[key]) : value}>
+                          <td key={key} className={isTimestamp(key) || kind !== 'roams' && isIdentifier(key) && key !== 'clientId' ? 'mono' : undefined}
+                              title={isTimestamp(key) ? date(row[key]) : hardwareSubtitle ? `${value} · ${hardwareSubtitle}` : value}>
                             {columnIndex === 0 ? (
                               <button
                                 type="button"
-                                className={isMasked ? 'row-subject masked-name' : 'row-subject'}
+                                className="row-subject"
                                 ref={node => {
                                   if (node) rowButtons.current.set(rowKey, node);
                                   else rowButtons.current.delete(rowKey);
@@ -126,12 +128,48 @@ export function ObservationReport({ kind, rows, running, stale, emptyMessage = '
                                   }
                                 }}
                               >
-                                {isMasked && <LockKeyhole size={12} aria-hidden="true" />}
-                                <span>{value}</span>
+                                {kind === 'edges' ? (
+                                  <span className="spotter-client">
+                                    {row.clientLabel && <span>{row.clientLabel}</span>}
+                                    <code>{value}</code>
+                                  </span>
+                                ) : kind === 'inventory' ? (
+                                  <span className="profiler-device">
+                                    {row.enrolledLabel && <span>{row.enrolledLabel}</span>}
+                                    <code title={value}>{value}</code>
+                                  </span>
+                                ) : <span>{value}</span>}
                                 {kind === 'hidden' && row.bssid && <code title={row.bssid}>{row.bssid}</code>}
                               </button>
+                            ) : kind === 'roams' && (key === 'fromBssid' || key === 'toBssid') ? (
+                              <span className="roam-ap">
+                                {row[key === 'fromBssid' ? 'fromApLabel' : 'toApLabel'] || null}
+                                <code>{value}</code>
+                              </span>
+                            ) : kind === 'roams' && key === 'transitionType' ? (
+                              <>
+                                {value}
+                                {(row.pingPong || row.btmSteered || row.previousDwellMs != null) && (
+                                  <div className="roam-badges">
+                                    {row.pingPong && <span>Ping-pong</span>}
+                                    {row.btmSteered && <span>802.11v BTM</span>}
+                                    {row.previousDwellMs != null && <span>Dwell {roamDwellLabel(row.previousDwellMs)}</span>}
+                                  </div>
+                                )}
+                              </>
                             ) : key === 'nameStatus' ? (
                               <span className={row.nameStatus === 'Name observed' ? 'name-status observed' : 'name-status'}>{value}</span>
+                            ) : kind === 'aps' && key === 'vendor' ? (
+                              <span className="inspector-vendor">{value}
+                                {hardwareSubtitle && <small>{hardwareSubtitle}</small>}
+                              </span>
+                            ) : key === 'classLabel' ? (
+                              <span className="profiler-classification">{value}
+                                {row.osHint && <small>{row.osHint}</small>}
+                                {row.classificationBasis && <small>{classificationBasisLabel(row.classificationBasis)}</small>}
+                              </span>
+                            ) : key === 'findingsSummary' && row.securityFindings?.length ? (
+                              <span className="finding-badge" data-severity={highestSeverity(row.securityFindings)}>{value}</span>
                             ) : value}
                           </td>
                         );
@@ -144,7 +182,7 @@ export function ObservationReport({ kind, rows, running, stale, emptyMessage = '
             </table>
           </div>
           {selected && (
-            <Evidence key={selectedKey} kind={kind} row={selected} subjectKey={columns[0]}
+            <Evidence key={selectedKey} kind={kind} archived={archived} row={selected} subjectKey={columns[0]}
                       headingRef={evidenceHeading} onClose={closeEvidence} />
           )}
         </div>
@@ -158,8 +196,8 @@ export function ObservationReport({ kind, rows, running, stale, emptyMessage = '
   );
 }
 
-function ChannelChart({ channels, selectedKey, onSelect }: {
-  channels: Json[]; selectedKey: string | null; onSelect: (key: string) => void;
+export function ChannelChart({ channels, selectedKey, onSelect, activeFrequencyMhz }: {
+  channels: Json[]; selectedKey: string | null; onSelect: (key: string) => void; activeFrequencyMhz?: number | null;
 }) {
   const bands = new Map<string, Json[]>();
   for (const channel of [...channels].sort((a, b) => a.freqMhz - b.freqMhz)) {
@@ -183,15 +221,23 @@ function ChannelChart({ channels, selectedKey, onSelect }: {
               const key = observationKey('channels', row);
               const estimate = occupancyEstimate(row);
               const label = occupancyLabel(row);
+              const tuned = activeFrequencyMhz != null && row.freqMhz === activeFrequencyMhz;
+              const coupled = Boolean(row.coupledFrequenciesMhz?.length || row.coupledWith?.length);
+              const anomaly = row.anomaly ? row.anomaly.activeNow === false ? 'recent' : 'active' : undefined;
+              const evidence = [label, tuned && 'Active receiver', coupled && 'Coupled hopping',
+                anomaly && observationValue('anomaly', row)].filter(Boolean).join(' · ');
               return (
                 <button
                   key={key}
                   type="button"
                   className="channel-bar"
-                  aria-label={`${band}, channel ${row.channel}, ${label}`}
+                  data-tuned={tuned || undefined}
+                  data-coupled={coupled || undefined}
+                  data-anomaly={anomaly}
+                  aria-label={`${band}, channel ${row.channel}, ${evidence}`}
                   aria-pressed={selectedKey === key}
                   onClick={() => onSelect(key)}
-                  title={label}
+                  title={evidence}
                 >
                   <span className="channel-value" aria-hidden="true">{estimate === null ? '—' : label}</span>
                   <span className="channel-track" aria-hidden="true">
@@ -211,12 +257,12 @@ function ChannelChart({ channels, selectedKey, onSelect }: {
   );
 }
 
-function Evidence({ kind, row, subjectKey, headingRef, onClose }: {
-  kind: string; row: Json; subjectKey: string; headingRef: RefObject<HTMLHeadingElement>; onClose: () => void;
+function Evidence({ kind, row, subjectKey, headingRef, onClose, archived }: {
+  kind: string; row: Json; subjectKey: string; archived: boolean; headingRef: RefObject<HTMLHeadingElement>; onClose: () => void;
 }) {
   const [detail, setDetail] = useState<DeviceProfileDetail | null>(null);
   const [error, setError] = useState('');
-  const profileId = kind === 'inventory' ? row.id : null;
+  const profileId = !archived && kind === 'inventory' ? row.id : null;
   useEffect(() => {
     if (!profileId) return;
     const endpoint = `/api/profiler/${encodeURIComponent(profileId)}`;
@@ -237,18 +283,23 @@ function Evidence({ kind, row, subjectKey, headingRef, onClose }: {
 
   const evidence: Json = { ...row, ...detail };
   const priority = primaryEvidence(kind, evidence);
-  const classificationFields = ['classLabel', 'classConfidence', 'osHint'];
+  const apPriority = kind === 'hidden'
+    ? primaryEvidence('aps', evidence).filter(key => !priority.includes(key)) : [];
+  const classificationFields = ['classLabel', 'classConfidence'];
   // Preserve the original fields for inspection, including the probe report ID and timeline.
   const advanced = Object.keys(evidence).filter(key => (
-    key !== subjectKey && (!priority.includes(key) || (evidence[key] && typeof evidence[key] === 'object')
-      || (kind === 'aps' && ['security', 'channelUtilization'].includes(key)))
+    key !== subjectKey && !(kind === 'probes' && ['devices', 'sources'].includes(key)) && (!priority.includes(key) && !apPriority.includes(key)
+      || (evidence[key] && typeof evidence[key] === 'object')
+      || (['aps', 'hidden'].includes(kind) && ['security', 'channelUtilization'].includes(key)))
   ));
   return (
     <aside className="evidence" id="observation-evidence" aria-label="Observation evidence">
       <header>
         <div>
           <span className="evidence-caption">Evidence</span>
-          <h2 ref={headingRef} tabIndex={-1}>{observationValue(subjectKey, row)}</h2>
+          <h2 ref={headingRef} tabIndex={-1}>{kind === 'inventory' && evidence.enrolledLabel
+            ? evidence.enrolledLabel : observationValue(subjectKey, row)}</h2>
+          {kind === 'inventory' && evidence.enrolledLabel && <code className="profiler-device-id">{row.id}</code>}
         </div>
         <button type="button" className="icon-btn" onClick={onClose} aria-label="Close evidence">
           <X size={18} />
@@ -258,8 +309,25 @@ function Evidence({ kind, row, subjectKey, headingRef, onClose }: {
       {kind === 'inventory' ? (
         <EvidenceFields kind={kind} fields={priority.filter(key => classificationFields.includes(key))} row={evidence} />
       ) : kind !== 'aps' && <EvidenceFields kind={kind} fields={priority} row={evidence} />}
+      {kind === 'hidden' && <AccessPointEvidence row={evidence} priority={apPriority} />}
+      {kind === 'inventory' && !detail && <ProfilerContext context={row as DeviceProfileContext} />}
+      {kind === 'probes' && Array.isArray(row.devices) && row.devices.length > 0 && (
+        <section className="evidence-group" aria-label="Probing devices">
+          <h3>Probing devices</h3>
+          <div className="probe-device-list">
+            <table>
+              <thead><tr><th scope="col">Device ID</th><th scope="col">Last observed</th></tr></thead>
+              <tbody>{row.devices.map(({ id, lastSeen }: { id: string; lastSeen: number }) => (
+                <tr key={id}><td><code>{id}</code></td><td>{date(lastSeen, true)}</td></tr>
+              ))}</tbody>
+            </table>
+          </div>
+        </section>
+      )}
       {profileId && !detail && !error && <p className="micro-note" role="status">Loading fingerprint and signal details…</p>}
       {error && <p className="inline-error" role="status">Additional device detail unavailable. {error}</p>}
+      {kind === 'inventory' && <ManagementEvidence features={row.capabilities?.managementFeatures}
+        modes={row.capabilities?.securityModes} akms={row.capabilities?.rsnAkmSuites} />}
       {detail && profileId && <ProfilerEvidence detail={detail} observedId={profileId} />}
       {kind === 'inventory' && priority.some(key => !classificationFields.includes(key)) && (
         <section className="evidence-group" aria-label="Device observations">
@@ -277,13 +345,37 @@ function Evidence({ kind, row, subjectKey, headingRef, onClose }: {
   );
 }
 
-function AccessPointEvidence({ row, priority }: { row: Json; priority: string[] }) {
+export function AccessPointEvidence({ row, priority }: { row: Json; priority: string[] }) {
   const profiles: AdvertisedSecurity[] = row.advertisedSecurity ?? [];
+  const findings: SecurityFinding[] = row.securityFindings ?? [];
+  const radio = row.apRadio;
+  const wps = row.wpsInfo;
+  const formatWidth = (width: number | undefined) => width && width > 0 ? `${width} MHz` : '—';
   const loadFields: readonly string[] = ['stationCount', 'channelUtilization'];
   const load = priority.filter(key => loadFields.includes(key));
   const observed = priority.filter(key => key !== 'security' && !loadFields.includes(key));
   return (
     <>
+      {findings.length > 0 && (
+        <section className="evidence-group" aria-label="Security findings">
+          <h3>Security findings</h3>
+          <ul className="inspector-findings">
+            {findings.map(({ code, severity, summary }) => (
+              <li key={code}><span className="finding-badge" data-severity={severity}>{severity}</span><span>{summary}</span></li>
+            ))}
+          </ul>
+        </section>
+      )}
+      <FrameFields title="Hardware & radio configuration" fields={[
+        ['Vendor', row.vendor], ['AP hostname', row.apHostname],
+        ['WPS model', [...new Set([wps?.modelName, wps?.modelNumber].filter(Boolean))].join(' · ')],
+        ['WPS manufacturer', wps?.manufacturer], ['WPS device name', wps?.deviceName],
+        ['Wi-Fi generation', radio?.wifiGeneration !== 'Unknown' ? radio?.wifiGeneration : null],
+        ['Operating / max width', radio && (radio.operatingWidthMhz > 0 || radio.maxWidthMhz > 0)
+          ? `${formatWidth(radio.operatingWidthMhz)} / ${formatWidth(radio.maxWidthMhz)}` : null],
+        ['Spatial streams', radio?.spatialStreams > 0 ? radio.spatialStreams : null],
+        ['BSS color', radio?.bssColor], ['Radio group', row.radioGroupId], ['ESS group', row.essId],
+      ]} />
       <section className="evidence-group" aria-label="Advertised security">
         <h3>Advertised security</h3>
         {profiles.length > 0 ? profiles.map((profile, index) => (
@@ -298,16 +390,20 @@ function AccessPointEvidence({ row, priority }: { row: Json; priority: string[] 
           </div>
         )) : <p className="security-summary">{row.security || 'Security details unavailable'}</p>}
       </section>
+      <ManagementEvidence features={row.managementFeatures} modes={row.securityModes} security={row.security ? row : undefined} />
+      <RadioFrameEvidence observation={row.radioObservation} apAdvertisement />
       {load.length > 0 && (
         <section className="evidence-group" aria-label="AP-reported load">
           <h3>AP-reported load</h3>
           <EvidenceFields kind="aps" fields={load} row={row} />
         </section>
       )}
-      <section className="evidence-group" aria-label="Observation">
-        <h3>Observation</h3>
-        <EvidenceFields kind="aps" fields={observed} row={row} />
-      </section>
+      {observed.length > 0 && (
+        <section className="evidence-group" aria-label="Observation">
+          <h3>Observation</h3>
+          <EvidenceFields kind="aps" fields={observed} row={row} />
+        </section>
+      )}
     </>
   );
 }

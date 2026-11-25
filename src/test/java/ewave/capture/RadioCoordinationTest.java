@@ -123,10 +123,14 @@ class RadioCoordinationTest {
                     iface -> null, iface -> iface.startsWith("lab0") ? "phy0" : iface)) {
                 bridge.startPassive("lab0mon", true, null);
                 assertEquals(1, captureStreams.size());
-                writeInitialBeacon(captureStreams.getFirst(), AP_MAC, "ewave lab", 6, 2437);
+                writeFrames(captureStreams.getFirst(), 2437, rawBeacon(AP_MAC, "ewave lab".getBytes(StandardCharsets.UTF_8), 6),
+                        rawToDsData(AP_MAC, CLIENT_MAC, "ff:ff:ff:ff:ff:ff", 1),
+                        rawToDsData(AP_MAC, CLIENT_MAC, "ff:ff:ff:ff:ff:ff", 2),
+                        rawToDsData(AP_MAC, CLIENT_MAC, "ff:ff:ff:ff:ff:ff", 3));
 
                 awaitCondition(() -> bridge.getPassiveWifi() != null
-                        && !bridge.getPassiveWifi().findAccessPoints("ewave lab").isEmpty());
+                        && !bridge.getPassiveWifi().findAccessPoints("ewave lab").isEmpty()
+                        && !bridge.getPassiveWifi().evidencedTargets(bridge.getProfiler()).isEmpty());
                 String apId = bridge.getPassiveWifi().findAccessPoints("ewave lab").getFirst();
                 bridge.startSniperByApId(apId);
                 assertEquals(SniperController.State.LOCKED, bridge.sniperState().run().state());
@@ -162,7 +166,7 @@ class RadioCoordinationTest {
                     tuneCommands.clear();
                     var deauthRes = postJson(client, baseUrl + "/api/ops/deauth",
                             "{\"apBssid\":\"" + AP_MAC + "\",\"clientMac\":\"" + CLIENT_MAC + "\",\"count\":2,\"interface\":\"lab0ap\"}");
-                    assertEquals(200, deauthRes.statusCode());
+                    assertEquals(200, deauthRes.statusCode(), deauthRes.body());
                     assertFalse(JSON.readTree(deauthRes.body()).path("success").asBoolean());
                     awaitCondition(() -> tuneCommands.stream().anyMatch(cmd -> cmd.contains("2437")));
                     assertEquals(SniperController.State.LOCKED, bridge.sniperState().run().state());
@@ -350,7 +354,10 @@ class RadioCoordinationTest {
                         "{\"mode\":\"watch\",\"interface\":\"lab0mon\",\"channel\":6,\"band\":\"2.4\"}");
                 assertEquals(200, startWatch.statusCode());
                 assertTrue(tuneCommands.stream().anyMatch(cmd -> cmd.contains("2437")));
-                writeInitialBeacon(captureStreams.getFirst(), AP_MAC, "ewave lab", 6, 2437);
+                writeFrames(captureStreams.getFirst(), 2437, rawBeacon(AP_MAC, "ewave lab".getBytes(StandardCharsets.UTF_8), 6),
+                        rawToDsData(AP_MAC, CLIENT_MAC, "ff:ff:ff:ff:ff:ff", 1),
+                        rawToDsData(AP_MAC, CLIENT_MAC, "ff:ff:ff:ff:ff:ff", 2),
+                        rawToDsData(AP_MAC, CLIENT_MAC, "ff:ff:ff:ff:ff:ff", 3));
                 awaitCondition(() -> bridge.getPassiveWifi() != null
                         && !bridge.getPassiveWifi().topology().accessPoints().isEmpty());
 
@@ -383,7 +390,7 @@ class RadioCoordinationTest {
                         .path("accessPoints").size());
 
                 // Verify module-aligned endpoints on shared state
-                for (String path : List.of("/api/capture/health", "/api/sniper", "/api/spotter",
+                for (String path : List.of("/api/capture/health", "/api/capture/access-points", "/api/sniper", "/api/spotter",
                         "/api/whistleblower", "/api/decloaker", "/api/decloaker/demo", "/api/inspector",
                         "/api/profiler", "/api/profiler/network", "/api/profiler/fingerprints",
                         "/api/tracker", "/api/lookout", "/api/lookout/demo", "/api/ops/targets")) {
@@ -410,7 +417,9 @@ class RadioCoordinationTest {
                     var h = bridge.getCaptureHealth();
                     return h != null && "replay".equals(h.mode());
                 });
-                assertEquals("[]", get(client, opsBase + "/api/ops/targets").body());
+                assertEquals(404, get(client, opsBase + "/api/ops/targets").statusCode());
+                assertFalse(JSON.readTree(get(client, opsBase + "/api/status").body())
+                        .path("operationsEnabled").asBoolean());
 
                 // Stop runtime capture
                 var stopCapture = postJson(client, opsBase + "/api/capture/stop", "{}");

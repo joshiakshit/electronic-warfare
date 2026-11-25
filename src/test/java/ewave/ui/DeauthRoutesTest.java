@@ -168,7 +168,7 @@ class DeauthRoutesTest {
                 if (shutdown) server.stop();
                 else {
                     var response = client.send(HttpRequest.newBuilder(uri(server, "/api/attack/stop"))
-                            .POST(HttpRequest.BodyPublishers.noBody()).build(), HttpResponse.BodyHandlers.ofString());
+                            .header("Content-Type", "application/json").POST(HttpRequest.BodyPublishers.noBody()).build(), HttpResponse.BodyHandlers.ofString());
                     assertEquals(200, response.statusCode());
                     assertTrue(mapper.readTree(response.body()).path("stopped").asBoolean());
                     var result = mapper.readTree(pending.get(3, TimeUnit.SECONDS).body());

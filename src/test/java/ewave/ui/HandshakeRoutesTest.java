@@ -84,6 +84,8 @@ class HandshakeRoutesTest {
                 else assertTrue(verified.path("psk").isNull());
                 assertEquals(verificationOutput.get(), verified.path("fullOutput").asText());
                 assertNotNull(Instant.parse(verified.path("timestamp").asText()));
+                assertEquals(found ? "PSK found" : "Key not found", mapper.readTree(
+                        get(client, server, "/api/attack/handshake/status").body()).path("stage").asText());
             }
         }
     }
@@ -112,14 +114,16 @@ class HandshakeRoutesTest {
         }
     }
 
-    @Test void passesTargetNameAndDefaultsMissingNullAndNonpositiveChannelsBeforeCapture() throws Exception {
+    @Test void passesTargetNameResolvesMissingChannelsFromEvidenceAndRejectsNonpositiveChannels() throws Exception {
         var selected = new AtomicReference<PassiveRfServer.HandshakeSettings>();
         try (var bridge = new PacketBridge();
              var server = server(bridge, settings -> {
                  selected.set(settings);
                  return analyzer(settings, builder -> { throw new java.io.IOException("capture fixture unavailable"); });
              }); var client = HttpClient.newHttpClient()) {
-            for (String channel : new String[]{"0", "-1", "null", "missing"}) {
+            for (String channel : new String[]{"0", "-1"})
+                assertEquals(400, post(client, server, "/api/attack/handshake", CAPTURE.replace("\"channel\":6", "\"channel\":" + channel)).statusCode());
+            for (String channel : new String[]{"null", "missing"}) {
                 String body = channel.equals("missing") ? CAPTURE.replace("\"channel\":6,", "")
                         : CAPTURE.replace("\"channel\":6", "\"channel\":" + channel);
                 assertEquals(500, post(client, server, "/api/attack/handshake", body).statusCode());
@@ -178,9 +182,43 @@ class HandshakeRoutesTest {
             assertTrue(mapper.readTree(capture.body()).path("error").asText().contains("tshark missing"));
             var request = mapper.createObjectNode().put("capFilePath", Files.writeString(directory.resolve("invalid.cap"), "bad").toString())
                     .put("wordlistPath", Files.writeString(directory.resolve("words"), "word").toString());
+            request.put("apBssid", AP);
             var verify = post(client, server, "/api/attack/handshake/verify", request.toString());
             assertEquals(500, verify.statusCode());
             assertTrue(mapper.readTree(verify.body()).path("error").asText().contains("No valid WPA handshakes"));
+        }
+    }
+
+    @Test void forwardsAllowMacRotationFlagAndRejectsNonBooleanValues() throws Exception {
+        var captured = new AtomicReference<PassiveRfServer.HandshakeSettings>();
+        try (var bridge = new PacketBridge();
+             var server = server(bridge, settings -> {
+                 captured.set(settings);
+                 return new HandshakeAnalyzer(settings.monitorInterface(), settings.apBssid(), settings.clientMac(),
+                         settings.channel(), settings.frequencyMhz(), directory.resolve("captures").toString(),
+                         builder -> {
+                             if (builder.command().contains("iw")) return new CompletedProcess("", 0);
+                             if (builder.command().getFirst().equals("tshark")) {
+                                 Files.writeString(Path.of(builder.command().get(builder.command().indexOf("-w") + 1)),
+                                         "synthetic capture header and payload");
+                                 return new CompletedProcess(completeExchange(), 0);
+                             }
+                             if (builder.command().contains("tcpdump")) {
+                                 return new CompletedProcess(java.util.HexFormat.of().parseHex("d4c3b2a1020004000000000000000000000004007f000000"), 0);
+                             }
+                             return new CompletedProcess("", 0);
+                         }, settings.allowMacRotation());
+             });
+             var client = HttpClient.newHttpClient()) {
+            assertEquals(400, post(client, server, "/api/ops/handshake",
+                    "{\"apBssid\":\"" + AP + "\",\"channel\":6,\"allowMacRotation\":\"yes\"}").statusCode());
+            var response = post(client, server, "/api/ops/handshake",
+                    "{\"apBssid\":\"" + AP + "\",\"clientMac\":\"02:11:22:33:44:99\",\"channel\":6,"
+                            + "\"interface\":\"wlo1\",\"allowMacRotation\":true}");
+            assertEquals(200, response.statusCode(), response.body());
+            assertTrue(captured.get().allowMacRotation());
+            assertTrue(mapper.readTree(response.body()).path("handshakeDetected").asBoolean());
+            assertEquals("02:11:22:33:44:66", mapper.readTree(response.body()).path("clientMac").asText());
         }
     }
 
@@ -200,6 +238,11 @@ class HandshakeRoutesTest {
         return HttpRequest.newBuilder(uri(server, path)).header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(body)).build();
     }
+    private static HttpResponse<String> get(HttpClient client, PassiveRfServer server, String path) throws Exception {
+        return client.send(HttpRequest.newBuilder(URI.create("http://localhost:" + server.port() + path)).GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+    }
+
     private static HttpResponse<String> post(HttpClient client, PassiveRfServer server, String path, String body) throws Exception {
         return client.send(request(server, path, body), HttpResponse.BodyHandlers.ofString());
     }

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import java.io.Serial;
 import java.io.Serializable;
 import java.time.Instant;
+import java.util.List;
 
 /**
  * WebSocket envelope with an epoch-millisecond timestamp.
@@ -16,6 +17,11 @@ public record EwaveEvent(
 ) implements Serializable {
     @Serial
     private static final long serialVersionUID = 1L;
+
+    public static final String SUMMARY = "summary";
+    public static final String DELTA = "delta";
+
+    public record ReportChanges(List<String> modules) { }
 
     public static final String DEVICE_APPEARED = "DEVICE_APPEARED";
     public static final String DEVICE_UPDATED = "DEVICE_UPDATED";

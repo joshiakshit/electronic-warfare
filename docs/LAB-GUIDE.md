@@ -8,14 +8,14 @@ Ops is enabled automatically in live and idle sessions. Replay is passive-only. 
 
 | Module | Main input | Works with a prepared monitor adapter? | Extra setup |
 | --- | --- | --- | --- |
-| Sniper | Live monitor capture | Yes | A test AP; 2.4 GHz automatic sweep, 5 GHz manual or observed |
+| Sniper | Live monitor capture | Yes | A test AP on a frequency supported by the adapter |
 | Spotter | Live monitor capture | Yes | A client connected to the test AP and generating traffic |
-| Whistleblower | Live monitor capture | Yes | A hidden AP and a later frame that reveals its name |
-| De-cloaker | Live monitor capture | Yes | Test-client probe requests; probe privacy settings decide name visibility |
+| Whistleblower | Live monitor capture | Yes | A hidden AP and captured evidence for its name |
+| De-cloaker | Live monitor capture | Yes | Test-client probe requests with optional SSID or side-channel evidence |
 | Inspector | Live monitor capture | Yes | An observed AP; some fields depend on what the AP advertises |
 | Profiler | Live monitor capture | Yes | Test-client traffic; optional My Network enrollment |
 | Tracker | Live monitor capture | Yes | A client that moves or reassociates between APs or channels |
-| Lookout | Adaptive or fixed monitor capture | Yes | Traffic on more than one channel to compare occupancy |
+| Lookout | Adaptive monitor capture | Yes | Traffic on more than one channel to compare occupancy |
 | Ops | Live session plus external tools | Yes, with tools installed | Deauth needs a target and interface; PMKID needs `hcxdumptool`/`hcxpcapngtool`; beacon needs `mdk4`/`mdk3`; evil twin needs a separate AP interface and IP setup |
 
 ## 2. Prepare the lab
@@ -106,12 +106,12 @@ Useful modes:
 3. Enter the exact SSID (`EWAVE-LAB`) or select a currently observed AP from the picker.
 4. Start the search. The run moves through `SEARCHING` and `LOCKED`.
 5. Confirm the locked channel/frequency and the advancing last-heard time.
-6. To test reacquisition, change the AP to channel 11 through its normal settings. Watch for `LOST_SEARCHING` and a new lock.
+6. To test reacquisition, change the AP to channel 11 through its normal settings. Watch for a pending channel switch or `LOST_SEARCHING`, then check the new lock and the trigger in **Channel Move History**.
 7. Stop Sniper. Passive capture continues.
 
-Record the state transitions, candidate list, locked BSSID/channel, and timestamps.
+Record the state transitions, candidate list, locked AP token and frequency, and timestamps. If the AP advertises an affiliated link that the receiver supports, use **Follow link** and check the destination and trigger in the history.
 
-Limits: the automatic sweep covers 2.4 GHz channels 1–13. A 5 GHz/6 GHz target needs a manual frequency or an observed AP. Same-name APs appear as candidates. Reacquisition after a channel change still needs the hardware check.
+The automatic sweep uses enabled 2.4, 5, and 6 GHz frequencies reported by the adapter. If capability discovery is unavailable, it falls back to 2.4 GHz channels 1–13. Same-name APs appear as candidates. Multi-band sweeps and cross-band reacquisition have offline coverage. Hardware verification is pending.
 
 ### 3.2 Spotter — observed clients and topology
 
@@ -130,17 +130,17 @@ Limits: Spotter shows observed clients, not every silent client. An AP-advertise
 
 ### 3.3 Whistleblower — hidden network names
 
-**Purpose:** reveal a hidden SSID when a captured frame supplies the name.
+**Purpose:** review hidden SSID evidence and its confidence.
 
 1. Configure the test AP with a hidden SSID and connect the test client.
 2. Start live capture.
 3. Open **Privacy → Whistleblower**.
 4. Trigger a client reassociation (disconnect/reconnect) so a revealing frame is captured.
-5. Inspect the AP row for the revealed name, the revealing frame, its source, and the capture time.
+5. Inspect the AP row for the name, reveal evidence and confidence, and capture time. Open the evidence drawer for advertised security, station count, and available radio measurements.
 
 Record the AP BSSID, hidden status, revealed name, evidence source, and timestamp.
 
-Limits: if no captured frame contains the name, the name stays unknown. A beacon alone does not reveal a hidden SSID.
+An association request supplies a tentative name until the response or client traffic confirms it. OWE transition elements and unambiguous RNR Short-SSID matches can reveal names without observing a client association.
 
 ### 3.4 De-cloaker — probe requests
 
@@ -148,12 +148,11 @@ Limits: if no captured frame contains the name, the name stays unknown. A beacon
 
 1. With the test client connected, turn Wi-Fi off and on, or forget/reconnect to the test network, to generate probes.
 2. Open **Privacy → De-cloaker**.
-3. Review the probe corpus, named and general probes, and the evidence pane.
-4. Note when a probe name is withheld by backend privacy settings.
+3. Review probe activity, the split between general and directed probes, and the exposure breakdown.
+4. Select a network to view the probe source, tokenized device IDs, and when each device last probed that network.
+5. Compare locally administered addresses with IE cohorts and correlated clusters. Check the WPS UUID-E, Passpoint, and Wi-Fi Direct metrics when your test client emits those fields.
 
-Record probe counts, returned names or masked values, and capture times.
-
-Limits: only observed probes appear. `--hide-probes` / `--reveal-probes` (or `-Daudit.revealSsids`) control probe-name visibility; they do not anonymize every AP name in a report.
+Record probe counts, probe sources, and capture times. Observed SSID names and device evidence are always visible in live and replay reports and are included in snapshot exports. An unresolved Short-SSID displays its CRC-32 value. Correlated clusters are inferences based on observed evidence.
 
 ### 3.5 Inspector — AP security and capabilities
 
@@ -176,13 +175,13 @@ Limits: Inspector reports advertised values. Missing or stale fields are not pro
 1. Generate traffic from the test client.
 2. Open **Identification → Profiler**.
 3. Review the inventory; open the test client's row.
-4. Inspect the inferred label, confidence, vendor, retained signal history, and fingerprint observations.
-5. Open **Session → Settings** to enroll the client or AP in My Network, apply scope, and save a reference fingerprint sample.
-6. Return to Profiler and confirm the evidence updates.
+4. Inspect the inferred label, confidence, classification basis, associated AP, and retained signal history.
+5. Open **Session → Settings** to enroll the client or AP in My Network.
+6. Return to Profiler to check the enrollment label. Inspect the IE order, vendor elements, and band-invariant cohort in a retained fingerprint, then use **Save as sample** to add a reference classification.
 
 Record the inferred label and confidence, signal samples, fingerprint hashes, and enrollment/scope state.
 
-Limits: labels are inferences, not verified identities. A locally administered address is not proof of rotation, and Profiler does not correlate randomized addresses.
+Each address retains its own device row. When locally administered addresses share matching station capability IEs and either compatible sequence/timing, probe-to-association SSID match (`PROBE_TO_ASSOC`), or matching multi-SSID preferred-network profiles (`PNL_PROFILE`), Profiler can report a probabilistic correlation with a heuristic confidence score. A shared WPS Enrollee UUID provides independent correlation evidence (`WPS_UUID_E`).
 
 ### 3.7 Tracker — AP changes
 
@@ -195,19 +194,19 @@ Limits: labels are inferences, not verified identities. A locally administered a
 
 Record each transition, method, and time.
 
-Limits: silence alone is not a disconnect. A transition needs explicit association, reassociation, or data evidence.
+Limits: silence alone is not a disconnect. When a client rotates a locally administered MAC unambiguously between related APs with matching capability IEs within the roam window (default 30s), Tracker may label the change `Inferred MAC rotation (heuristic)` instead of silent disappearance.
 
 ### 3.8 Lookout — channel observations
 
-**Purpose:** compare scanner/channel occupancy and identify channels without valid samples.
+**Purpose:** compare channel occupancy, spectrum telemetry, and recent activity anomalies.
 
-1. Start adaptive capture, or fixed watch and tune channels manually.
+1. Start adaptive capture. If capture is running in Watch, open Lookout and choose **Enable adaptive scan**.
 2. Generate traffic on channels 1, 6, and 11 at different times.
 3. Open **Movement & activity → Lookout**.
-4. Compare the occupancy estimates, sample counts, bands, and channels with no valid samples.
-5. Switch between adaptive and fixed watch in **Capture health** to see the coverage tradeoff.
+4. Compare scanner occupancy and sample counts by frequency. Open a channel's evidence to inspect dwell, airtime, noise, AP-reported QBSS load, and any fitted period.
+5. Check the active receiver marker and any coupled or anomalous channels. Cleared anomalies carry a **Recent** label for up to 15 seconds.
 
-Record the occupancy estimate, sample count, channel, band, and capture mode.
+Record the occupancy estimate, sample count, frequency, dwell, and available airtime and QBSS estimates.
 
 Limits: one adapter cannot observe every channel continuously. Channel hopping trades reception time for coverage; a low sample count is not proof of an idle channel.
 
@@ -249,10 +248,12 @@ Use the owned client. The result's `success` means the process ran; it is not pr
 
 The AP must be hidden, have an observed client, and the client must reconnect for a possible reveal. If the name is already known, the backend rejects the operation.
 
+An AP stays marked as historically hidden in Whistleblower after its name is revealed, but it is removed from the uncloak picker. Ops and Sniper pickers show fresh advertised APs; older and data-inferred APs remain in passive reports. Measured frequency distinguishes identically numbered channels across bands.
+
 ### 4.4 Handshake capture and PSK verification
 
 1. Open Ops → **Handshake capture**.
-2. Select the client target or observed AP; choose the monitor interface.
+2. Select the client target or observed AP; choose the monitor interface. If the selected client uses a locally administered MAC, **Accept rotated client MAC on reconnect** is enabled automatically (keep unchecked to pin strictly to the selected MAC).
 3. Start. The status waits for the target AP beacon.
 4. When the stage says **Ready — reconnect your device now**, disconnect and reconnect the test client.
 5. Wait for `COMPLETE` (or `PARTIAL`/`NO_EAPOL`/`TARGET_NOT_SEEN`) and note the capture path and messages.
@@ -260,17 +261,22 @@ The AP must be hidden, have an observed client, and the client must reconnect fo
 7. Choose a wordlist and click **Verify PSK**.
 8. Record the outcome, capture path, verification result, and whether the key was found.
 
-Captures are written under `/tmp/ewave-captures/` with restricted permissions. Stop the operation if it is still running.
+Captures are written in a separate private `/tmp/ewave-capture-…/` directory for each run (or under the configured Java temporary directory). Stop the operation if it is still running.
+
+Verification selects a single AP BSSID and runs without an interactive network-selection prompt. A capture made in the current session retains its target; provide **AP BSSID** for an imported capture. Output is bounded at 1 MiB, while the final key or dictionary-miss result is parsed independently.
 
 ### 4.5 PMKID capture
 
 1. Open Ops → **PMKID capture**.
 2. Select the monitor interface, wordlist, and duration (1–300 seconds).
-3. Start and wait for the capture/conversion/verification result.
-4. Record whether a PMKID was captured, whether the wordlist found a key, and the capture/hash paths.
-5. Stop and review.
+3. Optionally pick an observed AP (or enter a direct lab BSSID and optional frequency MHz) to scope capture with an `hcxdumptool` BPF filter and post-conversion `.22000` filtering, or leave **All nearby APs (unscoped)** selected on an isolated lab channel.
+4. Start and wait for the capture/conversion/verification result.
+5. Record whether a PMKID was captured, whether the wordlist found a key, and the private capture/hash paths.
+6. Stop and review.
 
-Current limitation: the PMKID workflow does not yet filter by target BSSID; it captures what `hcxdumptool` sees. Use an isolated lab channel, keep the duration short, and do not run it where other networks are in range.
+Each run writes its capture artifacts into a new private temporary subdirectory. If no AP target or frequency is selected, `hcxdumptool` captures nearby traffic across its scan list, so still keep unscoped captures isolated and brief.
+
+When conversion produces several valid PMKID hashes, verification tries successive hashes until one key matches or every hash misses. All attempts share a five-minute verification deadline; the returned vulnerability result means at least one captured PMKID matched.
 
 ### 4.6 Beacon flood
 
@@ -284,7 +290,9 @@ Keep the rate low and the duration short. Use only on the owned lab channel.
 
 ### 4.7 Evil twin
 
-The backend starts `hostapd`, `dnsmasq`, and the Python portal helper, but it does **not** create the AP interface or assign its IP address. `wlo1ap` in the form is only an example name. If the interface does not exist, hostapd logs `Interface wlo1ap wasn't started`, `No such device`, and dnsmasq logs `unknown interface wlo1ap`.
+The backend starts `hostapd`, `dnsmasq`, and the Python portal helper. It does **not** create the AP interface for you (`wlo1ap` in the form is only an example name). By default it also leaves interface IPv4 addressing unchanged (`configureAddress: false`); check the AP interface IPv4 readiness note under the field, assign `10.0.0.1/24` manually beforehand, or enable **Assign 10.0.0.1/24 to AP interface while running** so the backend configures `10.0.0.1/24` via `sudo ip` and removes it on stop. If the interface does not exist, hostapd logs `Interface wlo1ap wasn't started`, `No such device`, and dnsmasq logs `unknown interface wlo1ap`.
+
+The current open-AP configuration supports 2.4/5 GHz channels only. Channel 14 uses DSSS mode; unsupported 6 GHz channel numbers are rejected before starting helpers. A 6 GHz AP requires configuration and authentication support beyond this form.
 
 Start by listing the real interfaces and checking AP support:
 
@@ -309,7 +317,7 @@ sudo ip link set wlp5s0f3u1 up
 sudo ip addr replace 10.0.0.1/24 dev wlp5s0f3u1
 ```
 
-Then open Ops → **Evil twin** and enter the **actual interface name** (`wlp5s0f3u1` in this example), the SSID, channel, and portal port. The backend writes `/tmp/ewave-evil-twin/hostapd.conf`, `dnsmasq.conf`, and `portal_server.py`, then starts the three helpers.
+Then open Ops → **Evil twin** and enter the **actual interface name** (`wlp5s0f3u1` in this example), the SSID, channel, and portal port. The backend writes `hostapd.conf`, `dnsmasq.conf`, and `portal_server.py` in a private temporary directory for this run, then starts the three helpers. Ops status reports the directory as `workDir`.
 
 Connect the test client to the open SSID. `dnsmasq` serves `10.0.0.10–10.0.0.100` with `10.0.0.1` as gateway/DNS. Open `http://10.0.0.1/` from the client. The current helper returns a JSON service status on `GET`; there is no bundled HTML form. The `POST /submit` endpoint records form fields. For a lab exercise, submit a test form:
 
@@ -317,7 +325,7 @@ Connect the test client to the open SSID. `dnsmasq` serves `10.0.0.10–10.0.0.1
 curl -X POST -d 'username=lab-user&password=lab-pass' http://10.0.0.1/submit
 ```
 
-The response is `{"status":"recorded"}`. Watch the Ops credentials table or `/tmp/ewave-portal-creds.txt` for the recorded test values.
+The response is `{"status":"recorded"}`. Watch the Ops credentials table or the run's `credentials.tsv` for the recorded test values. Ops status reports its path as `credentialsFile`. Java creates this log with mode `0600`, and the elevated portal preserves its owner so the backend can read it when running as a normal user.
 
 Stop the operation. For the single-radio flow, restore the interface to monitor mode and restart capture:
 
@@ -330,11 +338,11 @@ sudo ip link set wlp5s0f3u1 up
 
 If hostapd still reports `Driver does not support authentication/association or connect commands` after `iw dev` shows the interface in managed mode, that driver/interface cannot provide a usable AP. Use the built-in radio's AP interface or a second adapter instead.
 
-Limits: the generated `hostapd` configuration is an open AP. A matching SSID does not make a client join automatically. The backend does not set the `10.0.0.1` address for you, and the bundled portal has no HTML page. Use dummy credentials only.
+Limits: the generated `hostapd` configuration is an open AP. A matching SSID does not make a client join automatically. The `10.0.0.1/24` address is only assigned when **Assign 10.0.0.1/24 to AP interface while running** is opted in (or configured manually), and the bundled portal serves JSON only without an HTML page. Use dummy credentials only.
 
 ### 4.8 Stop and cleanup
 
-1. Click **Stop operation** if the operation is still running.
+1. Click **Stop operation** if the operation is still running (or review **Recent operations** below the output pane).
 2. Stop passive capture in **Session → Capture health** if you are finished.
 3. Exit `./ewave` with `Ctrl+C`.
 4. Confirm the adapter returned to managed mode:
@@ -349,6 +357,8 @@ Limits: the generated `hostapd` configuration is an open AP. A matching SSID doe
    ```sh
    ./ewave restore IFACE
    ```
+
+While Ops has paused passive capture, **Stop capture** cancels its automatic resume. The active operation keeps its slot and radio lease until it finishes or you stop it separately.
 
 ## 5. Replay and evidence
 
@@ -382,7 +392,7 @@ Limits: the generated `hostapd` configuration is an open AP. A matching SSID doe
 | Ops shows missing tools | Install the package from the readiness strip; click refresh |
 | Operation returns 409 | Another operation owns the slot/radio; click **Stop operation** |
 | No Ops targets | Connect the test client, generate traffic, wait for passive evidence |
-| No hidden-name reveal | Hidden AP must have an associated client; capture the revealing frame |
+| No hidden-name reveal | Check for association evidence, a directed probe for the AP, an OWE transition element, or a matching RNR Short-SSID |
 | No handshake | Reconnect the client while the status is **Ready**; check channel and MFP |
 | PMKID empty | Adapter/tool compatibility, duration, nearby test AP; inspect output |
 | Beacon not visible | Correct monitor interface/channel; rate; independent scanner |

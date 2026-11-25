@@ -1,7 +1,9 @@
 package ewave.capture;
 
 import ewave.core.AdaptiveScanner;
+import ewave.decoder.Dot11ChannelSwitchDecoder;
 import ewave.decoder.Dot11Frame;
+import ewave.decoder.Dot11FrameDecoder;
 import ewave.decoder.Dot11InformationElements;
 import ewave.fixtures.CompletedProcess;
 import ewave.fixtures.ProbeFrames;
@@ -15,8 +17,11 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+import java.util.ArrayList;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BooleanSupplier;
@@ -28,6 +33,270 @@ class SniperControllerTest {
     private static final String AP1 = "00:11:22:33:44:55";
     private static final String AP2 = "00:11:22:33:44:66";
     private static final int PCAP_HEADER_BYTES = 24;
+    private static final String HOTSPOT = "02:11:22:33:44:55";
+    private static final String ROTATED = "02:11:22:33:44:66";
+    private static final String THIRD_AP = "02:11:22:33:44:77";
+    private static final byte[] LAB_SSID = "Test AP".getBytes(StandardCharsets.UTF_8);
+
+    @Test void followsCsaAtTheBeaconCountdownAndVerifiesTheTargetAfterTuning() {
+        var clock = new Timeline();
+        var sniper = clock.locked(AP1);
+        clock.observe(sniper, AP1, 2412, 1, 100, ie(60, "00830503"));
+        assertEquals(5975, sniper.snapshot().pendingChannelSwitch().frequencyMhz());
+        assertEquals(2412, sniper.desiredFrequencyMhz());
+        clock.advance(205);
+        assertEquals(5975, sniper.desiredFrequencyMhz());
+        assertEquals(2412, sniper.snapshot().lockedFrequencyMhz());
+        clock.observe(sniper, AP1, 5975, 1, 300);
+        assertTrue(sniper.snapshot().moves().isEmpty());
+        sniper.tuneConfirmed(5, 5975, clock.wall.get());
+        clock.advance(50);
+        clock.observe(sniper, AP1, 5975, 1, 500);
+        var run = sniper.snapshot();
+        assertEquals(5975, run.lockedFrequencyMhz());
+        assertNull(run.pendingChannelSwitch());
+        assertEquals(SniperController.MoveTrigger.CSA, run.moves().getFirst().trigger());
+        assertEquals(clock.wall.get() - 50, run.moves().getFirst().tunedAtMs());
+    }
+
+    @Test void rollsBackUnverifiedCsaAfterTheVerificationWindow() {
+        var clock = new Timeline();
+        var sniper = clock.locked(AP1);
+        clock.observe(sniper, AP1, 2412, 17, 100, ie(37, "000601"));
+        assertEquals(2437, sniper.desiredFrequencyMhz());
+        sniper.tuneConfirmed(6, 2437, clock.wall.get());
+        clock.advance(599);
+        clock.observe(sniper, AP2, 2437, 17, 1000);
+        clock.observe(sniper, AP1, 2437, 1, 1000);
+        assertFalse(sniper.tick());
+        assertEquals(2437, sniper.desiredFrequencyMhz());
+        clock.advance(1);
+        assertFalse(sniper.tick());
+        var run = sniper.snapshot();
+        assertEquals(2412, sniper.desiredFrequencyMhz());
+        assertEquals(1, run.decoyFramesIgnored());
+        assertEquals(1, run.spoofWarnings());
+        assertNull(run.pendingChannelSwitch());
+        assertTrue(run.moves().isEmpty());
+    }
+
+    @Test void keepsTheLockWithFromDsAndApManagementHeartbeats() {
+        var clock = new Timeline();
+        var sniper = clock.locked(AP1);
+        clock.advance(2900);
+        sniper.observeTransmitterActivity(clock.traffic(2, 0, 2, AP1, AP2, 2412));
+        assertEquals(clock.wall.get(), sniper.snapshot().lastHeard().timestamp());
+        clock.advance(2900);
+        assertFalse(sniper.tick());
+        sniper.observeTransmitterActivity(clock.traffic(0, 13, 0, AP1, AP1, 2412));
+        assertEquals(clock.wall.get(), sniper.snapshot().lastHeard().timestamp());
+
+        clock.advance(3001);
+        sniper.observeTransmitterActivity(clock.traffic(2, 0, 1, AP1, AP1, 2412));
+        sniper.observeTransmitterActivity(clock.traffic(2, 0, 2, AP2, AP1, 2412));
+        sniper.observeTransmitterActivity(clock.traffic(0, 13, 0, AP1, AP2, 2412));
+        sniper.observeTransmitterActivity(clock.traffic(2, 0, 2, AP1, AP1, 2437));
+        assertTrue(sniper.tick());
+        assertEquals(1, sniper.snapshot().lastHeard().channel());
+        assertEquals(2412, sniper.snapshot().lockedFrequencyMhz());
+    }
+
+    @Test void rejectsOpenDecoysEvenAfterSilenceButAllowsAProtectedApToRestartItsTsf() {
+        var clock = new Timeline();
+        var sniper = clock.locked(AP1);
+        clock.observe(sniper, AP1, 2412, 1, 1_100_000, ie(48, ""));
+        clock.advance(100);
+        clock.observe(sniper, AP1, 2412, 1, 1_200_000);
+        assertEquals(1, sniper.snapshot().decoyFramesIgnored());
+        assertEquals(clock.wall.get() - 100, sniper.snapshot().lastHeard().timestamp());
+        clock.advance(3000);
+        assertTrue(sniper.tick());
+        clock.observe(sniper, AP1, 2437, 1, 10);
+        assertEquals(SniperController.State.LOST_SEARCHING, sniper.state());
+        clock.observe(sniper, AP1, 2437, 17, 20);
+        assertEquals(SniperController.State.LOCKED, sniper.state());
+        assertEquals(2, sniper.snapshot().decoyFramesIgnored());
+        assertEquals(2437, sniper.desiredFrequencyMhz());
+        assertEquals(SniperController.MoveTrigger.SILENCE_SWEEP, sniper.snapshot().moves().getFirst().trigger());
+    }
+
+    @Test void requiresPlausibleTsfProgressionForAnUnannouncedChangeDuringARecentLock() {
+        var clock = new Timeline();
+        var sniper = clock.locked(AP1);
+        clock.observe(sniper, AP1, 2412, 17, 1_000_000);
+        clock.advance(100);
+        clock.observe(sniper, AP1, 2437, 17, 10);
+        clock.observe(sniper, AP1, 2437, 17, 30_000_000);
+        assertEquals(2, sniper.snapshot().decoyFramesIgnored());
+        assertEquals(2412, sniper.desiredFrequencyMhz());
+        clock.observe(sniper, AP1, 2437, 17, 1_100_000);
+        assertEquals(2437, sniper.desiredFrequencyMhz());
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {1, 2})
+    void onlyRotatesALocalBssidAfterAFullPassAndSurfacesAmbiguity(int matches) {
+        var clock = new Timeline();
+        var sniper = clock.locked(HOTSPOT);
+        clock.observe(sniper, HOTSPOT, 2412, 17, 100, ie(127, "08"));
+        clock.advance(3001);
+        assertTrue(sniper.tick());
+        sniper.sweepFrequencyFinished(2412, true);
+        clock.observe(sniper, ROTATED, 2437, 17, 100, ie(127, "08"));
+        sniper.sweepFrequencyFinished(2437, true);
+        if (matches == 2) clock.observe(sniper, THIRD_AP, 5975, 17, 100, ie(127, "08"));
+        assertEquals(SniperController.State.LOST_SEARCHING, sniper.state());
+        sniper.sweepFrequencyFinished(5975, true);
+        if (matches == 2) {
+            assertEquals(SniperController.State.SELECTING, sniper.state());
+            assertEquals(2, sniper.snapshot().candidates().size());
+            assertFalse(sniper.snapshot().bssidRotated());
+            sniper.selectCandidate("token-" + ROTATED);
+        }
+        var run = sniper.snapshot();
+        assertEquals(SniperController.State.LOCKED, run.state());
+        assertTrue(run.bssidRotated());
+        assertEquals("token-" + ROTATED, run.lockedApId());
+        assertEquals(SniperController.MoveTrigger.HEURISTIC_BSSID_ROTATION, run.moves().getFirst().trigger());
+    }
+
+    @Test void keepsAGloballyAdministeredBssidPinned() {
+        var clock = new Timeline();
+        var sniper = clock.locked(AP1);
+        clock.advance(3001);
+        assertTrue(sniper.tick());
+        clock.observe(sniper, ROTATED, 2437, 1, 100);
+        for (int frequency : Timeline.FREQUENCIES) sniper.sweepFrequencyFinished(frequency, true);
+        assertEquals(SniperController.State.LOST_SEARCHING, sniper.state());
+        assertTrue(sniper.snapshot().candidates().isEmpty());
+    }
+
+    @Test void rotationRequiresCompatibleEvidenceAndConfirmedCoverage() {
+        var clock = new Timeline();
+        var sniper = clock.locked(HOTSPOT);
+        clock.observe(sniper, HOTSPOT, 2412, 17, 100, ie(127, "08"));
+        clock.advance(3001);
+        assertTrue(sniper.tick());
+        clock.observe(sniper, ROTATED, 2437, 17, 100, ie(127, "10"));
+        clock.observe(sniper, THIRD_AP, 2437, 1, 100, ie(127, "08"));
+        assertTrue(sniper.snapshot().candidates().isEmpty());
+        clock.observe(sniper, ROTATED, 2437, 17, 200, ie(127, "08"));
+        sniper.sweepFrequencyFinished(2412, false);
+        sniper.sweepFrequencyFinished(2437, true);
+        sniper.sweepFrequencyFinished(5975, true);
+        assertEquals(SniperController.State.LOST_SEARCHING, sniper.state());
+        clock.observe(sniper, ROTATED, 2437, 17, 300, ie(127, "08"));
+        clock.observe(sniper, HOTSPOT, 2412, 17, 25, ie(127, "08"));
+        assertFalse(sniper.snapshot().bssidRotated());
+        assertEquals("token-" + HOTSPOT, sniper.snapshot().lockedApId());
+    }
+
+    @Test void originalApTrafficDuringThePassPreventsHeuristicRotation() {
+        var clock = new Timeline();
+        var sniper = clock.locked(HOTSPOT);
+        clock.advance(3001);
+        assertTrue(sniper.tick());
+        sniper.observeTransmitterActivity(clock.traffic(2, 0, 2, HOTSPOT, AP2, 2412));
+        clock.observe(sniper, ROTATED, 2437, 1, 50);
+        for (int frequency : Timeline.FREQUENCIES) sniper.sweepFrequencyFinished(frequency, true);
+        assertEquals(SniperController.State.LOST_SEARCHING, sniper.state());
+        assertFalse(sniper.snapshot().bssidRotated());
+
+        clock.observe(sniper, ROTATED, 2437, 1, 100);
+        for (int frequency : Timeline.FREQUENCIES) sniper.sweepFrequencyFinished(frequency, true);
+        assertTrue(sniper.snapshot().bssidRotated());
+    }
+
+    @Test void learnsSupportedShortSsidHintsFromOtherAdvertisersDuringSearch() {
+        var clock = new Timeline();
+        var sniper = clock.controller();
+        sniper.startBySsid(LAB_SSID, "Test AP");
+        var report = ByteBuffer.allocate(9).order(ByteOrder.LITTLE_ENDIAN);
+        report.put(new byte[]{0, 5, (byte) 131, 5, 0});
+        report.putInt(Dot11ChannelSwitchDecoder.shortSsidCrc32(LAB_SSID));
+        sniper.observeFrame(clock.advertisement(AP2, 2412, 1, 10,
+                new Dot11InformationElements.Element(201, report.array())), "other", AP2, new byte[]{1}, "Other");
+        assertEquals(Set.of(5975), sniper.prioritySweepFrequencies());
+        assertEquals(SniperController.State.SEARCHING, sniper.state());
+        assertTrue(sniper.snapshot().candidates().isEmpty());
+    }
+
+    private static Dot11InformationElements.Element ie(int id, String hex) {
+        return new Dot11InformationElements.Element(id, HexFormat.of().parseHex(hex));
+    }
+
+    private static final class Timeline {
+        static final List<Integer> FREQUENCIES = List.of(2412, 2437, 5975);
+        final AtomicLong mono = new AtomicLong();
+        final AtomicLong wall = new AtomicLong(100_000);
+
+        SniperController controller() {
+            var sniper = new SniperController(mono::get, wall::get);
+            sniper.useSweepChannels(FREQUENCIES.stream().map(freq ->
+                    new RadioStatus.Channel(Dot11FrameDecoder.channel(freq), freq, false, false)).toList());
+            return sniper;
+        }
+
+        SniperController locked(String bssid) {
+            var sniper = controller();
+            sniper.startByAp("token-" + bssid, bssid, LAB_SSID, "Test AP", 1, 2412, 100, wall.get());
+            return sniper;
+        }
+
+        void advance(long millis) {
+            wall.addAndGet(millis);
+            mono.addAndGet(TimeUnit.MILLISECONDS.toNanos(millis));
+        }
+
+        void observe(SniperController sniper, String bssid, int frequency, int capability, long tsf,
+                     Dot11InformationElements.Element... extra) {
+            sniper.observeFrame(advertisement(bssid, frequency, capability, tsf, extra),
+                    "token-" + bssid, bssid, LAB_SSID, "Test AP");
+        }
+
+        Dot11Frame advertisement(String bssid, int frequency, int capability, long tsf,
+                                 Dot11InformationElements.Element... extra) {
+            var elements = new ArrayList<>(List.of(extra));
+            elements.add(new Dot11InformationElements.Element(0, LAB_SSID));
+            return new Dot11Frame(0, 8, 0, 0, -1, "ff:ff:ff:ff:ff:ff", bssid, bssid, null,
+                    wall.get(), frequency, -40, null, 48, new Dot11InformationElements(elements), tsf,
+                    100, capability, null, 0, 0);
+        }
+
+        Dot11Frame traffic(int type, int subtype, int ds, String transmitter, String thirdAddress, int frequency) {
+            return new Dot11Frame(type, subtype, ds, 0, -1, THIRD_AP, transmitter, thirdAddress, null,
+                    wall.get(), frequency, -40, null, 48, null, null, 0, 0, null, 0, 0);
+        }
+    }
+
+    @Test void completesTheFrequencyPlanAndRecordsReacquisitionAcrossMatchingChannelNumbers() {
+        var mono = new AtomicLong(0);
+        var wall = new AtomicLong(10_000);
+        var sniper = new SniperController(mono::get, wall::get);
+        sniper.useSweepChannels(RadioStatus.parseChannels(RadioStatusTest.PHY_INFO).orElseThrow());
+        byte[] ssid = { 'A', 'P' };
+        sniper.startBySsid(ssid, "AP");
+        sniper.observeFrame(beacon(AP1, ssid, 1, 5955, 100, wall.get()), "ap", AP1, ssid, "AP");
+        sniper.sweepFrequencyFinished(2412, true);
+        sniper.sweepFrequencyFinished(5260, false);
+        assertEquals(SniperController.State.SEARCHING, sniper.state());
+        assertEquals(1, sniper.snapshot().channelsSwept());
+        assertEquals(1, sniper.snapshot().unavailableSweepChannels());
+        sniper.sweepFrequencyFinished(5955, true);
+        assertEquals(2, sniper.snapshot().channelsSwept());
+        assertEquals(5955, sniper.desiredFrequencyMhz());
+
+        mono.set(TimeUnit.SECONDS.toNanos(4));
+        wall.set(14_000);
+        assertTrue(sniper.tick());
+        sniper.tuneConfirmed(1, 5955, 14_020);
+        sniper.tuneConfirmed(1, 2412, 14_040);
+        sniper.observeFrame(beacon(AP1, ssid, 1, 2412, 100, 14_042), "ap", AP1, ssid, "AP");
+        var move = sniper.snapshot().moves().getFirst();
+        assertEquals(5955, move.fromFrequencyMhz());
+        assertEquals(2412, move.toFrequencyMhz());
+        assertEquals(14_040L, move.tunedAtMs());
+    }
 
     @Test void completesFullInitialSweepBeforeAutoLockingSoleMatchAndPromptsWhenMultipleMatch() {
         var mono = new AtomicLong(1_000_000_000L);

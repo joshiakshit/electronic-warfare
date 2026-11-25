@@ -36,7 +36,7 @@ class CaptureHealthTest {
         var health = new CaptureHealth();
         health.updateRadio(radio);
         health.record(0x0040, true, null, 1234, 1250, 1000);
-        health.record(0x00c0, true, null, 1234, 1250, 1000);
+        health.record(0x00e0, true, null, 1234, 1250, 1000); // Unsupported Action No Ack frame.
         health.record(0x0008, false, null, 1235, 1255, 1001);
         var fresh = health.snapshot("passive-rf", "wlo1", true, null, null, null, 1300, 2000);
         assertEquals(45L, fresh.sinceLastFrameMs());

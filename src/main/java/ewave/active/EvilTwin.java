@@ -12,6 +12,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Pattern;
@@ -21,8 +22,6 @@ public final class EvilTwin {
     private static final Pattern INTERFACE = Pattern.compile("[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,14}");
     private static final int OUTPUT_LIMIT = 1_048_576;
     private static final int CREDENTIAL_LIMIT = 200;
-    public static final String DEFAULT_WORK_DIR = "/tmp/ewave-evil-twin/";
-    public static final String DEFAULT_CREDENTIALS_FILE = "/tmp/ewave-portal-creds.txt";
 
     @FunctionalInterface public interface ProcessStarter {
         Process start(ProcessBuilder builder) throws IOException;
@@ -36,6 +35,7 @@ public final class EvilTwin {
     private final String ssid;
     private final int channel;
     private final int portalPort;
+    private final boolean configureAddress;
     private final Path workDir;
     private final Path credentialsFile;
     private final ProcessStarter starter;
@@ -48,29 +48,49 @@ public final class EvilTwin {
     private volatile Process portal;
     private volatile boolean running;
     private volatile boolean terminated;
+    private boolean addressAssigned;
     private volatile String stage = "Ready";
     private volatile String error;
     private volatile IOException readFailure;
     private boolean truncated;
 
     public EvilTwin(String apInterface, String ssid, int channel, int portalPort) {
-        this(apInterface, ssid, channel, portalPort, DEFAULT_WORK_DIR, DEFAULT_CREDENTIALS_FILE, ProcessBuilder::start);
+        this(apInterface, ssid, channel, portalPort, false);
+    }
+
+    public EvilTwin(String apInterface, String ssid, int channel, int portalPort, boolean configureAddress) {
+        this(apInterface, ssid, channel, portalPort, configureAddress,
+                Path.of(System.getProperty("java.io.tmpdir"), "ewave-evil-twin-" + UUID.randomUUID()));
+    }
+
+    private EvilTwin(String apInterface, String ssid, int channel, int portalPort, boolean configureAddress,
+                     Path directory) {
+        this(apInterface, ssid, channel, portalPort, configureAddress, directory.toString(),
+                directory.resolve("credentials.tsv").toString(), ProcessBuilder::start);
+    }
+
+    public EvilTwin(String apInterface, String ssid, int channel, int portalPort,
+                    String workDir, String credentialsFile, ProcessStarter starter) {
+        this(apInterface, ssid, channel, portalPort, false, workDir, credentialsFile, starter);
     }
 
     /** Process creation boundary and persistent paths for embedding and hardware-free tests. */
-    public EvilTwin(String apInterface, String ssid, int channel, int portalPort,
+    public EvilTwin(String apInterface, String ssid, int channel, int portalPort, boolean configureAddress,
                     String workDir, String credentialsFile, ProcessStarter starter) {
         if (apInterface == null || !INTERFACE.matcher(apInterface).matches())
             throw new IllegalArgumentException("interface must be a Linux interface name (1–15 letters, digits, _, . or -)");
         if (ssid == null || ssid.isBlank() || ssid.getBytes(StandardCharsets.UTF_8).length > 32
                 || ssid.indexOf('\n') >= 0 || ssid.indexOf('\r') >= 0)
             throw new IllegalArgumentException("ssid must be 1–32 UTF-8 bytes on one line");
-        if (channel < 1 || channel > 233) throw new IllegalArgumentException("channel must be an integer in 1–233");
+        if (!(channel >= 1 && channel <= 14 || channel >= 32 && channel <= 144 && channel % 4 == 0
+                || channel >= 149 && channel <= 177 && (channel - 149) % 4 == 0))
+            throw new IllegalArgumentException("Evil twin supports 2.4/5 GHz channels only; 6 GHz AP configuration is unavailable");
         if (portalPort < 1 || portalPort > 65_535) throw new IllegalArgumentException("portalPort must be between 1 and 65535");
         this.apInterface = apInterface;
         this.ssid = ssid;
         this.channel = channel;
         this.portalPort = portalPort;
+        this.configureAddress = configureAddress;
         this.workDir = Path.of(Objects.requireNonNull(workDir)).toAbsolutePath().normalize();
         this.credentialsFile = Path.of(Objects.requireNonNull(credentialsFile)).toAbsolutePath().normalize();
         this.starter = Objects.requireNonNull(starter);
@@ -79,19 +99,29 @@ public final class EvilTwin {
     public Status start() throws IOException {
         if (!used.compareAndSet(false, true)) throw new IllegalStateException("This evil twin has already been used");
         try {
-            Files.createDirectories(workDir);
-            setPermissions(workDir, "rwx------");
-            Files.createDirectories(credentialsFile.getParent());
-            try { Files.deleteIfExists(credentialsFile); }
-            catch (IOException ignored) {
-                // A root-owned log from an earlier run is truncated by the portal helper instead.
+            PrivateWorkspace.create(workDir);
+            PrivateWorkspace.requireDirectory(credentialsFile.getParent());
+            if (Files.exists(credentialsFile, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+                PrivateWorkspace.requireFile(credentialsFile);
+                Files.delete(credentialsFile);
             }
+            Files.createFile(credentialsFile,
+                    PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")));
             writeResources();
             writeHostapdConfig();
             writeDnsmasqConfig();
             synchronized (this) {
                 running = true;
                 error = null;
+            }
+            if (configureAddress) {
+                stage = "Configuring " + apInterface + " (10.0.0.1/24)…";
+                runSetupCommand(List.of("sudo", "ip", "link", "set", "dev", apInterface, "up"));
+                runSetupCommand(List.of("sudo", "ip", "addr", "replace", "10.0.0.1/24", "dev", apInterface));
+                synchronized (this) {
+                    if (terminated) throw new IOException("Evil twin was stopped while starting");
+                    addressAssigned = true;
+                }
             }
             stage = "Starting hostapd…";
             hostapd = launch(List.of("sudo", "hostapd", workDir.resolve("hostapd.conf").toString()));
@@ -112,7 +142,6 @@ public final class EvilTwin {
                 terminate();
                 return status();
             }
-            awaitCredentialsReset();
             Thread.ofVirtual().name("ewave-portal-credentials").start(this::tailCredentials);
             return status();
         } catch (IOException | RuntimeException failure) {
@@ -134,15 +163,21 @@ public final class EvilTwin {
                 credentialsFile.toString(), output());
     }
 
-    public synchronized void terminate() {
-        terminated = true;
-        running = false;
-        stage = "Stopped";
-        for (Process current : processes) forceStop(current);
-        processes.clear();
-        hostapd = null;
-        dnsmasq = null;
-        portal = null;
+    public void terminate() {
+        boolean releaseAddress;
+        synchronized (this) {
+            terminated = true;
+            running = false;
+            stage = "Stopped";
+            for (Process current : processes) forceStop(current);
+            processes.clear();
+            hostapd = null;
+            dnsmasq = null;
+            portal = null;
+            releaseAddress = addressAssigned;
+            addressAssigned = false;
+        }
+        if (releaseAddress) removeAssignedAddress();
     }
 
     private String portalUrl() {
@@ -161,7 +196,7 @@ public final class EvilTwin {
     }
 
     private void writeHostapdConfig() throws IOException {
-        String mode = channel <= 14 ? "g" : "a";
+        String mode = channel == 14 ? "b" : channel < 14 ? "g" : "a";
         Path path = workDir.resolve("hostapd.conf");
         Files.writeString(path, String.join("\n",
                 "interface=" + apInterface,
@@ -223,6 +258,7 @@ public final class EvilTwin {
                 return;
             }
             boolean unexpected;
+            boolean releaseAddress = false;
             synchronized (this) {
                 processes.remove(source);
                 unexpected = running && !terminated;
@@ -230,13 +266,69 @@ public final class EvilTwin {
                     error = name + " exited unexpectedly";
                     running = false;
                     stage = "Stopped";
+                    releaseAddress = addressAssigned;
+                    addressAssigned = false;
                 }
             }
             if (unexpected) {
                 for (Process current : new Process[]{hostapd, dnsmasq, portal})
                     if (current != null) forceStop(current);
+                if (releaseAddress) removeAssignedAddress();
             }
         });
+    }
+
+    private void runSetupCommand(List<String> command) throws IOException {
+        Process setup = starter.start(new ProcessBuilder(command).redirectErrorStream(true));
+        if (setup == null) throw new IOException("Setup command did not start: " + String.join(" ", command));
+        synchronized (this) {
+            if (terminated || !running) {
+                forceStop(setup);
+                throw new IOException("Evil twin was stopped while configuring " + apInterface);
+            }
+            processes.add(setup);
+        }
+        setup.getOutputStream().close();
+        var setupOutput = new HandshakeAnalyzer.Output(setup.getInputStream(), 65_536);
+        try {
+            if (!setup.waitFor(5, TimeUnit.SECONDS)) {
+                throw new IOException("Interface setup timed out: " + String.join(" ", command));
+            }
+            setupOutput.finish();
+            append(setupOutput.text());
+            if (setup.exitValue() != 0) {
+                throw new IOException("Interface setup failed (" + String.join(" ", command) + "): "
+                        + setupOutput.text().strip());
+            }
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new IOException("Interrupted while configuring " + apInterface, interrupted);
+        } finally {
+            forceStop(setup);
+            setupOutput.close();
+            synchronized (this) { processes.remove(setup); }
+        }
+    }
+
+    private void removeAssignedAddress() {
+        Process cleanup = null;
+        try {
+            cleanup = starter.start(new ProcessBuilder(
+                    "sudo", "ip", "addr", "del", "10.0.0.1/24", "dev", apInterface)
+                    .redirectErrorStream(true));
+            if (cleanup == null) return;
+            cleanup.getOutputStream().close();
+            try (var input = cleanup.getInputStream()) {
+                input.readNBytes(4096);
+            } catch (IOException ignored) { }
+            cleanup.waitFor(2, TimeUnit.SECONDS);
+        } catch (IOException ignored) {
+            // Best-effort cleanup of the lab IPv4 address.
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+        } finally {
+            if (cleanup != null) forceStop(cleanup);
+        }
     }
 
     private void drain(Process source) {
@@ -246,17 +338,6 @@ public final class EvilTwin {
             while ((size = input.read(buffer)) != -1) append(new String(buffer, 0, size));
         } catch (IOException failure) {
             readFailure = failure;
-        }
-    }
-
-    /** The portal helper truncates a root-owned log from an earlier run; do not replay its old lines. */
-    private void awaitCredentialsReset() {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
-        while (System.nanoTime() < deadline) {
-            try {
-                if (!Files.exists(credentialsFile) || Files.size(credentialsFile) == 0) return;
-            } catch (IOException ignored) { return; }
-            if (!sleep(50)) return;
         }
     }
 

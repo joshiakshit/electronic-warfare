@@ -25,6 +25,11 @@ public final class AdaptiveScanner {
         public static Config defaults(int bands, int capacity, long seed) {
             return new Config(bands,capacity,48,6,1,4,200,.9,.01,.3,.03,1,seed);
         }
+
+        public Config withBandCount(int count) {
+            return new Config(count, capacity, refitInterval, minHits, smoothing, priorStrength, maxPeriod,
+                    pd, pfa, surveyWeight, surveyDuty, optimism, seed);
+        }
     }
     public record AnomalyFlag(int channel, double deviation, Instant detectedAt, String reason) {
         public long durationMillis(Instant timestamp) {
@@ -96,6 +101,14 @@ public final class AdaptiveScanner {
         Arrays.fill(observationsSinceConfidence, 0);
     }
     public Config config() { return config; }
+
+    /** The live flag for a zero-based scanner slot, without computing a full posterior. */
+    public AnomalyFlag activeAnomaly(int band) { return anomalyDetectors[band].active(); }
+
+    /** Uses one scanner slot per receiver frequency while preserving the model configuration. */
+    public AdaptiveScanner forBandCount(int count) {
+        return count == config.bands() ? this : new AdaptiveScanner(config.withBandCount(count), anomalyHistorySize, clock);
+    }
     public void observe(int band, long tick, boolean detection) { observe(band,tick,detection,true); }
     /** Unavailable measurements advance feedback chronology but never become negative detections. */
     public void observe(int band, long tick, boolean detection, boolean valid) {
@@ -138,7 +151,7 @@ public final class AdaptiveScanner {
             scores[band] = model.score(band,tick); periods[band] = model.period(band);
             double millis = periods[band] * tickMillis;
             fingerprints.add(new Fingerprint(PeriodFingerprinter.hint(periods[band], millis), millis, fitConfidence[band]));
-            AnomalyFlag flag = anomalyDetectors[band].active();
+            AnomalyFlag flag = activeAnomaly(band);
             if (flag != null) anomalies.put(flag.channel(), flag);
         }
         return new Snapshot(tick,means,spreads,scores,periods,model.counts(),model.coupledPeriod(),model.members(),

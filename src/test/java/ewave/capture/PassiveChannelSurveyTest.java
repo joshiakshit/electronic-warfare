@@ -2,6 +2,8 @@ package ewave.capture;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -43,5 +45,18 @@ class PassiveChannelSurveyTest {
         assertEquals(5, survey.channel(ms(280)));
         survey.tuneFinished(ms(305), 5, true, ms(25));
         assertEquals(6, survey.channel(ms(405)));
+    }
+
+    @Test void busySixGhzChannelOneDoesNotExtendTwoPointFourGhzChannelOne() {
+        var survey = new PassiveChannelSurvey(List.of(2412, 5260, 5955), 1200);
+        survey.tuneFinished(0, 2412, true, 0);
+        survey.frame(ms(90), 5955);
+        assertEquals(5260, survey.channel(ms(100)));
+        survey.tuneFinished(ms(110), 5260, false, 0);
+        assertEquals(5955, survey.channel(ms(110)));
+        survey.tuneFinished(ms(120), 5955, true, 0);
+        survey.frame(ms(200), 5955);
+        assertEquals(5955, survey.channel(ms(399)));
+        assertEquals(2412, survey.channel(ms(400)));
     }
 }

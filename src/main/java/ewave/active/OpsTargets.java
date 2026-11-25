@@ -22,7 +22,7 @@ public final class OpsTargets {
     public static Resolved resolve(String targetId, String apId, String apBssid, String clientMac,
                                    List<PassiveWifiSession.EvidencedTarget> targets,
                                    List<TopologyBuilder.AccessPoint> accessPoints,
-                                   Function<String, String> observedBssid,
+                                   Function<String, PassiveWifiSession.ObservedApDetails> observedAp,
                                    List<WifiAccessPoints.AccessPoint> cachedAccessPoints,
                                    boolean clientRequired) {
         String wantedTarget = text(targetId);
@@ -32,7 +32,7 @@ public final class OpsTargets {
         List<PassiveWifiSession.EvidencedTarget> evidence = targets == null ? List.of() : targets;
         List<TopologyBuilder.AccessPoint> observed = accessPoints == null ? List.of() : accessPoints;
         List<WifiAccessPoints.AccessPoint> cached = cachedAccessPoints == null ? List.of() : cachedAccessPoints;
-        Function<String, String> lookup = observedBssid == null ? ignored -> null : observedBssid;
+        Function<String, PassiveWifiSession.ObservedApDetails> lookup = observedAp == null ? ignored -> null : observedAp;
 
         if (wantedTarget != null) {
             var match = evidence.stream().filter(target -> wantedTarget.equals(target.id())).findFirst()
@@ -49,37 +49,38 @@ public final class OpsTargets {
                     .filter(candidate -> wantedAp.equals(candidate.bssid()))
                     .findFirst()
                     .orElseGet(() -> observed.stream().filter(candidate -> {
-                        String real = lookup.apply(candidate.bssid());
-                        return real != null && real.equalsIgnoreCase(wantedAp);
+                        var details = lookup.apply(candidate.bssid());
+                        return details != null && details.bssid().equalsIgnoreCase(wantedAp);
                     }).findFirst().orElse(null));
             if (ap == null) throw new IllegalArgumentException("Access point is not in the current capture");
-            String real = lookup.apply(ap.bssid());
-            if (real == null && MAC.matcher(wantedAp).matches()) real = wantedAp;
+            var details = lookup.apply(ap.bssid());
+            String real = details == null ? null : details.bssid();
             if (real == null) throw new IllegalArgumentException("Access point address is no longer available");
             requireEvidencedClient(evidence, real, wantedClient);
-            return finish(null, ap.bssid(), real, wantedClient, ap.ssid(), ap.channel(),
-                    ap.channel() > 0 ? HandshakeAnalyzer.frequencyMhz(ap.channel()) : 0, clientRequired);
+            return finish(null, ap.bssid(), real, wantedClient, ap.ssid(), details.channel(),
+                    details.frequencyMhz(), clientRequired);
         }
 
         if (wantedBssid != null) {
             if (!MAC.matcher(wantedBssid).matches())
                 throw new IllegalArgumentException("apBssid must be a MAC address, an apId token, or a targetId");
+            var observedMatch = observed.stream().filter(candidate -> {
+                var details = lookup.apply(candidate.bssid());
+                return details != null && details.bssid().equalsIgnoreCase(wantedBssid);
+            }).findFirst();
+            if (observedMatch.isPresent()) {
+                var ap = observedMatch.get();
+                var details = lookup.apply(ap.bssid());
+                if (details == null) throw new IllegalArgumentException("Access point has expired. Refresh the AP list.");
+                requireEvidencedClient(evidence, wantedBssid, wantedClient);
+                return finish(null, ap.bssid(), wantedBssid, wantedClient, ap.ssid(), details.channel(),
+                        details.frequencyMhz(), clientRequired);
+            }
             var cachedMatch = cached.stream().filter(candidate -> candidate.bssid().equalsIgnoreCase(wantedBssid))
                     .findFirst();
             if (cachedMatch.isPresent()) {
                 var ap = cachedMatch.get();
-                return finish(null, null, ap.bssid(), wantedClient, ap.ssid(), ap.channel(),
-                        ap.frequencyMhz(), clientRequired);
-            }
-            var observedMatch = observed.stream().filter(candidate -> {
-                String real = lookup.apply(candidate.bssid());
-                return real != null && real.equalsIgnoreCase(wantedBssid);
-            }).findFirst();
-            if (observedMatch.isPresent()) {
-                var ap = observedMatch.get();
-                requireEvidencedClient(evidence, wantedBssid, wantedClient);
-                return finish(null, ap.bssid(), wantedBssid, wantedClient, ap.ssid(), ap.channel(),
-                        ap.channel() > 0 ? HandshakeAnalyzer.frequencyMhz(ap.channel()) : 0, clientRequired);
+                return finish(null, null, ap.bssid(), wantedClient, ap.ssid(), ap.channel(), ap.frequencyMhz(), clientRequired);
             }
             throw new IllegalArgumentException("Select a live target, an observed AP, or a cached AP");
         }
@@ -91,8 +92,9 @@ public final class OpsTargets {
                                    int channel, int frequencyMhz, boolean clientRequired) {
         if (clientRequired && clientMac == null)
             throw new IllegalArgumentException("A client target is required for this operation");
-        int normalized = HandshakeAnalyzer.normalizeChannel(channel);
-        int resolvedFrequency = frequencyMhz > 0 ? frequencyMhz : HandshakeAnalyzer.frequencyMhz(normalized);
+        if (frequencyMhz <= 0) throw new IllegalArgumentException("AP frequency is unknown. Wait for a fresh advertisement.");
+        int normalized = channel > 0 ? channel : ewave.decoder.Dot11FrameDecoder.channel(frequencyMhz);
+        int resolvedFrequency = frequencyMhz;
         HandshakeAnalyzer.validateTarget(apBssid, clientMac, normalized);
         HandshakeAnalyzer.validateFrequency(resolvedFrequency);
         return new Resolved(targetId, apId, apBssid, clientMac, ssid, normalized, resolvedFrequency);

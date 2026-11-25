@@ -55,14 +55,19 @@ public final class OuiLookup {
     public record Registration(String prefix, String vendor) { }
 
     public Optional<Registration> registration(String mac) {
-        if (mac == null || !mac.strip().matches("(?i)[0-9a-f]{2}(:[0-9a-f]{2}){2,5}")) return Optional.empty();
-        return registration(HexFormat.ofDelimiter(":").parseHex(mac.strip()));
+        return registration(mac, false);
     }
 
-    public Optional<String> lookupAddress(byte[] address) { return registration(address).map(Registration::vendor); }
+    Optional<Registration> registration(String mac, boolean includeLocallyAdministered) {
+        if (mac == null || !mac.strip().matches("(?i)[0-9a-f]{2}(:[0-9a-f]{2}){2,5}")) return Optional.empty();
+        return registration(HexFormat.ofDelimiter(":").parseHex(mac.strip()), includeLocallyAdministered);
+    }
 
-    private Optional<Registration> registration(byte[] address) {
-        if (address == null || address.length < 3 || isLocallyAdministered(address) || isMulticast(address))
+    public Optional<String> lookupAddress(byte[] address) { return registration(address, false).map(Registration::vendor); }
+
+    private Optional<Registration> registration(byte[] address, boolean includeLocallyAdministered) {
+        if (address == null || address.length < 3 || isMulticast(address)
+                || (!includeLocallyAdministered && isLocallyAdministered(address)))
             return Optional.empty();
         String hex = HexFormat.of().withUpperCase().formatHex(address);
         for (int digits : new int[]{9, 7, 6}) {

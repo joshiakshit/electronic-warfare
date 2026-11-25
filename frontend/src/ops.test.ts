@@ -1,5 +1,9 @@
-import { describe, expect, it } from 'vitest';
-import { accessPointLabel, errorMessage, operationReadiness, startPath, statusPath, targetLabel, toolSummary } from './ops';
+import { describe, expect, it, vi } from 'vitest';
+import {
+  accessPointLabel, adoptBackendOperation, errorMessage, evilTwinAddressSummary, evilTwinChannelSupported,
+  formatHistoryDuration, isLocallyAdministeredMac, operationIsRunning, operationReadiness, operationTabForActive,
+  opsApi, pmkidRequestBody, polledOperation, startPath, statusPath, targetLabel, toolSummary, uncloakCandidates,
+} from './ops';
 
 describe('Ops request routing and labels', () => {
   it('routes status and start requests for every operation shape', () => {
@@ -20,6 +24,8 @@ describe('Ops request routing and labels', () => {
     expect(accessPointLabel({
       bssid: 'wifi:ap', ssid: null, ssidHidden: true, channel: 11, clients: ['a', 'b'],
     })).toBe('Hidden SSID · CH 11 · 2 clients');
+    expect(accessPointLabel({ bssid: 'wifi:six', ssid: 'Lab', channel: 1, frequencyMhz: 5955, clients: [] }))
+      .toBe('Lab · CH 1 · 5955 MHz · no observed clients');
     expect(accessPointLabel({ bssid: 'wifi:ap', ssid: 'Lab', channel: 1, clients: [] }))
       .toBe('Lab · CH 1 · no observed clients');
   });
@@ -35,5 +41,125 @@ describe('Ops request routing and labels', () => {
     expect(operationReadiness(capabilities, 'pmkid')?.missing).toEqual(['hcxdumptool']);
     expect(errorMessage(new Error('operation failed'))).toBe('operation failed');
     expect(errorMessage('offline')).toBe('offline');
+  });
+});
+
+describe('Ops running state for continuous operations', () => {
+  it('keeps a started operation running after its start request returns', () => {
+    // Beacon and evil-twin answer immediately with { running: true }, so busy is already false.
+    expect(operationIsRunning(false, 'beacon', { running: true })).toBe(true);
+    expect(operationIsRunning(false, 'evil-twin', { running: true })).toBe(true);
+    expect(polledOperation('beacon', false, { running: true })).toBe('beacon');
+  });
+
+  it('treats an active operation without a status yet as running', () => {
+    // A remounted console hydrates active from capabilities before its first status poll.
+    expect(operationIsRunning(false, 'beacon', null)).toBe(true);
+    expect(polledOperation('evil-twin', false, null)).toBe('evil-twin');
+  });
+
+  it('stops polling once the operation reports it is no longer running', () => {
+    expect(operationIsRunning(false, 'beacon', { running: false })).toBe(false);
+    expect(polledOperation('beacon', false, { running: false })).toBe(null);
+    expect(operationIsRunning(true, 'beacon', null)).toBe(true);
+    expect(polledOperation(null, false, { running: true })).toBe(null);
+  });
+
+  it('adopts the backend operation after a remount without fighting a local run', () => {
+    expect(adoptBackendOperation('beacon', null, false)).toBe('beacon');
+    expect(adoptBackendOperation('evil-twin', null, false)).toBe('evil-twin');
+    expect(adoptBackendOperation('handshake-verify', null, false)).toBe('handshake-verify');
+    expect(operationTabForActive('handshake-verify')).toBe('handshake');
+    expect(operationTabForActive('beacon')).toBe('beacon');
+    expect(operationTabForActive('unknown')).toBe(null);
+    expect(adoptBackendOperation('beacon', 'beacon', false)).toBe(null);
+    expect(adoptBackendOperation('beacon', null, true)).toBe(null);
+    expect(adoptBackendOperation(null, null, false)).toBe(null);
+    // Network name reveal is reported as deauth by the shared injector slot.
+    expect(adoptBackendOperation('deauth', 'uncloak', false)).toBe(null);
+  });
+});
+
+describe('uncloak target eligibility', () => {
+  it('excludes revealed hidden names and APs without clients', () => {
+    const aps = [
+      { bssid: 'hidden', ssidHidden: true, ssid: null, clients: ['client'] },
+      { bssid: 'revealed', ssidHidden: true, ssid: 'Known name', clients: ['client'] },
+      { bssid: 'silent', ssidHidden: true, ssid: null, clients: [] },
+    ];
+    expect(uncloakCandidates(aps).map(ap => ap.bssid)).toEqual(['hidden']);
+  });
+});
+
+it('limits the current evil-twin configuration to supported 2.4/5 GHz channels', () => {
+  for (const channel of [1, 6, 14, 36, 100, 149, 177]) expect(evilTwinChannelSupported(channel)).toBe(true);
+  for (const channel of [0, 15, 31, 33, 178, 233]) expect(evilTwinChannelSupported(channel)).toBe(false);
+});
+
+describe('PMKID scoping, Evil Twin IPv4 readiness, and operationId-scoped stop', () => {
+  it('builds unscoped and AP/frequency-scoped PMKID request payloads', () => {
+    expect(pmkidRequestBody({ interfaceName: 'wlo1', wordlistPath: '/words.txt', durationSeconds: 30 }))
+      .toEqual({ interface: 'wlo1', wordlistPath: '/words.txt', durationSeconds: 30 });
+    expect(pmkidRequestBody({
+      interfaceName: 'wlo1', wordlistPath: '/words.txt', durationSeconds: 20,
+      selectedApId: 'wifi:ap-1', apBssid: '02:11:22:33:44:55', frequencyMhz: 2437,
+    })).toEqual({ interface: 'wlo1', wordlistPath: '/words.txt', durationSeconds: 20, apId: 'wifi:ap-1' });
+    expect(pmkidRequestBody({
+      interfaceName: 'wlo1', wordlistPath: '/words.txt', durationSeconds: 15,
+      apBssid: ' 02:11:22:33:44:55 ', frequencyMhz: 5180,
+    })).toEqual({
+      interface: 'wlo1', wordlistPath: '/words.txt', durationSeconds: 15,
+      apBssid: '02:11:22:33:44:55', frequencyMhz: 5180,
+    });
+  });
+
+  it('summarizes AP interface IPv4 readiness and formats history durations', () => {
+    const interfaces = [
+      { name: 'wlo1ap', up: true, loopback: false, virtual: true, ipv4Addresses: ['10.0.0.1'] },
+      { name: 'wlan1', up: false, loopback: false, virtual: false, ipv4Addresses: [] },
+    ];
+    expect(evilTwinAddressSummary(interfaces, 'wlo1ap')).toEqual({
+      found: true, up: true, addresses: ['10.0.0.1'], hasPortalAddress: true,
+    });
+    expect(evilTwinAddressSummary(interfaces, 'wlan1')).toEqual({
+      found: true, up: false, addresses: [], hasPortalAddress: false,
+    });
+    expect(evilTwinAddressSummary(interfaces, 'missing').found).toBe(false);
+    expect(formatHistoryDuration(420)).toBe('420 ms');
+    expect(formatHistoryDuration(2550)).toBe('2.5 s');
+  });
+
+  it('scopes stop requests by operationId when present and calls history endpoints', async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => new Response('{}', {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      await opsApi.stop('11111111-1111-1111-1111-111111111111');
+      expect(fetchMock).toHaveBeenLastCalledWith('/api/ops/stop', expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ operationId: '11111111-1111-1111-1111-111111111111' }),
+      }));
+      await opsApi.stop(null);
+      expect(fetchMock).toHaveBeenLastCalledWith('/api/ops/stop', expect.objectContaining({
+        method: 'POST',
+        body: '{}',
+      }));
+      await opsApi.clearHistory();
+      expect(fetchMock).toHaveBeenLastCalledWith('/api/ops/history', expect.objectContaining({
+        method: 'DELETE',
+      }));
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('identifies locally administered unicast MACs for default handshake rotation handling', () => {
+    for (const randomMac of ['02:11:22:33:44:55', 'd6:aa:bb:cc:dd:ee', '0A:00:00:00:00:01', '1e:22:33:44:55:66']) {
+      expect(isLocallyAdministeredMac(randomMac)).toBe(true);
+    }
+    for (const fixedOrInvalid of ['00:11:22:33:44:55', '50:c7:bf:11:22:33', '03:11:22:33:44:55', 'bad', null, undefined]) {
+      expect(isLocallyAdministeredMac(fixedOrInvalid)).toBe(false);
+    }
   });
 });

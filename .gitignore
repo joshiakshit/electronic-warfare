@@ -22,8 +22,6 @@ planned-work/
 /misc/
 
 # Generated recordings and analysis
-*.csv
-*.json
 results/
 logs/
 /.ewave-run/
@@ -52,13 +50,6 @@ logs/
 # Synthetic capture fixtures used by tests and offline replay
 !/src/test/resources/probes/probe-requests.pcap
 !/src/test/resources/probes/hidden-network.pcap
-
-# Frozen numerical reference fixtures
-!src/test/resources/reference/*.csv
-!src/test/resources/reference/manifest.json
-
-# Bundled RF settings and test fixtures
-!src/main/resources/fingerprints.csv
 
 # Optional RF catalogs generated locally
 /src/main/resources/oui.txt

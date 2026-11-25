@@ -35,6 +35,7 @@ export function CaptureControls({ wifi, connected, actions, onRecordings }: {
   const [mode, setMode] = useState('watch');
   const [frequency, setFrequency] = useState('');
   const running = !!wifi?.captureRunning;
+  const paused = !!wifi?.capturePausedForOps;
   const adapter = adapters.includes(requestedAdapter) ? requestedAdapter
     : wifi?.captureInterface && adapters.includes(wifi.captureInterface) ? wifi.captureInterface : adapters[0] ?? '';
 
@@ -61,9 +62,10 @@ export function CaptureControls({ wifi, connected, actions, onRecordings }: {
         <h2 id="capture-controls-heading">Capture controls</h2>
         <button type="button" className="text-button" onClick={onRecordings}>Saved recordings</button>
       </div>
-      {!connected ? <p className="micro-note">Waiting for the local API.</p> : running ? (
+      {!connected ? <p className="micro-note">Waiting for the local API.</p> : running || paused ? (
         <div className="session-active-controls">
-          {wifi?.captureMode === 'watch' && (
+          {paused && <p className="micro-note">Ops has paused capture. Stop capture to cancel its automatic resume.</p>}
+          {running && wifi?.captureMode === 'watch' && (
             <form className="capture-control-form" onSubmit={event => {
               event.preventDefault();
               if (canTune) actions.run(
@@ -165,7 +167,7 @@ export function SavedRecordings({ entries, wifi, connected, actions, onImported 
       <p className="micro-note">Classic PCAP · Up to {maxRecordingMiB} MiB · Stored on this machine</p>
       {uploadStatus && <p className="micro-note" role="status">{uploadStatus}</p>}
       {uploadError && <p className="inline-error" role="alert">{uploadError}</p>}
-      {wifi?.captureRunning && <p className="micro-note">Stop the current capture in Capture health before starting another replay.</p>}
+      {(wifi?.captureRunning || wifi?.capturePausedForOps) && <p className="micro-note">Stop the current capture in Capture health before starting another replay.</p>}
       <CaptureFeedback actions={actions} />
       {entries && (entries.length ? (
         <div className="table-wrap recording-table">
@@ -176,7 +178,7 @@ export function SavedRecordings({ entries, wifi, connected, actions, onImported 
                 <td title={entry.name}>{entry.name}{wifi?.recordingId === entry.id && <span className="recording-current">Current session</span>}</td>
                 <td>{date(entry.importedAt)}</td><td>{entry.bytes.toLocaleString()} B</td>
                 <td><button type="button" className="text-button" aria-label={`Replay ${entry.name}`}
-                  disabled={!connected || !!wifi?.captureRunning || actions.pending}
+                  disabled={!connected || (!!wifi?.captureRunning || !!wifi?.capturePausedForOps) || actions.pending}
                   onClick={() => actions.run(
                     () => send<WifiStatus>(`/api/recordings/${encodeURIComponent(entry.id)}/replay`, 'POST', {}),
                     `Replay started for ${entry.name}. See Capture health for its current state.`,

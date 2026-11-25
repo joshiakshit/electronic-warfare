@@ -7,10 +7,12 @@ final class PeriodFingerprinter {
 
     static String hint(int periodTicks, double millis) {
         if (periodTicks == 0) return "Transient / mobile";
-        if (millis >= 85 && millis <= 115) return "802.11 AP (beacon cycle)";
-        if (millis >= 200 && millis <= 210) return "802.11 AP (long interval)";
-        if (millis >= 5000 && millis <= 8000) return "IoT sensor / sleeping device";
         if (millis > 0 && millis < 50) return "Active client / high-frequency beacon";
+        if (millis >= 80 && millis <= 125) return "802.11 AP (beacon cycle)";
+        if (millis >= 195 && millis <= 220) return "802.11 AP (long interval)";
+        if (millis >= 290 && millis <= 330) return "802.11 AP / IoT (300 TU cycle)";
+        if (millis >= 980 && millis <= 1060) return "IoT / DTIM sleep cycle (1s)";
+        if (millis >= 2000 && millis <= 8000) return "IoT sensor / sleeping device";
         return "Unclassified";
     }
 

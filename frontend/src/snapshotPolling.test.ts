@@ -25,6 +25,21 @@ describe('snapshot polling', () => {
     poll.stop();
   });
 
+  it('resumes polling after a rejected request and adjusts its repair interval', async () => {
+    vi.useFakeTimers();
+    let connected = true;
+    const load = vi.fn<(signal: AbortSignal) => Promise<void>>().mockRejectedValueOnce(new Error('Offline'))
+      .mockResolvedValue(undefined);
+    const poll = startSnapshotPolling(load, () => connected ? 15000 : 4000);
+    await vi.advanceTimersByTimeAsync(15000);
+    expect(load).toHaveBeenCalledTimes(2);
+    connected = false;
+    await poll.refresh();
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(load).toHaveBeenCalledTimes(4);
+    poll.stop();
+  });
+
   it('polls without events and cancels pending work when stopped', async () => {
     vi.useFakeTimers();
     let finish!: () => void;

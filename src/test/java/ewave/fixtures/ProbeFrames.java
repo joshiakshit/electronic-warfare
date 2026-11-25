@@ -12,6 +12,14 @@ public final class ProbeFrames {
 
     public static byte[] frame(String ssid) { return frame(ssid.getBytes(StandardCharsets.UTF_8)); }
 
+    public static byte[] frame(String ssid, String source, int sequence) {
+        byte[] frame = frame(ssid);
+        byte[] address = HexFormat.ofDelimiter(":").parseHex(source);
+        ByteBuffer.wrap(frame).order(ByteOrder.LITTLE_ENDIAN).position(10).put(address)
+                .position(22).putShort((short) (sequence << 4));
+        return frame;
+    }
+
     public static byte[] frame(byte[] ssid) {
         var bytes = new ByteArrayOutputStream();
         bytes.writeBytes(HexFormat.of().parseHex("40000000ffffffffffff021122334455ffffffffffff1000"));

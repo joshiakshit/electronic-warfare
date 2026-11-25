@@ -1,16 +1,20 @@
 import { describe, expect, it } from 'vitest';
 import {
   channelBand, channelRows, chronologicalSignal, deviceClassification, groupApChanges, hiddenNameRow, isIdentifier,
-  observationColumns, observationKey, observationValue, observedClientsByAp, occupancyEstimate, occupancyLabel,
+  observationColumns, observationKey, observationMatches, observationValue, observedClientsByAp, occupancyEstimate, occupancyLabel,
 } from './observations';
 
 describe('observation presentation', () => {
-  it('keeps masked probe names explicit and raw fields out of the report columns', () => {
-    const row = { id: 'report-id', name: null, exposure: 'OTHER', lastSeen: 1700000000000, deviceCount: null, timeline: [0, 1] };
-    expect(observationValue('name', row)).toBe('Privacy-masked');
-    expect(observationValue('name', { ...row, name: '<Synthetic SSID>' })).toBe('<Synthetic SSID>');
-    expect(observationColumns('probes', [row])).toEqual(['name', 'exposure', 'lastSeen']);
-    expect(observationColumns('probes', [{ ...row, deviceCount: 0 }])).toContain('deviceCount');
+  it('shows probe names and sources without exposing raw report fields as columns', () => {
+    const row = { id: 'report-id', name: '<Synthetic SSID>', exposure: 'OTHER', source: 'SHORT_SSID_MATCH',
+      lastSeen: 1700000000000, deviceCount: 1, timeline: [0, 1], devices: [{ id: 'sender-id', lastSeen: 1700000000000 }] };
+    expect(observationValue('name', row)).toBe('<Synthetic SSID>');
+    expect(observationValue('name', { ...row, name: null })).toBe('—');
+    expect(observationValue('source', row)).toBe('Short-SSID match');
+    expect(observationValue('source', { ...row, sources: ['PLAINTEXT_SSID', 'SSID_LIST', 'SHORT_SSID_MATCH'] }))
+      .toBe('Plaintext SSID, SSID List, Short-SSID match');
+    expect(observationValue('exposure', { exposure: 'SHORT_SSID_HASH' })).toBe('Short-SSID hash');
+    expect(observationColumns('probes', [row])).toEqual(['name', 'exposure', 'source', 'deviceCount', 'lastSeen']);
   });
 
   it('keeps one selection across report refreshes and distinguishes links for the same client', () => {
@@ -39,6 +43,13 @@ describe('observation presentation', () => {
     expect([2412, 5180, 5955].map(channelBand)).toEqual(['2.4 GHz', '5 GHz', '6 GHz']);
     expect(observationKey('channels', { channel: 1, freqMhz: 2412 }))
       .not.toBe(observationKey('channels', { channel: 1, freqMhz: 5955 }));
+    const [twoFour, six] = channelRows({ counts: [50, 60], channels: [
+      { channel: 1, freqMhz: 2412, sampleCount: 3, occupancyMean: 0 },
+      { channel: 1, freqMhz: 5955, sampleCount: 0, occupancyMean: 0 },
+    ] });
+    expect(occupancyEstimate(twoFour)).toBe(0);
+    expect(occupancyLabel(six)).toBe('No samples');
+    expect(channelRows({ counts: [50], channels: [{channel: 1, freqMhz: 5955}] })[0].sampleCount).toBeNull();
   });
 
   it('counts each observed client once per access point independently of advertised station counts', () => {
@@ -114,5 +125,20 @@ describe('observation presentation', () => {
       { clientId: 'client-b', rows: [changes[1]] },
     ]);
     expect(observationValue('method', changes[0])).toBe('Data observed on another AP');
+    expect(observationValue('method', { method: 'INFERRED_MAC_ROTATION' })).toBe('Inferred MAC rotation (heuristic)');
   });
+});
+
+it('filters observed and formatted values without matching JSON keys or absent flags', () => {
+  const channel = { channel: 6, freqMhz: 2437, sampleCount: 2, anomaly: null };
+  const columns = observationColumns('channels', [channel]);
+  for (const query of ['anomaly', 'null', 'freqMhz']) expect(observationMatches(channel, columns, query)).toBe(false);
+  expect(observationMatches({ ...channel, anomaly: { reason: 'Unusual burst' } }, columns, 'burst')).toBe(true);
+  const ap = { ssid: 'Lab', ssidHidden: false, advertisedSecurity: [{ protocol: 'WPA2', authentication: ['PSK'] }] };
+  const apColumns = observationColumns('aps', [ap]);
+  for (const query of ['hidden', 'false', 'ssidHidden', 'authentication']) expect(observationMatches(ap, apColumns, query)).toBe(false);
+  expect(observationMatches(ap, apColumns, 'wpa2')).toBe(true);
+  expect(observationMatches({ ...ap, ssid: null, ssidHidden: true }, apColumns, 'hidden')).toBe(true);
+  expect(observationMatches({ method: 'DATA_SWITCH' }, ['method'], 'another ap')).toBe(true);
+  expect(observationMatches({ method: 'INFERRED_MAC_ROTATION' }, ['method'], 'mac rotation')).toBe(true);
 });

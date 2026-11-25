@@ -36,7 +36,7 @@ public final class HandshakeAnalyzer {
     private static final Pattern ANSI = Pattern.compile("\u001B\\[[0-?]*[ -/]*[@-~]");
     private static final Pattern KEY = Pattern.compile("KEY FOUND!\\s*\\[ (.*) \\]");
     private static final int CAPTURE_OUTPUT_LIMIT = 1_048_576;
-    public static final String DEFAULT_CAPTURE_DIR = "/tmp/ewave-captures/";
+    public static final String DEFAULT_CAPTURE_DIR = System.getProperty("java.io.tmpdir");
     public static final String WORDLIST_MISSING = "Wordlist not found. Install: sudo dnf install wordlists";
 
     @FunctionalInterface public interface ProcessStarter {
@@ -56,11 +56,13 @@ public final class HandshakeAnalyzer {
     private final Path captureDir;
     private final ProcessStarter starter;
     private final Timing timing;
+    private final boolean allowMacRotation;
     private final AtomicBoolean inUse = new AtomicBoolean();
     private final Set<Process> processes = new HashSet<>();
     private volatile boolean cancelled;
     private volatile boolean running;
     private volatile String stage = "Ready";
+    private volatile Path capturedFile;
 
     public HandshakeAnalyzer() { this("wlo1", null, null, 6); }
 
@@ -77,6 +79,12 @@ public final class HandshakeAnalyzer {
         this(monitorInterface, apBssid, clientMac, channel, frequency, DEFAULT_CAPTURE_DIR, ProcessBuilder::start);
     }
 
+    public HandshakeAnalyzer(String monitorInterface, String apBssid, String clientMac, int channel, int frequency,
+                             boolean allowMacRotation) {
+        this(monitorInterface, apBssid, clientMac, channel, frequency, DEFAULT_CAPTURE_DIR, ProcessBuilder::start,
+                Timing.DEFAULT, allowMacRotation);
+    }
+
     public HandshakeAnalyzer(String monitorInterface, String apBssid, String clientMac, int channel,
                              String captureDir, ProcessStarter starter) {
         this(monitorInterface, apBssid, clientMac, channel, frequencyMhz(channel), captureDir, starter);
@@ -90,11 +98,23 @@ public final class HandshakeAnalyzer {
     /** Process creation boundary for embedding and hardware-free tests. */
     public HandshakeAnalyzer(String monitorInterface, String apBssid, String clientMac, int channel,
                              int frequency, String captureDir, ProcessStarter starter) {
-        this(monitorInterface, apBssid, clientMac, channel, frequency, captureDir, starter, Timing.DEFAULT);
+        this(monitorInterface, apBssid, clientMac, channel, frequency, captureDir, starter, Timing.DEFAULT, false);
+    }
+
+    public HandshakeAnalyzer(String monitorInterface, String apBssid, String clientMac, int channel,
+                             int frequency, String captureDir, ProcessStarter starter, boolean allowMacRotation) {
+        this(monitorInterface, apBssid, clientMac, channel, frequency, captureDir, starter, Timing.DEFAULT,
+                allowMacRotation);
     }
 
     HandshakeAnalyzer(String monitorInterface, String apBssid, String clientMac, int channel,
                       int frequency, String captureDir, ProcessStarter starter, Timing timing) {
+        this(monitorInterface, apBssid, clientMac, channel, frequency, captureDir, starter, timing, false);
+    }
+
+    HandshakeAnalyzer(String monitorInterface, String apBssid, String clientMac, int channel,
+                      int frequency, String captureDir, ProcessStarter starter, Timing timing,
+                      boolean allowMacRotation) {
         if (monitorInterface == null || !INTERFACE.matcher(monitorInterface).matches())
             throw new IllegalArgumentException("interface must be a Linux interface name (1–15 letters, digits, _, . or -)");
         validateFrequency(frequency);
@@ -106,14 +126,22 @@ public final class HandshakeAnalyzer {
         this.captureDir = Path.of(Objects.requireNonNull(captureDir)).toAbsolutePath().normalize();
         this.starter = Objects.requireNonNull(starter);
         this.timing = Objects.requireNonNull(timing);
+        this.allowMacRotation = allowMacRotation;
     }
 
     public HandshakeResult capture() throws IOException, InterruptedException {
         validateTarget(apBssid, clientMac, channel);
         begin();
         Output tuning = null, recorderErrors = null, decoderErrors = null;
-        Path cap = null;
+        Path cap = null, runDirectory = null;
         try {
+            if (!captureDir.equals(Path.of(DEFAULT_CAPTURE_DIR).toAbsolutePath().normalize())) {
+                if (Files.notExists(captureDir, java.nio.file.LinkOption.NOFOLLOW_LINKS))
+                    PrivateWorkspace.create(captureDir);
+                else PrivateWorkspace.requireDirectory(captureDir);
+            }
+            runDirectory = PrivateWorkspace.create(captureDir.resolve("ewave-capture-" + java.util.UUID.randomUUID()));
+
             stage = "Tuning to " + frequency + " MHz…";
             var iw = List.of("sudo", "iw", "dev", monitorInterface, "set", "freq", Integer.toString(frequency));
             Process tune = launch(iw);
@@ -123,17 +151,14 @@ public final class HandshakeAnalyzer {
             checkCancelled();
             if (tune.exitValue() != 0) throw new IOException("Frequency tuning failed: " + tuning.text());
 
-            Files.createDirectories(captureDir);
-            try { Files.setPosixFilePermissions(captureDir, PosixFilePermissions.fromString("rwx------")); }
-            catch (UnsupportedOperationException ignored) { /* Non-POSIX filesystem. */ }
-            cap = Files.createTempFile(captureDir, "hs-" + apBssid.replace(":", "") + "-", ".cap",
+            cap = Files.createTempFile(runDirectory, "hs-" + apBssid.replace(":", "") + "-", ".cap",
                     PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")));
             var decode = new ArrayList<>(List.of("tshark", "-n", "-l", "-r", "-", "-F", "pcap", "-w", cap.toString(),
                     "-P", "-T", "fields", "-E", "occurrence=f", "-o", "wlan.enable_decryption:FALSE"));
             for (String field : HandshakePackets.FIELDS) decode.addAll(List.of("-e", field));
             Process decoder = launch(new ProcessBuilder(decode), false);
             decoderErrors = new Output(decoder.getErrorStream(), CAPTURE_OUTPUT_LIMIT);
-            var packets = new HandshakePackets(apBssid, clientMac, frequency, channel);
+            var packets = new HandshakePackets(apBssid, clientMac, frequency, channel, allowMacRotation);
             var rows = background(() -> {
                 try (var input = new BufferedReader(new InputStreamReader(decoder.getInputStream(), StandardCharsets.UTF_8))) {
                     for (String row; (row = input.readLine()) != null;) packets.accept(row);
@@ -197,6 +222,7 @@ public final class HandshakeAnalyzer {
                 case TARGET_NOT_SEEN -> "Target AP beacon not seen";
                 case CAPTURE_ENDED -> "Capture ended without handshake";
             };
+            capturedFile = cap;
             return new HandshakeResult(outcome == Outcome.COMPLETE, cap.toString(), apBssid,
                     observed.clientMac(), diagnostics, Instant.now(), frequency, outcome, observed.messages());
         } catch (InterruptedException interrupted) {
@@ -207,6 +233,10 @@ public final class HandshakeAnalyzer {
             if (cap != null) {
                 try { if (Files.size(cap) < 24) Files.deleteIfExists(cap); }
                 catch (IOException ignored) { /* Preserve any recording that could aid diagnosis. */ }
+            }
+            if (runDirectory != null) {
+                try { Files.delete(runDirectory); }
+                catch (IOException ignored) { /* Retain directories containing captures for later verification. */ }
             }
         }
     }
@@ -233,28 +263,38 @@ public final class HandshakeAnalyzer {
             throws IOException, InterruptedException, TimeoutException {
         Path cap = readableFile(capFilePath, "Capture file not found or unreadable");
         Path wordlist = readableFile(wordlistPath, WORDLIST_MISSING);
+        if (!isStationAddress(apBssid)) throw new IllegalArgumentException("apBssid is required to verify a capture");
         begin();
         Output output = null;
         try {
             stage = "Verifying PSK strength...";
-            Process process = launch(List.of("aircrack-ng", cap.toString(), "-w", wordlist.toString()));
-            output = new Output(process.getInputStream(), Integer.MAX_VALUE);
+            Process process = launch(List.of("aircrack-ng", "-q", "-b", apBssid, cap.toString(), "-w", wordlist.toString()));
+            output = new Output(process.getInputStream(), CAPTURE_OUTPUT_LIMIT);
             if (!process.waitFor(timing.verify().toMillis(), TimeUnit.MILLISECONDS))
                 throw new TimeoutException("PSK verification timed out after " + timing.verify().toSeconds() + " seconds");
             output.finish();
             checkCancelled();
             String fullOutput = output.text();
-            String plain = ANSI.matcher(fullOutput).replaceAll("");
-            var key = KEY.matcher(plain);
-            if (key.find() && process.exitValue() == 0)
-                return new PskVerificationResult(true, key.group(1), fullOutput, Instant.now());
-            // aircrack-ng also exits nonzero after successfully exhausting a dictionary.
-            if (!plain.contains("KEY NOT FOUND") || plain.contains("KEY FOUND!"))
+            String key = output.key();
+            if (key != null && process.exitValue() == 0) {
+                stage = "PSK found";
+                return new PskVerificationResult(true, key, fullOutput, Instant.now());
+            }
+            // Parse the outcome while streaming, even when the retained diagnostic output is truncated.
+            if (!output.keyNotFound() || key != null)
                 throw new IOException("PSK verification failed (exit " + process.exitValue() + "): " + fullOutput);
+            stage = "Key not found";
             return new PskVerificationResult(false, null, fullOutput, Instant.now());
         } catch (InterruptedException interrupted) {
+            stage = "Stopped";
             Thread.currentThread().interrupt();
             throw interrupted;
+        } catch (CancellationException stopped) {
+            stage = "Stopped";
+            throw stopped;
+        } catch (IOException | TimeoutException failure) {
+            stage = "PSK verification failed";
+            throw failure;
         } finally {
             cleanup(output);
         }
@@ -277,14 +317,19 @@ public final class HandshakeAnalyzer {
             throw new IllegalArgumentException("frequencyMhz must be between 2300 and 7125");
     }
 
-    public static int normalizeChannel(int channel) { return channel <= 0 ? 6 : channel; }
+    public static int normalizeChannel(int channel) {
+        if (channel < 1 || channel > 233) throw new IllegalArgumentException("channel must be an integer in 1–233");
+        return channel;
+    }
 
     /** Legacy channel-only requests use 2.4/5 GHz numbering. Prefer the measured frequency. */
     public static int frequencyMhz(int channel) {
         channel = normalizeChannel(channel);
         if (channel > 233) throw new IllegalArgumentException("channel must be an integer in 1–233");
         if (channel == 14) return 2484;
-        return channel <= 13 ? 2407 + channel * 5 : 5000 + channel * 5;
+        if (channel <= 13) return 2407 + channel * 5;
+        if (channel >= 32 && channel <= 177) return 5000 + channel * 5;
+        throw new IllegalArgumentException("Channel requires an explicit measured frequency; 6 GHz cannot be inferred from channel alone");
     }
 
     public static Path readableFile(String value, String message) throws IOException {
@@ -295,6 +340,9 @@ public final class HandshakeAnalyzer {
     }
 
     public Status status() { return new Status(running, stage); }
+
+    /** A recorded target can be reused for verification of exactly this analyzer's retained capture. */
+    public String capturedBssid(Path file) { return file.equals(capturedFile) ? apBssid : null; }
 
     public synchronized void terminate() {
         cancelled = true;
@@ -317,7 +365,7 @@ public final class HandshakeAnalyzer {
 
     private synchronized Process launch(ProcessBuilder builder, boolean closeInput) throws IOException {
         checkCancelled();
-        builder.environment().put("TERM", "xterm");
+        builder.environment().put("TERM", "dumb");
         Process process = starter.start(builder);
         processes.add(process);
         if (closeInput) process.getOutputStream().close();
@@ -357,13 +405,16 @@ public final class HandshakeAnalyzer {
         inUse.set(false);
     }
 
-    private static final class Output {
+    static final class Output {
         private final InputStream stream;
         private final int limit;
         private final StringBuilder buffer = new StringBuilder();
         private final Thread reader;
         private volatile IOException failure;
         private boolean truncated;
+        private String carry = "";
+        private String key;
+        private boolean keyNotFound;
 
         Output(InputStream stream, int limit) {
             this.stream = stream;
@@ -379,6 +430,11 @@ public final class HandshakeAnalyzer {
         }
 
         private synchronized void append(char[] value, int size) {
+            String plain = ANSI.matcher(carry + new String(value, 0, size)).replaceAll("");
+            var found = KEY.matcher(plain);
+            if (found.find()) key = found.group(1);
+            keyNotFound |= plain.contains("KEY NOT FOUND");
+            carry = plain.substring(Math.max(0, plain.length() - 2048));
             int remaining = Math.max(0, limit - buffer.length());
             buffer.append(value, 0, Math.min(remaining, size));
             if (size > remaining && !truncated) {
@@ -388,6 +444,8 @@ public final class HandshakeAnalyzer {
         }
 
         synchronized String text() { return buffer.toString(); }
+        synchronized String key() { return key; }
+        synchronized boolean keyNotFound() { return keyNotFound; }
 
         void finish() throws InterruptedException, IOException {
             reader.join(1_000);

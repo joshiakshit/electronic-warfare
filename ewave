@@ -335,7 +335,7 @@ run_live_session() {
     if (( EUID == 0 )); then
         "$java_bin" -jar "$JAR" --iface "$iface" --adaptive || rc=$?
     else
-        sudo -H --preserve-env=JAVA_TOOL_OPTIONS -- "$java_bin" -jar "$JAR" --iface "$iface" --adaptive || rc=$?
+        sudo -H --preserve-env=JAVA_TOOL_OPTIONS -- "$java_bin" "-Drf.userHome=$HOME" -jar "$JAR" --iface "$iface" --adaptive || rc=$?
     fi
     return "$rc"
 }

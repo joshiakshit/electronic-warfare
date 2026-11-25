@@ -14,7 +14,10 @@ import java.util.regex.Pattern;
 public final class WifiAccessPoints {
     private static final Pattern MAC = Pattern.compile("(?i)(?:[0-9a-f]{2}:){5}[0-9a-f]{2}");
     public record AccessPoint(String ssid, String bssid, int channel, int frequencyMhz) {
-        public AccessPoint { channel = HandshakeAnalyzer.normalizeChannel(channel); }
+        public AccessPoint {
+            if (channel <= 0) channel = ewave.decoder.Dot11FrameDecoder.channel(frequencyMhz);
+            channel = HandshakeAnalyzer.normalizeChannel(channel);
+        }
     }
     private final Path cache;
 
@@ -33,12 +36,12 @@ public final class WifiAccessPoints {
             try {
                 String cachedChannel = fields.get(2).strip();
                 int channel = cachedChannel.isEmpty() || cachedChannel.equals("--") || cachedChannel.equalsIgnoreCase("null")
-                        ? 6 : HandshakeAnalyzer.normalizeChannel(Integer.parseInt(cachedChannel));
+                        ? 0 : Integer.parseInt(cachedChannel);
                 int frequency = Integer.parseInt(fields.get(3).replaceFirst("\\s*MHz$", "").strip());
                 if (channel > 233 || frequency < 2300 || frequency > 7125) continue;
                 String bssid = fields.get(1).toUpperCase(Locale.ROOT);
                 result.putIfAbsent(bssid, new AccessPoint(fields.get(0), bssid, channel, frequency));
-            } catch (NumberFormatException invalid) { /* Ignore incomplete scan records. */ }
+            } catch (IllegalArgumentException invalid) { /* Ignore incomplete scan records. */ }
         }
         return List.copyOf(result.values());
     }

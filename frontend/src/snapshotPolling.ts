@@ -1,4 +1,4 @@
-export function startSnapshotPolling(load: (signal: AbortSignal) => Promise<void>, intervalMs: number) {
+export function startSnapshotPolling(load: (signal: AbortSignal) => Promise<void>, intervalMs: number | (() => number)) {
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   let running = false;
@@ -15,10 +15,13 @@ export function startSnapshotPolling(load: (signal: AbortSignal) => Promise<void
     running = true;
     try {
       await load(controller.signal);
+    } catch {
+      // The caller owns error presentation. Keep polling after a failed refresh.
     } finally {
       running = false;
       if (!controller.signal.aborted) {
-        timer = setTimeout(refresh, refreshQueued ? 0 : intervalMs);
+        const interval = typeof intervalMs === 'number' ? intervalMs : intervalMs();
+        timer = setTimeout(refresh, refreshQueued ? 0 : interval);
         refreshQueued = false;
       }
     }

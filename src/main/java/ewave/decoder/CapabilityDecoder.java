@@ -1,6 +1,7 @@
 package ewave.decoder;
 
 import java.util.LinkedHashSet;
+import java.util.HexFormat;
 import java.util.List;
 
 /** Capability advertisements are upper bounds, independent of negotiated link parameters. */
@@ -10,13 +11,34 @@ public final class CapabilityDecoder {
     public record Summary(String wifiGeneration, int spatialStreams, int maxWidthMhz,
                           boolean sgi, boolean ldpc, boolean stbcTx, boolean stbcRx,
                           boolean suBeamformee, boolean muBeamformee, boolean sixGhzCapability, String smPowerSave,
-                          List<Double> supportedRates, List<Double> basicRates) { }
+                          List<Double> supportedRates, List<Double> basicRates,
+                          List<String> rsnAkmSuites, List<String> securityModes, ManagementFeatures managementFeatures) { }
+
+    public record ManagementFeatures(boolean radioMeasurement, boolean neighborReport, boolean bssTransition,
+                                     boolean wnmSleep, boolean timBroadcast, boolean fastTransition,
+                                     String mobilityDomain, String extendedCapabilitiesHex, boolean twtResponder) {
+        public ManagementFeatures(boolean radioMeasurement, boolean neighborReport, boolean bssTransition,
+                                  boolean wnmSleep, boolean timBroadcast, boolean fastTransition,
+                                  String mobilityDomain, String extendedCapabilitiesHex) {
+            this(radioMeasurement, neighborReport, bssTransition, wnmSleep, timBroadcast, fastTransition,
+                    mobilityDomain, extendedCapabilitiesHex, false);
+        }
+    }
 
     public static Summary decode(Dot11InformationElements ies, int frequency) {
         return decode(ies, frequency, false);
     }
 
     public static Summary decode(Dot11InformationElements ies, int frequency, boolean fromAp) {
+        return decode(ies, frequency, fromAp, 0);
+    }
+
+    public static Summary decode(Dot11InformationElements ies, int frequency, boolean fromAp, int capabilityInfo) {
+        return decode(ies, frequency, fromAp, capabilityInfo, SecurityDecoder.decode(ies));
+    }
+
+    public static Summary decode(Dot11InformationElements ies, int frequency, boolean fromAp, int capabilityInfo,
+                                 SecurityDecoder.Summary security) {
         var rates = new LinkedHashSet<Double>();
         var basic = new LinkedHashSet<Double>();
         for (var element : ies.elements()) {
@@ -83,7 +105,10 @@ public final class CapabilityDecoder {
         if (eht.length >= 15 && he.length >= 22) {
             int widths = he[7] & 0xff;
             boolean wide320 = (eht[3] & 2) != 0;
-            int size = (widths & 2) != 0 ? 3
+            // The 2.4 GHz bit is reserved on 5/6 GHz; mixed flags must not hide the wider-band maps.
+            boolean twoGhz = frequency > 0 && frequency < 3000
+                    || frequency == 0 && (widths & 12) == 0 && !wide320;
+            int size = (widths & 2) != 0 && twoGhz ? 3
                     : 3 * (Integer.bitCount(widths & 12) + (wide320 ? 1 : 0));
             if (size == 0) size = fromAp ? 3 : 4;
             if (eht.length >= 12 + size) {
@@ -98,7 +123,23 @@ public final class CapabilityDecoder {
         }
         return new Summary(generation, streams, width, sgi, ldpc, tx, rx, su, mu,
                 ies.extension(59).length == 3, smps,
-                List.copyOf(rates), List.copyOf(basic));
+                List.copyOf(rates), List.copyOf(basic), security.rsnAkmSuites(), security.modes(),
+                managementFeatures(ies, capabilityInfo, security.rsnAkmSuites()));
+    }
+
+    public static ManagementFeatures managementFeatures(Dot11InformationElements ies, int capabilityInfo,
+                                                         List<String> akms) {
+        byte[] rm = ies.first(70), ext = ies.first(127), md = ies.first(54);
+        byte[] he = ies.extension(35);
+        String domain = md.length == 3 ? HexFormat.of().formatHex(md, 0, 2) : null;
+        boolean fastTransition = domain != null || ies.first(55).length >= 82
+                || akms.stream().anyMatch(akm -> akm.startsWith("FT/"));
+        return new ManagementFeatures((capabilityInfo & 0x1000) != 0 || rm.length == 5,
+                rm.length == 5 && Dot11InformationElements.capabilityBit(rm, 1),
+                Dot11InformationElements.capabilityBit(ext, 19), Dot11InformationElements.capabilityBit(ext, 17),
+                Dot11InformationElements.capabilityBit(ext, 18), fastTransition, domain,
+                ext.length == 0 ? null : HexFormat.of().formatHex(ext),
+                he.length >= 7 && (he[1] & 0x04) != 0);
     }
 
     private static int streams(int map) {

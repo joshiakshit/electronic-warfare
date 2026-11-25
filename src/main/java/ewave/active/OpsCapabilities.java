@@ -2,6 +2,8 @@ package ewave.active;
 
 import java.io.File;
 import java.io.IOException;
+import java.net.Inet4Address;
+import java.net.InetAddress;
 import java.net.NetworkInterface;
 import java.net.SocketException;
 import java.nio.file.Files;
@@ -21,7 +23,15 @@ public final class OpsCapabilities {
     public record Tool(String name, boolean available, String path) { }
     public record Cache(String path, boolean available, long modifiedAt, int entries, String error) { }
     public record Operation(String id, String label, boolean ready, List<String> missing) { }
-    public record Interface(String name, boolean up, boolean loopback, boolean virtual) { }
+    public record Interface(String name, boolean up, boolean loopback, boolean virtual, List<String> ipv4Addresses) {
+        public Interface {
+            ipv4Addresses = ipv4Addresses == null ? List.of() : List.copyOf(ipv4Addresses);
+        }
+
+        public Interface(String name, boolean up, boolean loopback, boolean virtual) {
+            this(name, up, loopback, virtual, List.of());
+        }
+    }
 
     @FunctionalInterface public interface ToolLocator {
         Path locate(String name);
@@ -33,6 +43,14 @@ public final class OpsCapabilities {
                                                List<String> monitorInterfaces, List<Interface> interfaces,
                                                Map<String, Object> capture, String activeOperation,
                                                ToolLocator locator) {
+        return snapshot(accessPointCache, lanCache, wordlist, monitorInterfaces, interfaces,
+                capture, activeOperation, null, locator);
+    }
+
+    public static Map<String, Object> snapshot(Path accessPointCache, Path lanCache, String wordlist,
+                                               List<String> monitorInterfaces, List<Interface> interfaces,
+                                               Map<String, Object> capture, String activeOperation,
+                                               String activeOperationId, ToolLocator locator) {
         ToolLocator tools = locator == null ? systemPath() : locator;
         List<Tool> toolRows = TOOLS.stream().map(name -> {
             Path path = tools.locate(name);
@@ -62,6 +80,7 @@ public final class OpsCapabilities {
         response.put("wordlist", wordlist(wordlist));
         response.put("capture", capture == null ? Map.of() : capture);
         response.put("activeOperation", activeOperation);
+        response.put("activeOperationId", activeOperationId);
         response.put("generatedAt", System.currentTimeMillis());
         return response;
     }
@@ -94,7 +113,12 @@ public final class OpsCapabilities {
                     loopback = network.isLoopback();
                     virtual = network.isVirtual();
                 } catch (SocketException ignored) { }
-                return new Interface(network.getName(), up, loopback, virtual);
+                List<String> ipv4 = network.inetAddresses()
+                        .filter(Inet4Address.class::isInstance)
+                        .map(InetAddress::getHostAddress)
+                        .sorted()
+                        .toList();
+                return new Interface(network.getName(), up, loopback, virtual, ipv4);
             }).sorted(Comparator.comparing(Interface::name)).toList();
         } catch (SocketException unavailable) {
             return List.of();

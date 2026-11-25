@@ -1,4 +1,5 @@
 import type { AccessPointObservation, ClientLink } from './api';
+import { isActiveLink } from './observations';
 
 export type TopologyEndpoint = { kind: 'ap' | 'client'; id: string };
 
@@ -40,7 +41,8 @@ export function topologyDiagram(accessPoints: readonly AccessPointObservation[],
   if (selected?.kind === 'client' && clientIds.has(selected.id)) shownClients.add(selected.id);
   const ordered = [...links].sort((a, b) => {
     const priority = selected ? Number(linkTouches(selected, b)) - Number(linkTouches(selected, a)) : 0;
-    return priority || b.lastSeen - a.lastSeen || a.bssid.localeCompare(b.bssid) || a.clientId.localeCompare(b.clientId);
+    return priority || Number(isActiveLink(b)) - Number(isActiveLink(a))
+      || b.lastSeen - a.lastSeen || a.bssid.localeCompare(b.bssid) || a.clientId.localeCompare(b.clientId);
   });
   for (const link of ordered) {
     if (shownLinks.length === maxLinks) break;

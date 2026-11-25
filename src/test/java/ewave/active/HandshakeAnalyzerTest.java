@@ -202,16 +202,21 @@ class HandshakeAnalyzerTest {
         Path cap = Files.writeString(directory.resolve("capture with spaces.cap"), "pcap");
         Path words = Files.writeString(directory.resolve("-words.txt"), "wordlist");
         for (boolean found : new boolean[]{false, true}) {
-            String output = found ? "\u001B[2J\nKEY FOUND! [  pass [ word ]  ]\n" : "stats ".repeat(180_000) + "\nKEY NOT FOUND\n";
+            String output = found ? "stats ".repeat(180_000) + "\u001B[2J\nKEY FOUND! [  pass [ word ]  ]\n" : "stats ".repeat(180_000) + "\nKEY NOT FOUND\n";
             var verifier = analyzer(null, builder -> {
-                assertEquals(List.of("aircrack-ng", cap.toString(), "-w", words.toString()), builder.command());
+                assertEquals(List.of("aircrack-ng", "-q", "-b", AP, cap.toString(), "-w", words.toString()), builder.command());
                 assertTrue(builder.redirectErrorStream());
                 return new CompletedProcess(output, found ? 0 : 1);
             });
             var result = verifier.verifyPsk(cap.toString(), words.toString());
             assertEquals(found, result.vulnerable());
             assertEquals(found ? " pass [ word ] " : null, result.psk());
-            assertEquals(output, result.fullOutput());
+            if (output.length() <= 1_048_576) assertEquals(output, result.fullOutput());
+            else {
+                assertTrue(result.fullOutput().contains("Output truncated"));
+                assertTrue(result.fullOutput().length() < 1_049_000);
+            }
+            assertEquals(found ? "PSK found" : "Key not found", verifier.status().stage());
             assertNotNull(result.timestamp());
         }
     }
@@ -260,5 +265,24 @@ class HandshakeAnalyzerTest {
         var cancelled = analyzer(null, never);
         cancelled.terminate();
         assertThrows(CancellationException.class, cancelled::capture);
+    }
+
+    @Test void acceptsRotatedLocallyAdministeredStationWhenAllowMacRotationIsEnabled() {
+        String rotatedLocal = "02:11:22:33:44:78";
+        String rotatedGlobal = "00:11:22:33:44:79";
+        var tracker = new HandshakePackets(AP, CLIENT, 2437, 6, true);
+        // Globally administered different station is still rejected even with allowMacRotation enabled.
+        for (int i = 1; i <= 4; i++) tracker.accept(message(AP, rotatedGlobal, 2437, i, i < 3 ? 1 : 2, "g"));
+        assertFalse(tracker.observation().complete());
+
+        // Rotated locally administered MAC succeeds when the pinned MAC sent zero EAPOL frames.
+        for (int i = 1; i <= 4; i++) tracker.accept(message(AP, rotatedLocal, 2437, i, i < 3 ? 3 : 4, "r"));
+        assertTrue(tracker.observation().complete());
+        assertEquals(rotatedLocal, tracker.observation().clientMac());
+
+        // If the pinned client actually completes/sends EAPOL frames, it takes priority.
+        tracker.accept(message(AP, CLIENT, 2437, 1, 5, "c"));
+        assertFalse(tracker.observation().complete());
+        assertEquals(CLIENT, tracker.observation().clientMac());
     }
 }

@@ -20,16 +20,26 @@ final class HandshakePackets {
     private final String client;
     private final int frequency;
     private final int channel;
+    private final boolean allowMacRotation;
     private final LinkedHashMap<String, Exchange> exchanges = new LinkedHashMap<>();
     private boolean beaconSeen;
     private Observation best;
 
     HandshakePackets(String ap, String client, int frequency, int channel) {
+        this(ap, client, frequency, channel, false);
+    }
+
+    HandshakePackets(String ap, String client, int frequency, int channel, boolean allowMacRotation) {
         this.ap = ap;
         this.client = client;
         this.frequency = frequency;
         this.channel = channel;
+        this.allowMacRotation = allowMacRotation;
         best = new Observation(client, List.of(), false);
+    }
+
+    static boolean isLocallyAdministered(String mac) {
+        return HandshakeAnalyzer.isStationAddress(mac) && (Integer.parseInt(mac.substring(0, 2), 16) & 2) != 0;
     }
 
     synchronized void accept(String row) {
@@ -43,11 +53,12 @@ final class HandshakePackets {
         }
         boolean fromAp = ap.equalsIgnoreCase(fields[3]);
         String peer = (fromAp ? fields[4] : fields[3]).toLowerCase(Locale.ROOT);
-        if (!HandshakeAnalyzer.isStationAddress(peer)
-                || (!fromAp && !ap.equalsIgnoreCase(fields[4]))
-                || (client != null && !client.equalsIgnoreCase(peer))) return;
+        if (!HandshakeAnalyzer.isStationAddress(peer) || (!fromAp && !ap.equalsIgnoreCase(fields[4]))) return;
+        if (client != null && !client.equalsIgnoreCase(peer)
+                && (!allowMacRotation || !isLocallyAdministered(peer))) return;
         if (subtype.equals("0x0000") || subtype.equals("0x0002")) {
             exchanges.remove(peer);
+            recomputeBest();
             return;
         }
         if (!fields[11].equals("1") && !fields[11].equalsIgnoreCase("true")) return;
@@ -62,11 +73,28 @@ final class HandshakePackets {
         }
         var exchange = exchanges.computeIfAbsent(peer, ignored -> new Exchange());
         if (exchange.accept(message, replay, fields[10])) {
-            var observation = new Observation(peer, new ArrayList<>(exchange.messages), exchange.complete);
-            if (!best.complete() && (observation.complete() || observation.messages().size() > best.messages().size())) {
-                best = observation;
+            recomputeBest();
+        }
+    }
+
+    private void recomputeBest() {
+        if (client != null) {
+            var pinned = exchanges.get(client.toLowerCase(Locale.ROOT));
+            if (pinned != null && !pinned.messages.isEmpty()) {
+                best = new Observation(client.toLowerCase(Locale.ROOT), new ArrayList<>(pinned.messages), pinned.complete);
+                return;
             }
         }
+        Observation candidate = null;
+        for (var entry : exchanges.entrySet()) {
+            var exchange = entry.getValue();
+            if (exchange.messages.isEmpty()) continue;
+            if (candidate == null
+                    || (!candidate.complete() && (exchange.complete || exchange.messages.size() > candidate.messages().size()))) {
+                candidate = new Observation(entry.getKey(), new ArrayList<>(exchange.messages), exchange.complete);
+            }
+        }
+        best = candidate != null ? candidate : new Observation(client, List.of(), false);
     }
 
     private boolean beaconMatchesChannel(String[] fields) {

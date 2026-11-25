@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { activeRoute, captureStateLabel, modulePath, rememberedTab, sessionSummary, sniperStartRequest } from './navigation';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { activeRoute, captureStateLabel, modulePath, readTab, rememberTab, rememberedTab, sessionSummary, sniperStartRequest } from './navigation';
 
 describe('navigation and session state', () => {
   it('keeps nested module selection in the URL', () => {
@@ -37,4 +37,12 @@ describe('navigation and session state', () => {
     expect(captureStateLabel({ mode: 'replay', running: false, replayState: 'STOPPED' })).toBe('Replay stopped');
     expect(captureStateLabel({ mode: 'replay', running: true, replayState: 'RUNNING' })).toBe('Replaying');
   });
+});
+
+afterEach(() => vi.unstubAllGlobals());
+it('keeps tab navigation available when reads and writes are denied', () => {
+  const denied = () => { throw new Error('Storage denied'); };
+  vi.stubGlobal('localStorage', { getItem: denied, setItem: denied });
+  expect(rememberedTab('privacy', 'privacy', ['whistleblower', 'de-cloaker'], readTab('privacy'))).toBe('whistleblower');
+  expect(() => rememberTab('privacy', 'de-cloaker')).not.toThrow();
 });

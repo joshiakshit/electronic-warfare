@@ -5,11 +5,14 @@ import {
 } from 'lucide-react';
 import type { Json } from './api';
 import {
-  accessPointLabel, errorMessage, operationReadiness, opsApi, startPath, targetLabel, toolSummary,
-  type ObservedAp, type OpsCapabilities, type OpsStatus, type OpsTarget,
+  accessPointLabel, adoptBackendOperation, errorMessage, evilTwinAddressSummary, evilTwinChannelSupported,
+  formatHistoryDuration, isLocallyAdministeredMac, operationIsRunning, operationReadiness, operationTabForActive,
+  opsApi, pmkidRequestBody, polledOperation, startPath, targetLabel, toolSummary, uncloakCandidates,
+  type ObservedAp, type OperationHistoryEntry, type OperationTabId, type OpsCapabilities, type OpsStatus,
+  type OpsTarget,
 } from './ops';
 
-type OperationId = 'deauth' | 'uncloak' | 'handshake' | 'pmkid' | 'beacon' | 'evil-twin';
+type OperationId = OperationTabId;
 type Operation = { id: OperationId; label: string; blurb: string; icon: typeof Shield };
 const OPERATIONS: Operation[] = [
   { id: 'deauth', label: 'Deauthentication', blurb: 'Tune to a target AP and inject deauthentication frames.', icon: Radio },
@@ -49,6 +52,13 @@ export function Ops({ status }: { status?: { operationsEnabled?: boolean } }) {
   const [hiddenBssid, setHiddenBssid] = useState('');
   const [capFile, setCapFile] = useState('');
   const [verifyWordlist, setVerifyWordlist] = useState('');
+  const [verifyBssid, setVerifyBssid] = useState('');
+  const [pmkidAp, setPmkidAp] = useState('');
+  const [pmkidBssid, setPmkidBssid] = useState('');
+  const [pmkidFrequency, setPmkidFrequency] = useState('');
+  const [allowMacRotation, setAllowMacRotation] = useState(false);
+  const [configureAddress, setConfigureAddress] = useState(false);
+  const [history, setHistory] = useState<OperationHistoryEntry[]>([]);
   const [result, setResult] = useState<Json | null>(null);
   const [operationStatus, setOperationStatus] = useState<OpsStatus | null>(null);
   const [busy, setBusy] = useState(false);
@@ -56,6 +66,10 @@ export function Ops({ status }: { status?: { operationsEnabled?: boolean } }) {
   const [active, setActive] = useState<string | null>(null);
   const stopping = useRef(false);
   const initialized = useRef(false);
+  // Invalidates status responses that were requested before a start/stop completed.
+  const statusEpoch = useRef(0);
+  // Identifies the current start request so a superseded one cannot clear newer state.
+  const runSequence = useRef(0);
 
   const refreshCapabilities = useCallback(async () => {
     try {
@@ -70,9 +84,12 @@ export function Ops({ status }: { status?: { operationsEnabled?: boolean } }) {
   }, [status?.operationsEnabled]);
 
   const refreshLive = useCallback(async () => {
-    const [nextTargets, nextInspector] = await Promise.allSettled([opsApi.targets(), opsApi.inspector()]);
+    const [nextTargets, nextInspector, nextHistory] = await Promise.allSettled([
+      opsApi.targets(), opsApi.accessPoints(), opsApi.history(),
+    ]);
     if (nextTargets.status === 'fulfilled') setTargets(Array.isArray(nextTargets.value) ? nextTargets.value : []);
     if (nextInspector.status === 'fulfilled') setObservedAps(nextInspector.value?.accessPoints ?? []);
+    if (nextHistory.status === 'fulfilled') setHistory(Array.isArray(nextHistory.value) ? nextHistory.value : []);
   }, []);
 
   const refreshInventory = useCallback(async () => {
@@ -108,54 +125,81 @@ export function Ops({ status }: { status?: { operationsEnabled?: boolean } }) {
     [targets],
   );
   const hiddenAps = useMemo(
-    () => observedAps.filter(ap => ap.ssidHidden && (ap.clients?.length ?? 0) > 0),
+    () => uncloakCandidates(observedAps),
     [observedAps],
   );
   useEffect(() => {
-    if (operation !== 'uncloak' || hiddenBssid || hiddenAps.length === 0) return;
-    setHiddenBssid(hiddenAps[0].bssid);
+    if (operation !== 'uncloak') return;
+    if (hiddenAps.some(ap => ap.bssid === hiddenBssid)) return;
+    setHiddenBssid(hiddenAps[0]?.bssid ?? '');
   }, [operation, hiddenBssid, hiddenAps]);
 
   const selectedTargetRow = evidencedTargets.find(target => target.id === selectedTarget);
+  useEffect(() => {
+    if (selectedAp && !observedAps.some(ap => ap.bssid === selectedAp)) setSelectedAp('');
+    if (pmkidAp && !observedAps.some(ap => ap.bssid === pmkidAp)) setPmkidAp('');
+  }, [observedAps, selectedAp, pmkidAp]);
+
   const selectedApRow = observedAps.find(ap => ap.bssid === selectedAp);
+  const selectedPmkidApRow = observedAps.find(ap => ap.bssid === pmkidAp);
   const selectedHiddenRow = hiddenAps.find(ap => ap.bssid === hiddenBssid);
   const readiness = operationReadiness(capabilities, operation);
-  const isRunning = busy || !!operationStatus?.running;
+  const isRunning = operationIsRunning(busy, active, operationStatus);
   const activeLabel = active === 'handshake-verify'
     ? 'PSK verification'
     : OPERATIONS.find(item => item.id === active)?.label ?? active;
-  const pollOperation = active && (busy || !!operationStatus?.running) ? active : null;
+  const pollOperation = polledOperation(active, busy, operationStatus);
+
+  // Beacon and evil twin outlive their start request, and navigating away remounts
+  // this console. Re-adopt the backend's slot so polling and Stop are not orphaned.
+  const backendActive = capabilities?.activeOperation ?? null;
+  useEffect(() => {
+    const adopted = adoptBackendOperation(backendActive, active, busy);
+    const tab = operationTabForActive(adopted);
+    if (!adopted || !tab) return;
+    // Drop state that belonged to a different operation so the first poll decides
+    // whether the adopted operation is running.
+    setActive(adopted);
+    setOperation(tab);
+    setOperationStatus(null);
+    setResult(null);
+  }, [backendActive, active, busy]);
 
   useEffect(() => {
     if (!pollOperation) return;
     let cancelled = false;
     const tick = async () => {
+      const epoch = statusEpoch.current;
       try {
         const next = await opsApi.status(pollOperation);
-        if (!cancelled) setOperationStatus(next);
+        if (!cancelled && epoch === statusEpoch.current) setOperationStatus(next);
       } catch {
         /* The operation may have completed between polls. */
       }
     };
     void tick();
+    const capsRefresh = window.setTimeout(() => void refreshCapabilities(), 250);
     const timer = window.setInterval(() => void tick(), 1000);
     return () => {
       cancelled = true;
+      window.clearTimeout(capsRefresh);
       window.clearInterval(timer);
     };
-  }, [pollOperation]);
+  }, [pollOperation, refreshCapabilities]);
 
-  const canStart = !busy && (() => {
+  const canStart = !isRunning && (() => {
     switch (operation) {
       case 'deauth': return (!!selectedTarget || !!selectedAp) && !!interfaceName.trim() && numberIn(count, 0, 1_000_000);
       case 'uncloak': return !!hiddenBssid.trim() && !!interfaceName.trim();
       case 'handshake': return (!!selectedTarget || !!selectedAp) && !!interfaceName.trim();
-      case 'pmkid': return !!interfaceName.trim() && !!wordlist.trim() && numberIn(duration, 1, 300);
+      case 'pmkid':
+        return !!interfaceName.trim() && !!wordlist.trim() && numberIn(duration, 1, 300)
+          && (pmkidFrequency.trim() === '' || numberIn(pmkidFrequency, 2300, 7125));
       case 'beacon': return !!interfaceName.trim() && !!ssid.trim() && numberIn(channel, 1, 233) && numberIn(rate, 1, 10_000);
-      case 'evil-twin': return !!apInterface.trim() && !!ssid.trim() && numberIn(channel, 1, 233) && numberIn(portalPort, 1, 65_535);
+      case 'evil-twin': return !!apInterface.trim() && !!ssid.trim() && evilTwinChannelSupported(Number(channel)) && numberIn(portalPort, 1, 65_535);
     }
   })();
-  const canVerify = !busy && !!capFile.trim() && !!verifyWordlist.trim();
+  const canVerify = !isRunning && !!capFile.trim() && !!verifyWordlist.trim();
 
   const requestBody = (): Json | null => {
     switch (operation) {
@@ -164,34 +208,75 @@ export function Ops({ status }: { status?: { operationsEnabled?: boolean } }) {
       case 'uncloak':
         return { bssid: hiddenBssid.trim(), interface: interfaceName };
       case 'handshake':
-        return { ...(selectedTarget ? { targetId: selectedTarget } : { apId: selectedAp }), interface: interfaceName };
+        return {
+          ...(selectedTarget ? { targetId: selectedTarget } : { apId: selectedAp }),
+          interface: interfaceName,
+          ...(allowMacRotation && selectedTarget ? { allowMacRotation: true } : {}),
+        };
       case 'pmkid':
-        return { interface: interfaceName, wordlistPath: wordlist.trim(), durationSeconds: Number(duration) };
+        return pmkidRequestBody({
+          interfaceName,
+          wordlistPath: wordlist.trim(),
+          durationSeconds: Number(duration),
+          selectedApId: pmkidAp || undefined,
+          apBssid: pmkidBssid,
+          frequencyMhz: pmkidFrequency.trim() ? Number(pmkidFrequency) : null,
+        });
       case 'beacon':
         return { interface: interfaceName, ssid, channel: Number(channel), rate: Number(rate) };
       case 'evil-twin':
-        return { interface: apInterface.trim(), ssid, channel: Number(channel), portalPort: Number(portalPort) };
+        return {
+          interface: apInterface.trim(),
+          ssid,
+          channel: Number(channel),
+          portalPort: Number(portalPort),
+          configureAddress,
+        };
     }
   };
 
   async function run(path: string, body: Json, activeId: string) {
+    const sequence = ++runSequence.current;
+    statusEpoch.current += 1;
     setBusy(true);
     stopping.current = false;
     setError('');
     setResult(null);
     setOperationStatus(null);
     setActive(activeId);
+    setCapabilities(prev => prev ? { ...prev, activeOperation: activeId, activeOperationId: null } : prev);
     try {
       const response = await opsApi.start(path, body);
+      if (sequence !== runSequence.current) return;
+      // Polls issued while the start request was in flight can predate the backend slot.
+      statusEpoch.current += 1;
       setResult(response);
-      if (activeId === 'handshake' && typeof response.capFilePath === 'string') setCapFile(response.capFilePath);
-      try { setOperationStatus(await opsApi.status(activeId)); } catch { /* Result already returned. */ }
+      if (activeId === 'handshake' && typeof response.capFilePath === 'string') {
+        setCapFile(response.capFilePath);
+        setVerifyBssid(typeof response.apBssid === 'string' ? response.apBssid : '');
+      }
+      const epoch = statusEpoch.current;
+      try {
+        const next = await opsApi.status(activeId);
+        if (sequence === runSequence.current && epoch === statusEpoch.current) setOperationStatus(next);
+      } catch { /* Result already returned. */ }
       void refreshInventory();
     } catch (failure) {
-      if (!stopping.current) setError(errorMessage(failure));
+      if (sequence !== runSequence.current) return;
+      statusEpoch.current += 1;
+      if (!stopping.current) {
+        setError(errorMessage(failure));
+        // A rejected start (for example a 409 from a slot this console did not know
+        // about) must not leave the UI claiming an operation it never started.
+        setActive(null);
+        setOperationStatus(null);
+        void refreshInventory();
+      }
     } finally {
-      stopping.current = false;
-      setBusy(false);
+      if (sequence === runSequence.current) {
+        stopping.current = false;
+        setBusy(false);
+      }
     }
   }
 
@@ -202,24 +287,44 @@ export function Ops({ status }: { status?: { operationsEnabled?: boolean } }) {
   }
 
   function verify() {
-    void run('/api/ops/handshake/verify', { capFilePath: capFile.trim(), wordlistPath: verifyWordlist.trim() }, 'handshake-verify');
+    void run('/api/ops/handshake/verify', { capFilePath: capFile.trim(), wordlistPath: verifyWordlist.trim(),
+      ...(verifyBssid.trim() ? { apBssid: verifyBssid.trim() } : {}) }, 'handshake-verify');
   }
 
   async function stop() {
     stopping.current = true;
     try {
-      await opsApi.stop();
+      await opsApi.stop(capabilities?.activeOperationId);
+      statusEpoch.current += 1;
       setResult(null);
-      if (active) setOperationStatus(await opsApi.status(active));
+      if (active) {
+        const epoch = statusEpoch.current;
+        try {
+          const next = await opsApi.status(active);
+          if (epoch === statusEpoch.current) setOperationStatus(next);
+        } catch { /* Stop already succeeded; the status poll can reconcile. */ }
+      }
     } catch (failure) {
       setError(errorMessage(failure));
     } finally {
       setBusy(false);
+      void refreshInventory();
+    }
+  }
+
+  async function clearHistory() {
+    try {
+      await opsApi.clearHistory();
+      setHistory([]);
+    } catch (failure) {
+      setError(errorMessage(failure));
     }
   }
 
   function changeOperation(next: OperationId) {
-    if (busy) return;
+    // Switching tabs must never drop the handle on a running operation (beacon and
+    // evil twin keep running after their start request returns; busy is already false).
+    if (isRunning) return;
     setOperation(next);
     setResult(null);
     setOperationStatus(null);
@@ -229,6 +334,10 @@ export function Ops({ status }: { status?: { operationsEnabled?: boolean } }) {
 
   const captureStatus = (capabilities?.capture?.status ?? {}) as Json;
   const missing = capabilities?.operations.filter(item => !item.ready) ?? [];
+  const ifaceAddress = evilTwinAddressSummary(capabilities?.interfaces, apInterface);
+  const evilTwinHint = ifaceAddress.found
+    ? `${ifaceAddress.addresses.length ? `IPv4: ${ifaceAddress.addresses.join(', ')}` : 'No IPv4 assigned'}${ifaceAddress.hasPortalAddress ? ' · 10.0.0.1 ready' : ''}. Must differ from monitor.`
+    : 'The interface hostapd will own; it must not be the monitor interface.';
 
   return (
     <div className="ops-console">
@@ -299,7 +408,7 @@ export function Ops({ status }: { status?: { operationsEnabled?: boolean } }) {
             const Icon = item.icon;
             return (
               <button key={item.id} className={`ops-op ${operation === item.id ? 'active' : ''}`}
-                      disabled={busy} onClick={() => changeOperation(item.id)}>
+                      disabled={isRunning} onClick={() => changeOperation(item.id)}>
                 <Icon size={18} />
                 <span className="ops-op-text"><b>{item.label}</b><small>{item.blurb}</small></span>
                 <span className={`ops-ready ${row?.ready ? 'ok' : row ? 'warn' : ''}`}>
@@ -321,8 +430,15 @@ export function Ops({ status }: { status?: { operationsEnabled?: boolean } }) {
               <div className="ops-form-grid">
                 <Field label="Client target" hint="Live evidenced client and AP from passive capture.">
                   <select value={selectedTarget} onChange={event => {
-                    setSelectedTarget(event.target.value);
-                    if (event.target.value) setSelectedAp('');
+                    const nextId = event.target.value;
+                    setSelectedTarget(nextId);
+                    if (nextId) {
+                      setSelectedAp('');
+                      const nextTarget = evidencedTargets.find(target => target.id === nextId);
+                      setAllowMacRotation(isLocallyAdministeredMac(nextTarget?.mac));
+                    } else {
+                      setAllowMacRotation(false);
+                    }
                   }}>
                     <option value="">Select a client target</option>
                     {evidencedTargets.map(target => <option key={target.id} value={target.id}>{targetLabel(target)}</option>)}
@@ -331,7 +447,10 @@ export function Ops({ status }: { status?: { operationsEnabled?: boolean } }) {
                 <Field label="Access point" hint="Use an observed AP for broadcast deauth or an AP-only handshake.">
                   <select value={selectedAp} onChange={event => {
                     setSelectedAp(event.target.value);
-                    if (event.target.value) setSelectedTarget('');
+                    if (event.target.value) {
+                      setSelectedTarget('');
+                      setAllowMacRotation(false);
+                    }
                   }}>
                     <option value="">Select an observed AP</option>
                     {observedAps.map(ap => <option key={ap.bssid} value={ap.bssid}>{accessPointLabel(ap)}</option>)}
@@ -354,6 +473,13 @@ export function Ops({ status }: { status?: { operationsEnabled?: boolean } }) {
               </div>
               {(selectedTargetRow || selectedApRow) && (
                 <TargetDetail target={selectedTargetRow} ap={selectedApRow} />
+              )}
+              {operation === 'handshake' && selectedTarget && (
+                <label className="ops-checkbox">
+                  <input type="checkbox" checked={allowMacRotation}
+                         onChange={event => setAllowMacRotation(event.target.checked)} />
+                  <span>Accept rotated client MAC on reconnect (for randomized-MAC phones)</span>
+                </label>
               )}
             </>
           )}
@@ -384,21 +510,48 @@ export function Ops({ status }: { status?: { operationsEnabled?: boolean } }) {
           )}
 
           {operation === 'pmkid' && (
-            <div className="ops-form-grid">
-              <Field label="Monitor interface">
-                <input list="ops-monitor-interfaces-pmkid" value={interfaceName}
-                       onChange={event => setInterfaceName(event.target.value)} placeholder="wlo1" />
-                <datalist id="ops-monitor-interfaces-pmkid">
-                  {capabilities?.monitorInterfaces.map(name => <option key={name} value={name} />)}
-                </datalist>
-              </Field>
-              <Field label="Wordlist path">
-                <input value={wordlist} onChange={event => setWordlist(event.target.value)} placeholder="/path/to/wordlist" />
-              </Field>
-              <Field label="Capture seconds" hint="1–300 seconds.">
-                <input type="number" min={1} max={300} value={duration} onChange={event => setDuration(event.target.value)} />
-              </Field>
-            </div>
+            <>
+              <div className="ops-form-grid">
+                <Field label="Monitor interface">
+                  <input list="ops-monitor-interfaces-pmkid" value={interfaceName}
+                         onChange={event => setInterfaceName(event.target.value)} placeholder="wlo1" />
+                  <datalist id="ops-monitor-interfaces-pmkid">
+                    {capabilities?.monitorInterfaces.map(name => <option key={name} value={name} />)}
+                  </datalist>
+                </Field>
+                <Field label="Wordlist path">
+                  <input value={wordlist} onChange={event => setWordlist(event.target.value)} placeholder="/path/to/wordlist" />
+                </Field>
+                <Field label="Capture seconds" hint="1–300 seconds.">
+                  <input type="number" min={1} max={300} value={duration} onChange={event => setDuration(event.target.value)} />
+                </Field>
+                <Field label="Target access point" hint="Optional. Leave unscoped to capture nearby APs.">
+                  <select value={pmkidAp} onChange={event => {
+                    setPmkidAp(event.target.value);
+                    if (event.target.value) {
+                      setPmkidBssid('');
+                      setPmkidFrequency('');
+                    }
+                  }}>
+                    <option value="">All nearby APs (unscoped)</option>
+                    {observedAps.map(ap => <option key={ap.bssid} value={ap.bssid}>{accessPointLabel(ap)}</option>)}
+                  </select>
+                </Field>
+              </div>
+              <div className="ops-form-grid">
+                <Field label="Target AP BSSID (optional)" hint="Overrides unscoped capture when targeting a lab BSSID directly.">
+                  <input value={pmkidBssid} disabled={!!pmkidAp}
+                         onChange={event => { setPmkidBssid(event.target.value); if (event.target.value) setPmkidAp(''); }}
+                         placeholder="Optional: 02:11:22:33:44:55" />
+                </Field>
+                <Field label="Frequency MHz (optional)" hint="2300–7125 MHz. Observed APs resolve frequency automatically.">
+                  <input type="number" min={2300} max={7125} value={pmkidFrequency} disabled={!!pmkidAp}
+                         onChange={event => { setPmkidFrequency(event.target.value); if (event.target.value) setPmkidAp(''); }}
+                         placeholder="Optional: 2437" />
+                </Field>
+              </div>
+              {selectedPmkidApRow && <ApDetail ap={selectedPmkidApRow} />}
+            </>
           )}
 
           {operation === 'beacon' && (
@@ -423,25 +576,32 @@ export function Ops({ status }: { status?: { operationsEnabled?: boolean } }) {
           )}
 
           {operation === 'evil-twin' && (
-            <div className="ops-form-grid">
-              <Field label="AP interface" hint="The interface hostapd will own; it must not be the monitor interface.">
-                <input list="ops-all-interfaces" value={apInterface}
-                       onChange={event => setApInterface(event.target.value)} placeholder="wlo1ap" />
-                <datalist id="ops-all-interfaces">
-                  {capabilities?.interfaces.filter(item => !item.loopback).map(item =>
-                    <option key={item.name} value={item.name} />)}
-                </datalist>
-              </Field>
-              <Field label="SSID">
-                <input value={ssid} maxLength={32} onChange={event => setSsid(event.target.value)} placeholder="Lab network" />
-              </Field>
-              <Field label="Channel">
-                <input type="number" min={1} max={233} value={channel} onChange={event => setChannel(event.target.value)} />
-              </Field>
-              <Field label="Portal port" hint="The local portal helper listens on this port.">
-                <input type="number" min={1} max={65535} value={portalPort} onChange={event => setPortalPort(event.target.value)} />
-              </Field>
-            </div>
+            <>
+              <div className="ops-form-grid">
+                <Field label="AP interface" hint={evilTwinHint}>
+                  <input list="ops-all-interfaces" value={apInterface}
+                         onChange={event => setApInterface(event.target.value)} placeholder="wlo1ap" />
+                  <datalist id="ops-all-interfaces">
+                    {capabilities?.interfaces.filter(item => !item.loopback).map(item =>
+                      <option key={item.name} value={item.name} />)}
+                  </datalist>
+                </Field>
+                <Field label="SSID">
+                  <input value={ssid} maxLength={32} onChange={event => setSsid(event.target.value)} placeholder="Lab network" />
+                </Field>
+                <Field label="Channel" hint="2.4/5 GHz only. 6 GHz AP setup is unavailable.">
+                  <input type="number" min={1} max={177} value={channel} onChange={event => setChannel(event.target.value)} />
+                </Field>
+                <Field label="Portal port" hint="The local portal helper listens on this port.">
+                  <input type="number" min={1} max={65535} value={portalPort} onChange={event => setPortalPort(event.target.value)} />
+                </Field>
+              </div>
+              <label className="ops-checkbox">
+                <input type="checkbox" checked={configureAddress}
+                       onChange={event => setConfigureAddress(event.target.checked)} />
+                <span>Assign 10.0.0.1/24 to AP interface while running (uses sudo ip; removed on stop)</span>
+              </label>
+            </>
           )}
 
           <div className="ops-actions">
@@ -454,7 +614,10 @@ export function Ops({ status }: { status?: { operationsEnabled?: boolean } }) {
               <div className="ops-section-head"><h3>Verify a capture</h3></div>
               <div className="ops-form-grid">
                 <Field label="Capture file" hint="A .cap written by a handshake capture.">
-                  <input value={capFile} onChange={event => setCapFile(event.target.value)} placeholder="/tmp/ewave-captures/hs-….cap" />
+                  <input value={capFile} onChange={event => { setCapFile(event.target.value); setVerifyBssid(''); }} placeholder="/tmp/ewave-capture-…/hs-….cap" />
+                </Field>
+                <Field label="AP BSSID" hint="Required for imported captures; capture results fill this automatically.">
+                  <input value={verifyBssid} onChange={event => setVerifyBssid(event.target.value)} placeholder="02:11:22:33:44:55" />
                 </Field>
                 <Field label="Wordlist">
                   <input value={verifyWordlist} onChange={event => setVerifyWordlist(event.target.value)} placeholder="/path/to/wordlist" />
@@ -477,6 +640,7 @@ export function Ops({ status }: { status?: { operationsEnabled?: boolean } }) {
             </div>
             <ResultView operation={active ?? operation} result={result} status={operationStatus} />
           </div>
+          <OperationHistoryPanel history={history} onClear={() => void clearHistory()} />
         </section>
       </div>
     </div>
@@ -527,12 +691,21 @@ function ApDetail({ ap }: { ap: ObservedAp }) {
   );
 }
 
-function ResultView({ operation, result, status }: { operation: string; result: Json | null; status: OpsStatus | null }) {
+export function ResultView({ operation, result, status }: { operation: string; result: Json | null; status: OpsStatus | null }) {
   if (!result && !status) return <p className="ops-placeholder">Start an operation to see live progress and results.</p>;
+  // Continuous operations return a start snapshot; polling supplies their newer state and diagnostics.
+  const latest = result && status && (operation === 'beacon' || operation === 'evil-twin')
+    ? { ...result, ...status } : result;
+  const command = latest?.command ?? status?.command;
+  const error = latest?.error ?? status?.error;
+  const output = latest?.output ?? latest?.captureOutput ?? latest?.fullOutput ?? status?.output;
   return (
     <div className="ops-result">
       {status && <StatusSummary status={status} />}
-      {result && <ResultBody operation={operation} result={result} />}
+      {latest && <ResultBody operation={operation} result={latest} />}
+      {command && <pre className="ops-command">{command}</pre>}
+      {error && <div className="ops-error-line">{error}</div>}
+      {typeof output === 'string' && output.trim() !== '' && <pre className="ops-output">{output}</pre>}
     </div>
   );
 }
@@ -546,9 +719,6 @@ function StatusSummary({ status }: { status: OpsStatus }) {
         {status.stage && <b>{status.stage}</b>}
         {status.tool && <span className="mono">{status.tool}</span>}
       </div>
-      {status.command && <pre className="ops-command">{status.command}</pre>}
-      {status.error && <div className="ops-error-line">{status.error}</div>}
-      {typeof status.output === 'string' && status.output.trim() !== '' && <pre className="ops-output">{status.output}</pre>}
       {credentials.length > 0 && (
         <table className="ops-credentials">
           <thead><tr><th>Time</th><th>Client</th><th>Username</th><th>Password</th></tr></thead>
@@ -575,9 +745,7 @@ function ResultBody({ operation, result }: { operation: string; result: Json }) 
           <span className="mono">{result.attackType}</span>
           <span>{typeof result.durationMs === 'number' ? `${result.durationMs} ms` : ''}</span>
         </div>
-        {result.command && <pre className="ops-command">{result.command}</pre>}
         {result.channelWarning && <div className="ops-warn">{result.channelWarning}</div>}
-        {typeof result.output === 'string' && <pre className="ops-output">{result.output}</pre>}
       </div>
     );
   }
@@ -603,7 +771,6 @@ function ResultBody({ operation, result }: { operation: string; result: Json }) 
           <span>Messages <b>{Array.isArray(result.messages) ? result.messages.join(', ') : '—'}</b></span>
           <span>Capture <b className="mono">{result.capFilePath}</b></span>
         </div>
-        {typeof result.captureOutput === 'string' && <pre className="ops-output">{result.captureOutput}</pre>}
       </div>
     );
   }
@@ -616,7 +783,6 @@ function ResultBody({ operation, result }: { operation: string; result: Json }) 
           </span>
           {result.psk && <span>Key <b className="mono">{result.psk}</b></span>}
         </div>
-        {typeof result.fullOutput === 'string' && <pre className="ops-output">{result.fullOutput}</pre>}
       </div>
     );
   }
@@ -629,10 +795,11 @@ function ResultBody({ operation, result }: { operation: string; result: Json }) 
           {result.psk && <span>Key <b className="mono">{result.psk}</b></span>}
         </div>
         <div className="ops-target-detail">
+          {result.targetApBssid && <span>Target AP <b className="mono">{result.targetApBssid}</b></span>}
+          {result.frequencyMhz && <span>Frequency <b>{result.frequencyMhz} MHz</b></span>}
           <span>Capture <b className="mono">{result.pcapngPath || '—'}</b></span>
           <span>Hash <b className="mono">{result.hashPath || '—'}</b></span>
         </div>
-        {typeof result.output === 'string' && result.output.trim() !== '' && <pre className="ops-output">{result.output}</pre>}
       </div>
     );
   }
@@ -643,7 +810,6 @@ function ResultBody({ operation, result }: { operation: string; result: Json }) 
           <span className={`ops-state ${result.running ? 'running' : 'done'}`}>{result.stage || (result.running ? 'Running' : 'Stopped')}</span>
           {result.portalUrl && <span className="mono">{result.portalUrl}</span>}
         </div>
-        {result.error && <div className="ops-error-line">{result.error}</div>}
       </div>
     );
   }
@@ -654,11 +820,48 @@ function ResultBody({ operation, result }: { operation: string; result: Json }) 
           <span className={`ops-state ${result.running ? 'running' : 'done'}`}>{result.running ? 'Flooding' : 'Stopped'}</span>
           {result.tool && <span className="mono">{result.tool}</span>}
         </div>
-        {result.command && <pre className="ops-command">{result.command}</pre>}
-        {result.error && <div className="ops-error-line">{result.error}</div>}
-        {typeof result.output === 'string' && result.output.trim() !== '' && <pre className="ops-output">{result.output}</pre>}
       </div>
     );
   }
   return <pre className="ops-output">{JSON.stringify(result, null, 2)}</pre>;
+}
+
+export function OperationHistoryPanel({
+  history,
+  onClear,
+}: {
+  history: OperationHistoryEntry[];
+  onClear: () => void;
+}) {
+  return (
+    <div className="ops-output-panel ops-history">
+      <div className="ops-section-head">
+        <h3>Recent operations</h3>
+        {history.length > 0 && (
+          <button type="button" className="ops-history-clear" onClick={onClear}>Clear history</button>
+        )}
+      </div>
+      {history.length === 0 ? (
+        <p className="ops-placeholder">No operations recorded in this session yet.</p>
+      ) : (
+        <table className="ops-credentials">
+          <thead>
+            <tr><th>Operation</th><th>Target</th><th>Interface</th><th>Outcome</th><th>Duration</th><th>Ended</th></tr>
+          </thead>
+          <tbody>
+            {history.map(entry => (
+              <tr key={entry.id}>
+                <td className="mono">{entry.operation}</td>
+                <td className="mono">{entry.target || '—'}</td>
+                <td className="mono">{entry.interfaceName || '—'}</td>
+                <td><span className={`ops-state ${entry.success ? 'done' : 'failed'}`}>{entry.outcome}</span></td>
+                <td>{formatHistoryDuration(entry.durationMs)}</td>
+                <td className="mono">{entry.endedAt}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
 }

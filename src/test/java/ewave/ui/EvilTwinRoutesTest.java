@@ -6,6 +6,7 @@ import ewave.active.FrameInjector;
 import ewave.active.LanScanner;
 import ewave.active.WifiAccessPoints;
 import ewave.capture.PacketBridge;
+import ewave.fixtures.CompletedProcess;
 import ewave.fixtures.StreamingCaptureProcess;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -73,7 +74,8 @@ class EvilTwinRoutesTest {
              var client = HttpClient.newHttpClient()) {
             for (String body : new String[]{"null", "[]", "{", "{}", "{\"ssid\":42}", "{\"ssid\":\"\"}",
                     "{\"ssid\":\"lab\",\"channel\":0}", "{\"ssid\":\"lab\",\"portalPort\":0}",
-                    "{\"ssid\":\"lab\",\"portalPort\":70000}", "{\"ssid\":\"lab\",\"interface\":\"a b\"}"})
+                    "{\"ssid\":\"lab\",\"portalPort\":70000}", "{\"ssid\":\"lab\",\"interface\":\"a b\"}",
+                    "{\"ssid\":\"lab\",\"configureAddress\":\"yes\"}"})
                 assertEquals(400, post(client, server, body).statusCode(), body);
             assertTrue(empty.isEmpty());
         }
@@ -88,6 +90,31 @@ class EvilTwinRoutesTest {
             assertEquals(500, failure.statusCode());
             assertEquals("hostapd is missing", mapper.readTree(failure.body()).path("error").asText());
             assertFalse(mapper.readTree(get(client, server).body()).path("running").asBoolean());
+        }
+    }
+
+    @Test void forwardsConfigureAddressFlagAndAssignsCleansLabIpWhenEnabled() throws Exception {
+        var commands = new CopyOnWriteArrayList<List<String>>();
+        try (var bridge = new PacketBridge();
+             var server = server(bridge, settings -> new EvilTwin(settings.apInterface(), settings.ssid(),
+                     settings.channel(), settings.portalPort(), settings.configureAddress(),
+                     directory.resolve("work-ip").toString(), directory.resolve("creds-ip.txt").toString(),
+                     builder -> {
+                         var cmd = List.copyOf(builder.command());
+                         commands.add(cmd);
+                         return cmd.contains("ip") ? new CompletedProcess("", 0) : new StreamingCaptureProcess();
+                     }));
+             var client = HttpClient.newHttpClient()) {
+            var response = post(client, server,
+                    "{\"interface\":\"wlo1ap\",\"ssid\":\"ewave-portal\",\"channel\":6,\"portalPort\":8080,"
+                            + "\"configureAddress\":true}");
+            assertEquals(200, response.statusCode(), response.body());
+            assertTrue(mapper.readTree(response.body()).path("running").asBoolean());
+            assertTrue(commands.stream().anyMatch(cmd -> cmd.equals(
+                    List.of("sudo", "ip", "addr", "replace", "10.0.0.1/24", "dev", "wlo1ap"))));
+            assertEquals(200, post(client, server, "/api/ops/stop", "{}").statusCode());
+            assertTrue(commands.stream().anyMatch(cmd -> cmd.equals(
+                    List.of("sudo", "ip", "addr", "del", "10.0.0.1/24", "dev", "wlo1ap"))));
         }
     }
 

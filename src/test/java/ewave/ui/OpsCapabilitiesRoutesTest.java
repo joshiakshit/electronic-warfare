@@ -1,10 +1,13 @@
 package ewave.ui;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import ewave.active.BeaconFlood;
 import ewave.active.FrameInjector;
 import ewave.active.LanScanner;
+import ewave.active.PmkidCapture;
 import ewave.active.WifiAccessPoints;
 import ewave.capture.PacketBridge;
+import ewave.fixtures.StreamingCaptureProcess;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
@@ -15,6 +18,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -46,6 +50,11 @@ class OpsCapabilitiesRoutesTest {
             assertEquals(1, body.at("/caches/lanHosts/entries").asInt());
             assertTrue(body.path("monitorInterfaces").isArray());
             assertTrue(body.path("interfaces").isArray());
+            assertTrue(body.path("activeOperation").isNull());
+            assertTrue(body.path("activeOperationId").isNull());
+            if (!body.path("interfaces").isEmpty()) {
+                assertTrue(body.at("/interfaces/0/ipv4Addresses").isArray());
+            }
             assertEquals(wordlist.toString(), body.at("/wordlist/path").asText());
             assertTrue(body.at("/wordlist/available").asBoolean());
             assertTrue(body.at("/operations").findValues("id").stream()
@@ -53,6 +62,35 @@ class OpsCapabilitiesRoutesTest {
         } finally {
             if (previous == null) System.clearProperty("rf.wordlist");
             else System.setProperty("rf.wordlist", previous);
+        }
+    }
+
+    @Test void reportsActiveOperationIdWhileAnOperationIsRunning() throws Exception {
+        try (var bridge = new PacketBridge();
+             var server = new PassiveRfServer(bridge, true, FrameInjector::new, new LanScanner(),
+                     new WifiAccessPoints(directory.resolve("missing-aps")),
+                     settings -> { fail("handshake must not start"); return null; },
+                     settings -> new PmkidCapture(settings.monitorInterface()),
+                     settings -> new BeaconFlood(settings.monitorInterface(),
+                             builder -> new StreamingCaptureProcess())).start(0);
+             var client = HttpClient.newHttpClient()) {
+            var started = client.send(HttpRequest.newBuilder(
+                            URI.create("http://localhost:" + server.port() + "/api/ops/beacon"))
+                    .header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString("{\"interface\":\"wlo1\",\"ssid\":\"beacon-id\"}"))
+                    .build(), HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, started.statusCode(), started.body());
+            var caps = mapper.readTree(get(client, server, "/api/ops/capabilities").body());
+            assertEquals("beacon", caps.path("activeOperation").asText());
+            assertFalse(caps.path("activeOperationId").isNull());
+            assertNotNull(UUID.fromString(caps.path("activeOperationId").asText()));
+            assertEquals(200, client.send(HttpRequest.newBuilder(
+                            URI.create("http://localhost:" + server.port() + "/api/ops/stop"))
+                    .header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString("{}"))
+                    .build(), HttpResponse.BodyHandlers.ofString()).statusCode());
+            var idleCaps = mapper.readTree(get(client, server, "/api/ops/capabilities").body());
+            assertTrue(idleCaps.path("activeOperationId").isNull());
         }
     }
 

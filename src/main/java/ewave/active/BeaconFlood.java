@@ -19,6 +19,7 @@ import java.util.regex.Pattern;
 public final class BeaconFlood {
     private static final Pattern INTERFACE = Pattern.compile("[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,14}");
     private static final int OUTPUT_LIMIT = 1_048_576;
+    private static final Pattern MISSING_MDK4 = Pattern.compile("(?m)^sudo: mdk4: command not found\\s*$");
 
     @FunctionalInterface public interface ProcessStarter {
         Process start(ProcessBuilder builder) throws IOException;
@@ -88,22 +89,32 @@ public final class BeaconFlood {
         var args = List.of("sudo", "mdk4", monitorInterface, "b", "-n", ssid,
                 "-c", Integer.toString(channel), "-s", Integer.toString(rate));
         command = String.join(" ", args);
-        return started(starter.start(new ProcessBuilder(args).redirectErrorStream(true)));
+        return started(starter.start(builder(args)), ssid, channel, rate, true);
     }
 
     private Status launchMdk3(String ssid, int channel, int rate) throws IOException {
-        Path file = Files.createTempFile("ewave-beacon-", ".txt",
-                PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")));
-        Files.writeString(file, ssid + System.lineSeparator(), StandardCharsets.UTF_8);
-        ssidFile = file;
+        final Path file;
+        synchronized (this) {
+            if (terminated) throw new CancellationException("Stopped by request");
+            file = Files.createTempFile("ewave-beacon-", ".txt",
+                    PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")));
+            ssidFile = file;
+            Files.writeString(file, ssid + System.lineSeparator(), StandardCharsets.UTF_8);
+        }
         tool = "mdk3";
         var args = List.of("sudo", "mdk3", monitorInterface, "b", "-f", file.toString(),
                 "-c", Integer.toString(channel), "-s", Integer.toString(rate));
         command = String.join(" ", args);
-        return started(starter.start(new ProcessBuilder(args).redirectErrorStream(true)));
+        return started(starter.start(builder(args)), ssid, channel, rate, false);
     }
 
-    private Status started(Process started) throws IOException {
+    private static ProcessBuilder builder(List<String> args) {
+        var builder = new ProcessBuilder(args).redirectErrorStream(true);
+        builder.environment().put("LC_ALL", "C");
+        return builder;
+    }
+
+    private Status started(Process started, String ssid, int channel, int rate, boolean allowFallback) throws IOException {
         if (started == null) throw new IOException("The beacon tool did not start");
         synchronized (this) {
             if (terminated) {
@@ -116,27 +127,39 @@ public final class BeaconFlood {
             error = null;
         }
         started.getOutputStream().close();
-        Thread.ofVirtual().name("ewave-beacon-output").start(() -> drain(started));
-        Thread.ofVirtual().name("ewave-beacon-watch").start(() -> watch(started));
+        Thread.ofVirtual().name("ewave-beacon-watch").start(() -> watch(started, ssid, channel, rate, allowFallback));
         return status();
     }
 
-    private void watch(Process source) {
+    private void watch(Process source, String ssid, int channel, int rate, boolean allowFallback) {
+        // Read the complete diagnostic before deciding whether a failed sudo invocation needs mdk3.
+        drain(source);
         try {
             source.waitFor();
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
-        } finally {
-            synchronized (this) {
-                if (process == source) {
-                    if (!terminated && !source.isAlive() && source.exitValue() != 0 && error == null) {
-                        error = tool + " exited with code " + source.exitValue();
-                    }
-                    process = null;
-                    running = false;
-                    processes.remove(source);
-                }
+        }
+        synchronized (this) {
+            processes.remove(source);
+            if (process != source) return;
+            boolean failed = !source.isAlive() && source.exitValue() != 0;
+            boolean fallback = !terminated && failed && allowFallback && MISSING_MDK4.matcher(output).find();
+            if (!fallback) {
+                if (!terminated && failed && error == null) error = tool + " exited with code " + source.exitValue();
+                process = null;
+                running = false;
                 deleteSsidFile();
+                return;
+            }
+            // Keep running true while the replacement starts so the server retains its operation slot and radio lease.
+        }
+        try {
+            launchMdk3(ssid, channel, rate);
+        } catch (CancellationException stopped) {
+            // terminate() already cleared running and removed any temporary SSID file.
+        } catch (IOException failure) {
+            synchronized (this) {
+                if (!terminated) fail(failure);
             }
         }
     }
@@ -181,8 +204,8 @@ public final class BeaconFlood {
 
     private static boolean missingProgram(IOException failure, String name) {
         String message = Objects.toString(failure.getMessage(), "").toLowerCase(Locale.ROOT);
-        return message.contains("no such file") || message.contains("error=2")
-                || message.contains("cannot run program \"" + name + "\"");
+        return message.contains("cannot run program \"" + name + "\"")
+                && (message.contains("no such file") || message.contains("error=2"));
     }
 
     private static void validate(String ssid, int channel, int rate) {

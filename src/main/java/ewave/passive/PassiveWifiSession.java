@@ -1,9 +1,12 @@
 package ewave.passive;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonUnwrapped;
 import ewave.decoder.Dot11Frame;
 import ewave.decoder.Dot11FrameDecoder;
 import ewave.decoder.Dot11InformationElements;
 import ewave.decoder.IeSignature;
+import ewave.decoder.MultipleBssidDecoder;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -26,11 +29,20 @@ public final class PassiveWifiSession {
     private static final int CLIENT_DIRECTORY_LIMIT = 4096;
     private static final long DIRECTORY_TTL = TimeUnit.MINUTES.toMillis(10);
     private record ObservedAp(String address, byte[] ssidBytes, String ssid, String ssidToken,
-                              int channel, int frequencyMhz, int beaconIntervalTu, Double rssi, long time) { }
+                              int channel, int frequencyMhz, int beaconIntervalTu, Double rssi, long time,
+                              Dot11Frame advertisement) { }
     private record ObservedClient(String address, long time) { }
-    public record Observation(boolean inventory, boolean probe) { }
-    public record ObservedApDetails(String token, String bssid, byte[] ssidBytes, String ssid,
-                                    int channel, int frequencyMhz, int beaconIntervalTu, Double rssi, long lastSeen) {
+    public record Observation(boolean inventory, boolean probe, boolean topology) {
+        public Observation(boolean inventory, boolean probe) { this(inventory, probe, inventory); }
+    }
+    public record ObservedApDetails(String token, @JsonIgnore String bssid, byte[] ssidBytes, String ssid,
+                                    int channel, int frequencyMhz, int beaconIntervalTu, Double rssi, long lastSeen,
+                                    @JsonIgnore Dot11Frame advertisement) {
+        public ObservedApDetails(String token, String bssid, byte[] ssidBytes, String ssid,
+                                 int channel, int frequencyMhz, int beaconIntervalTu, Double rssi, long lastSeen) {
+            this(token, bssid, ssidBytes, ssid, channel, frequencyMhz, beaconIntervalTu, rssi, lastSeen, null);
+        }
+
         public ObservedApDetails {
             ssidBytes = ssidBytes == null ? null : ssidBytes.clone();
         }
@@ -38,6 +50,7 @@ public final class PassiveWifiSession {
     }
     private static final Observation IGNORED = new Observation(false, false);
     private static final Observation INVENTORY = new Observation(true, false);
+    private static final Observation TOPOLOGY_ONLY = new Observation(false, false, true);
     private static final Observation PROBE_ONLY = new Observation(false, true);
     private static final Observation BOTH = new Observation(true, true);
 
@@ -49,9 +62,10 @@ public final class PassiveWifiSession {
     private final List<String> commandLineBssids = configuredBssids();
     private final LinkedHashMap<String, ObservedAp> observedAps = new LinkedHashMap<>(16, .75f, true);
     private final LinkedHashMap<String, ObservedClient> observedClients = new LinkedHashMap<>(16, .75f, true);
-    private final boolean revealProbeNames;
     private List<String> bssids;
+    private Map<String, String> enrolledLabels = Map.of();
     private boolean neighborhoodProbes;
+    private final FingerprintDb fingerprints;
     private final WifiInventory inventory;
     private final ProbeAuditAggregator audit;
     private final TopologyBuilder topology;
@@ -75,24 +89,27 @@ public final class PassiveWifiSession {
     }
 
     private PassiveWifiSession(DeviceProfiler profiler, MyNetworkProfile profile, LongSupplier clock,
-                               boolean revealNamesByDefault) throws IOException {
-        this.replaySession = revealNamesByDefault;
+                               boolean replaySession) throws IOException {
+        this.replaySession = replaySession;
         this.clock = Objects.requireNonNull(clock);
-        inventory = new WifiInventory(profiler.ouiLookup(), new FingerprintDb());
-        revealProbeNames = Boolean.parseBoolean(
-                System.getProperty("audit.revealSsids", Boolean.toString(revealNamesByDefault)));
-        audit = new ProbeAuditAggregator(revealProbeNames);
-        topology = new TopologyBuilder(ids, this::allowsBssid, true);
+        fingerprints = new FingerprintDb();
+        inventory = new WifiInventory(profiler.ouiLookup(), fingerprints, ids);
+        audit = new ProbeAuditAggregator(ids);
+        topology = new TopologyBuilder(ids, this::allowsBssid, true, profiler.ouiLookup());
         configure(profile);
     }
 
     public UUID sessionId() { return sessionId; }
     public boolean isReplaySession() { return replaySession; }
-    public boolean revealProbeNames() { return revealProbeNames; }
 
     public record EvidencedTarget(String id, String mac, String type, String vendor, String label, int rssi,
                                   String apId, String apBssid, String apSsid, int channel, int frequencyMhz,
                                   String evidenceSource, long lastSeen, UUID sessionId) { }
+
+    public synchronized boolean hasAssociationEvidence(String clientId, String apId) {
+        var evidence = topology.associationEvidence(clientId, apId);
+        return evidence != null && evidence.lastSeen() > clock.getAsLong() - topology.associationRetention(retention);
+    }
 
     /** Returns only clients confirmed by association or data relationships in live capture; replay is analysis-only. */
     public synchronized List<EvidencedTarget> evidencedTargets(DeviceProfiler profiler) {
@@ -106,6 +123,8 @@ public final class PassiveWifiSession {
         for (var dev : inventory.prepareSnapshot()) invMap.put(dev.id(), dev);
         var targets = new java.util.ArrayList<EvidencedTarget>();
         for (var edge : snap.edges()) {
+            var evidence = topology.associationEvidence(edge.clientId(), edge.bssid());
+            if (evidence == null || evidence.lastSeen() <= now - topology.associationRetention(retention)) continue;
             String clientMac = observedClient(edge.clientId());
             if (clientMac == null) continue;
             String apBssid = observedBssid(edge.bssid());
@@ -121,17 +140,22 @@ public final class PassiveWifiSession {
             var apInfo = apMap.get(edge.bssid());
             String apSsid = apInfo != null ? apInfo.ssid() : null;
             if (apSsid == null) {
-                var obs = observedAp(edge.bssid());
+                var obs = directlyObservedAp(edge.bssid());
                 if (obs != null) apSsid = obs.ssid();
             }
             targets.add(new EvidencedTarget(edge.clientId(), clientMac, type, vendor, type + " · " + vendor,
-                    rssi, edge.bssid(), apBssid, apSsid, edge.channel(), edge.frequencyMhz(),
-                    edge.source(), edge.lastSeen(), sessionId));
+                    rssi, edge.bssid(), apBssid, apSsid, Dot11FrameDecoder.channel(evidence.frequencyMhz()),
+                    evidence.frequencyMhz(), evidence.source(), evidence.lastSeen(), sessionId));
         }
         return List.copyOf(targets);
     }
 
     public synchronized boolean configure(MyNetworkProfile profile) {
+        useFingerprintSamples(profile.fingerprintSamples());
+        var labels = new LinkedHashMap<String, String>();
+        profile.devices().forEach(entry -> labels.put(addressId(entry.address()), entry.label()));
+        profile.accessPoints().forEach(entry -> labels.put(addressId(entry.address()), entry.label()));
+        enrolledLabels = Map.copyOf(labels);
         List<String> next = !commandLineBssids.isEmpty() ? commandLineBssids
                 : profile.restrictCapture() ? profile.accessPoints().stream().map(MyNetworkProfile.Entry::address).toList()
                 : List.of();
@@ -142,14 +166,21 @@ public final class PassiveWifiSession {
         topology.clear();
         audit.clear();
         observedClients.clear();
+        observedAps.values().removeIf(ap -> ap.advertisement == null);
         return true;
+    }
+
+    /** Applies saved My Network reference samples to inventory classification, including retained devices. */
+    public synchronized void useFingerprintSamples(List<MyNetworkProfile.FingerprintSample> samples) {
+        fingerprints.useSamples(samples);
+        inventory.reclassify();
     }
 
     public boolean commandLineScope() { return !commandLineBssids.isEmpty(); }
 
     public synchronized String observedBssid(String token) {
         ObservedAp ap = observedAps.get(token);
-        return ap == null || ap.time < clock.getAsLong() - DIRECTORY_TTL ? null : ap.address;
+        return ap == null || ap.advertisement == null || ap.time < clock.getAsLong() - DIRECTORY_TTL ? null : ap.address;
     }
 
     /** Resolves a topology client token for active operations without exposing addresses in reports. */
@@ -171,7 +202,25 @@ public final class PassiveWifiSession {
         ObservedAp ap = observedAps.get(token);
         if (ap == null || ap.time < clock.getAsLong() - DIRECTORY_TTL) return null;
         return new ObservedApDetails(token, ap.address, ap.ssidBytes, ap.ssid, ap.channel, ap.frequencyMhz,
-                ap.beaconIntervalTu, ap.rssi, ap.time);
+                ap.beaconIntervalTu, ap.rssi, ap.time, ap.advertisement);
+    }
+
+    public synchronized ObservedApDetails directlyObservedAp(String token) {
+        var ap = observedAp(token);
+        return ap == null || ap.advertisement() == null ? null : ap;
+    }
+
+    public record SelectableAccessPoint(String bssid, String ssid, boolean ssidHidden, int channel,
+                                        int frequencyMhz, List<String> clients, long lastSeen) { }
+
+    /** Fresh advertised APs that can be resolved by Sniper and Ops, rather than historical topology rows. */
+    public synchronized List<SelectableAccessPoint> selectableAccessPoints() {
+        var snapshot = topology();
+        return snapshot.accessPoints().stream().map(ap -> {
+            var details = directlyObservedAp(ap.bssid());
+            return details == null || details.frequencyMhz() <= 0 ? null : new SelectableAccessPoint(ap.bssid(), ap.ssid(), ap.ssidHidden(),
+                    details.channel(), details.frequencyMhz(), ap.clients(), details.lastSeen());
+        }).filter(Objects::nonNull).toList();
     }
 
     public synchronized List<String> findAccessPoints(String name) {
@@ -184,7 +233,8 @@ public final class PassiveWifiSession {
             throw new IllegalArgumentException("Enter a network name of 1–32 Wi-Fi bytes");
         long cutoff = clock.getAsLong() - DIRECTORY_TTL;
         return observedAps.entrySet().stream()
-                .filter(row -> row.getValue().time >= cutoff && Arrays.equals(exactSsidBytes, row.getValue().ssidBytes))
+                .filter(row -> row.getValue().advertisement != null && row.getValue().time >= cutoff
+                        && Arrays.equals(exactSsidBytes, row.getValue().ssidBytes))
                 .map(Map.Entry::getKey).toList();
     }
 
@@ -193,36 +243,29 @@ public final class PassiveWifiSession {
         if (now >= nextPurge) purge(now);
         if (frame.timestamp() < now - retention) return IGNORED;
         String frameBssid = bssid(frame);
+        var profiles = frame.apAdvertisement()
+                ? MultipleBssidDecoder.decode(frame).stream().filter(profile -> allowsBssid(profile.bssid())).toList()
+                : List.<MultipleBssidDecoder.Profile>of();
         if (frame.apAdvertisement() && frameBssid != null && (frame.capability() & 1) != 0) {
-            String token = addressId(frameBssid);
-            var previous = observedAps.get(token);
-            byte[] ssid = frame.ies().first(0);
-            boolean hidden = Dot11InformationElements.hidden(ssid);
-            byte[] ssidBytes = hidden ? (previous == null ? null : previous.ssidBytes) : ssid.clone();
-            String ssidLabel = hidden ? (previous == null ? null : previous.ssid) : Dot11InformationElements.ssidLabel(ssid);
-            String ssidToken = hidden ? (previous == null ? null : previous.ssidToken) : ids.id("topology-ssid", ssid);
             int mhz = frame.frequencyMhz();
             int ch = Dot11FrameDecoder.channel(mhz);
             byte[] ds = frame.ies().first(3), ht = frame.ies().first(61);
             if ("2.4 GHz".equals(WifiInventory.band(mhz)) && ds.length == 1 && ds[0] > 0 && ds[0] <= 14) {
                 ch = ds[0];
-                mhz = 2407 + ch * 5;
+                mhz = ch == 14 ? 2484 : 2407 + ch * 5;
             } else if ("5 GHz".equals(WifiInventory.band(mhz)) && ht.length >= 22) {
                 ch = ht[0] & 0xff;
             }
             if (ch == 0 && ds.length == 1) {
                 ch = ds[0] & 0xff;
-                if (ch >= 1 && ch <= 13) mhz = 2407 + ch * 5;
+                if (ch >= 1 && ch <= 13) mhz = ch == 14 ? 2484 : 2407 + ch * 5;
             }
-            if (previous == null || frame.timestamp() >= previous.time) {
-                int interval = frame.beaconIntervalTu() > 0 ? frame.beaconIntervalTu()
-                        : (previous == null ? 100 : previous.beaconIntervalTu);
-                Double rssi = Double.isFinite(frame.rssi()) ? Double.valueOf(frame.rssi())
-                        : (previous == null ? null : previous.rssi);
-                observedAps.put(token, new ObservedAp(frameBssid, ssidBytes, ssidLabel, ssidToken,
-                        ch, mhz, interval, rssi, frame.timestamp()));
+            if (allowsBssid(frameBssid)) {
+                rememberAdvertisement(frameBssid, frame.ies().first(0), ch, mhz, frame, true);
             }
-            if (observedAps.size() > AP_DIRECTORY_LIMIT) observedAps.pollFirstEntry();
+            for (var profile : profiles) {
+                rememberAdvertisement(profile.bssid(), profile.ies().first(0), ch, mhz, frame, false);
+            }
         } else if (frame.management() && (frame.subtype() == 0 || frame.subtype() == 2)
                 && frameBssid != null && frameBssid.equals(frame.addr1())) {
             String token = addressId(frameBssid);
@@ -232,34 +275,84 @@ public final class PassiveWifiSession {
                 observedAps.put(token, new ObservedAp(previous.address, ssid.clone(),
                         Dot11InformationElements.ssidLabel(ssid), ids.id("topology-ssid", ssid),
                         previous.channel, previous.frequencyMhz, previous.beaconIntervalTu,
-                        previous.rssi, Math.max(previous.time, frame.timestamp())));
+                        previous.rssi, Math.max(previous.time, frame.timestamp()), previous.advertisement));
             }
         }
-        boolean inScope = bssids.isEmpty() || allowsBssid(frameBssid);
+        boolean peersOnly = frame.type() == 1 || (frame.type() == 2 && frame.ds() == 3);
+        boolean inScope = peersOnly ? allowsBssid(frame.addr1()) || allowsBssid(frame.addr2()) : allowsBssid(frameBssid);
         boolean auditProbe = frame.probe() && (inScope || neighborhoodProbes);
-        if (!inScope && !auditProbe) return IGNORED;
+        if (!inScope && !auditProbe && profiles.isEmpty()) return IGNORED;
 
         String sender = addressId(frame.addr2());
+        if (!inScope && !profiles.isEmpty()) {
+            topology.observe(frame, sender, profiles);
+            return TOPOLOGY_ONLY;
+        }
+        if (peersOnly) {
+            String client = topology.observe(frame, sender, profiles);
+            if (client != null) inventory.confirmClient(addressId(client), client, frame.timestamp());
+            return client == null ? TOPOLOGY_ONLY : INVENTORY;
+        }
         boolean local = OuiLookup.isLocallyAdministered(HexFormat.ofDelimiter(":").parseHex(frame.addr2()));
         boolean capabilities = frame.management() && (frame.probe() || frame.apAdvertisement()
                 || frame.subtype() == 0 || frame.subtype() == 2);
         String signature = capabilities ? IeSignature.of(frame.ies()) : null;
-        boolean directed = false, wps = false;
+        boolean directed = false;
+        boolean newProbe = false;
+        String wpsUuidToken = null;
+        List<String> directedNameTokens = List.of();
         if (auditProbe) {
-            byte[] ssid = frame.ies().first(0);
-            directed = !Dot11InformationElements.hidden(ssid);
-            wps = frame.ies().hasWpsUuidE();
-            audit.observe(frame.timestamp(), sender, local, signature, wps, ssid, directed, ids);
+            var ies = frame.ies();
+            byte[] ssid = ies.first(0);
+            var ssidList = ies.probeSsidsInList();
+            var shortSsids = ies.shortSsidList();
+            boolean hasPrimary = !Dot11InformationElements.hidden(ssid);
+            directed = hasPrimary || !ssidList.isEmpty() || !shortSsids.isEmpty();
+            newProbe = !audit.duplicate(frame.timestamp(), sender, frame.sequenceControl(), frame.retry());
+            if (newProbe) {
+                wpsUuidToken = ies.wpsUuidE().map(uuidBytes -> ids.id("wps-uuid", uuidBytes)).orElse(null);
+                audit.observe(frame.timestamp(), sender, local, signature, wpsUuidToken, ssid, ssidList, shortSsids,
+                        ies.hasPasspoint(), ies.p2pDeviceName().orElse(null));
+                if (inScope && local) {
+                    var names = new java.util.ArrayList<>(ssidList);
+                    if (hasPrimary) names.add(ssid);
+                    directedNameTokens = names.stream().map(name -> ids.id("correlation-ssid", name))
+                            .distinct().sorted().toList();
+                }
+            }
         }
-        if (!inScope) return PROBE_ONLY;
-        inventory.observe(frame, sender, local, signature, directed, wps);
-        String client = topology.observe(frame, sender);
+        if (!inScope) return newProbe ? PROBE_ONLY : IGNORED;
+        inventory.observe(frame, sender, local, signature, directed, newProbe, directedNameTokens, wpsUuidToken);
+        String client = topology.observe(frame, sender, profiles);
         if (client != null) {
-            observedClients.put(addressId(client), new ObservedClient(client, frame.timestamp()));
-            if (observedClients.size() > CLIENT_DIRECTORY_LIMIT) observedClients.pollFirstEntry();
-            inventory.confirmClient(addressId(client), client, frame.timestamp());
+            String clientId = addressId(client);
+            if (frameBssid != null && topology.associationEvidence(clientId, addressId(frameBssid)) != null) {
+                observedClients.put(clientId, new ObservedClient(client, frame.timestamp()));
+                if (observedClients.size() > CLIENT_DIRECTORY_LIMIT) observedClients.pollFirstEntry();
+            }
+            inventory.confirmClient(clientId, client, frame.timestamp());
         }
-        return auditProbe ? BOTH : INVENTORY;
+        return newProbe ? BOTH : INVENTORY;
+    }
+
+    private void rememberAdvertisement(String address, byte[] ssid, int channel, int frequency, Dot11Frame frame,
+                                       boolean transmitted) {
+        String token = addressId(address);
+        audit.observeAdvertisement(ssid, frame.timestamp());
+        var previous = observedAps.get(token);
+        if (previous != null && (frame.timestamp() < previous.time || !transmitted && previous.advertisement != null))
+            return;
+        boolean hidden = Dot11InformationElements.hidden(ssid);
+        byte[] ssidBytes = hidden ? (previous == null ? null : previous.ssidBytes) : ssid.clone();
+        String ssidLabel = hidden ? (previous == null ? null : previous.ssid) : Dot11InformationElements.ssidLabel(ssid);
+        String ssidToken = hidden ? (previous == null ? null : previous.ssidToken) : ids.id("topology-ssid", ssid);
+        int interval = frame.beaconIntervalTu() > 0 ? frame.beaconIntervalTu()
+                : (previous == null ? 100 : previous.beaconIntervalTu);
+        Double rssi = Double.isFinite(frame.rssi()) ? Double.valueOf(frame.rssi())
+                : (previous == null ? null : previous.rssi);
+        observedAps.put(token, new ObservedAp(address, ssidBytes, ssidLabel, ssidToken,
+                channel, frequency, interval, rssi, frame.timestamp(), transmitted ? frame : null));
+        if (observedAps.size() > AP_DIRECTORY_LIMIT) observedAps.pollFirstEntry();
     }
 
     private static List<String> configuredBssids() {
@@ -283,10 +376,11 @@ public final class PassiveWifiSession {
                 case 0, 2 -> bssid.equals(frame.addr1()) ? bssid : null;
                 case 1, 3, 5, 8 -> bssid.equals(frame.addr2()) ? bssid : null;
                 case 4 -> bssid;
-                case 11 -> bssid.equals(frame.addr1()) || bssid.equals(frame.addr2()) ? bssid : null;
+                case 10, 11, 12, 13 -> bssid.equals(frame.addr1()) || bssid.equals(frame.addr2()) ? bssid : null;
                 default -> null;
             };
         }
+        if (frame.type() != 2) return null;
         return switch (frame.ds()) {
             case 0 -> frame.addr3();
             case 1 -> frame.addr1();
@@ -311,16 +405,42 @@ public final class PassiveWifiSession {
         return List.copyOf(snapshot);
     }
 
+    public record ProfilerDevice(@JsonUnwrapped WifiInventory.Device device,
+                                 ProbeCorrelation.Reference inferredCorrelation, String enrolledLabel,
+                                 WifiInventory.AssociatedAp associatedAp) { }
+
+    public record TrackerDevice(@JsonUnwrapped WifiInventory.Device device, String enrolledLabel) { }
+
+    public synchronized List<TrackerDevice> trackerDevices() {
+        purge(clock.getAsLong());
+        return inventory.snapshot().stream().map(device -> new TrackerDevice(device, enrolledLabels.get(device.id()))).toList();
+    }
+
+    public synchronized List<ProfilerDevice> profilerReport() {
+        purge(clock.getAsLong());
+        var clusters = inventory.correlations();
+        var associatedAps = topology.associatedAps(null);
+        return inventory.snapshot().stream().map(device -> {
+            var cluster = clusters.get(device.id());
+            return new ProfilerDevice(device, cluster == null ? null : cluster.reference(),
+                    enrolledLabels.get(device.id()), associatedAps.get(device.id()));
+        }).toList();
+    }
+
     public synchronized WifiInventory.Detail inventoryDetail(String id) {
         long now = clock.getAsLong();
         purge(now);
-        return inventory.detail(id, now - retention);
+        return inventory.detail(id, now - retention, enrolledLabels.get(id), topology.associatedAps(id).get(id));
     }
 
     public ProbeAuditAggregator.Report audit() {
         ProbeAuditAggregator.PendingReport pending;
         synchronized (this) {
-            pending = audit.prepareSnapshot(clock.getAsLong(), retention);
+            long now = clock.getAsLong();
+            inventory.purge(now - retention);
+            int clusters = (int) inventory.correlations().values().stream()
+                    .map(ProbeCorrelation.Cluster::id).distinct().count();
+            pending = audit.prepareSnapshot(now, retention, clusters);
         }
         return pending.build();
     }

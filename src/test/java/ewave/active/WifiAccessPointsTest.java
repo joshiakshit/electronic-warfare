@@ -31,12 +31,15 @@ class WifiAccessPointsTest {
                 "Bad:aa\\:bb\\:cc\\:dd\\:ee\\:ff:2:1 MHz", "Bad:invalid:2:2417 MHz")).isEmpty());
     }
 
-    @Test void defaultsMissingZeroAndNegativeCacheChannelsToSix() {
+    @Test void infersMissingZeroAndNegativeCacheChannelsFromTheMeasuredFrequency() {
         for (String channel : List.of("0", "-1", "", "--", "null")) {
             var points = WifiAccessPoints.parse(List.of("Lab:aa\\:bb\\:cc\\:dd\\:ee\\:ff:" + channel + ":2437 MHz"));
             assertEquals(1, points.size(), channel);
             assertEquals(6, points.getFirst().channel(), channel);
         }
         assertEquals(6, new WifiAccessPoints.AccessPoint("Lab", "AA:BB:CC:DD:EE:FF", -1, 2437).channel());
+        assertEquals(1, new WifiAccessPoints.AccessPoint("Six GHz", "AA:BB:CC:DD:EE:FF", 0, 5955).channel());
+        assertThrows(IllegalArgumentException.class,
+                () -> new WifiAccessPoints.AccessPoint("Unknown", "AA:BB:CC:DD:EE:FF", 0, 0));
     }
 }

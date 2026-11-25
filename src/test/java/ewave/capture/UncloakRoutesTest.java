@@ -1,10 +1,11 @@
-package ewave.ui;
+package ewave.capture;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import ewave.active.FrameInjector;
 import ewave.active.LanScanner;
 import ewave.active.WifiAccessPoints;
-import ewave.capture.PacketBridge;
+import ewave.ui.PassiveRfServer;
+import ewave.fixtures.StreamingCaptureProcess;
 import ewave.fixtures.CompletedProcess;
 import ewave.fixtures.ProbeFrames;
 import org.junit.jupiter.api.Test;
@@ -22,6 +23,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 
@@ -36,13 +38,13 @@ class UncloakRoutesTest {
     private final ObjectMapper mapper = new ObjectMapper();
     @TempDir Path directory;
 
-    @Test void sendsTargetedDeauthForATopologyTokenUsingTheCachedFrequency() throws Exception {
+    @Test void sendsTargetedDeauthUsingTheMeasuredFrequencyInsteadOfAStaleCache() throws Exception {
         var commands = new CopyOnWriteArrayList<List<String>>();
         Path cache = Files.writeString(directory.resolve("aps.txt"), "Lab AP:" + escape(AP) + ":6:2417 MHz\n");
-        try (var bridge = new PacketBridge()) {
-            bridge.startReplay(capture(hiddenBeacon(AP), data(AP, CLIENT, 1),
+        var receiver = new StreamingCaptureProcess();
+        try (var bridge = new PacketBridge(builder -> receiver, Map.of())) {
+            startLive(bridge, receiver, capture(hiddenBeacon(AP), data(AP, CLIENT, 1),
                     data(AP, CLIENT, 2), data(AP, CLIENT, 3)));
-            awaitReplay(bridge);
             String token = bridge.getPassiveWifi().addressId(AP);
             assertEquals(token, bridge.getPassiveWifi().topology().accessPoints().getFirst().bssid());
             try (var server = server(bridge, new WifiAccessPoints(cache), commands);
@@ -57,7 +59,7 @@ class UncloakRoutesTest {
                 assertEquals("SSID will appear in Whistleblower within 10s if the client reconnects.",
                         result.path("message").asText());
 
-                assertEquals(List.of("sudo", "iw", "dev", "wlo1", "set", "freq", "2417"), commands.get(0));
+                assertEquals(List.of("sudo", "iw", "dev", "wlo1", "set", "freq", "2437"), commands.get(0));
                 assertEquals(List.of("sudo", "aireplay-ng", "--ignore-negative-one", "--deauth", "8", "-a", AP,
                         "-c", CLIENT, "wlo1"), commands.get(1));
             }
@@ -66,10 +68,10 @@ class UncloakRoutesTest {
 
     @Test void acceptsAnActualBssidAndFallsBackToTheTopologyChannel() throws Exception {
         var commands = new CopyOnWriteArrayList<List<String>>();
-        try (var bridge = new PacketBridge()) {
-            bridge.startReplay(capture(hiddenBeacon(AP), data(AP, CLIENT, 1),
+        var receiver = new StreamingCaptureProcess();
+        try (var bridge = new PacketBridge(builder -> receiver, Map.of())) {
+            startLive(bridge, receiver, capture(hiddenBeacon(AP), data(AP, CLIENT, 1),
                     data(AP, CLIENT, 2), data(AP, CLIENT, 3)));
-            awaitReplay(bridge);
             try (var server = server(bridge, new WifiAccessPoints(directory.resolve("missing-aps")), commands);
                  var client = HttpClient.newHttpClient()) {
                 var response = post(client, server,
@@ -85,9 +87,9 @@ class UncloakRoutesTest {
 
     @Test void rejectsKnownNamesMissingClientsAndInvalidRequestsWithoutInjecting() throws Exception {
         var commands = new CopyOnWriteArrayList<List<String>>();
-        try (var bridge = new PacketBridge()) {
-            bridge.startReplay(capture(namedBeacon(AP, "Known Lab"), hiddenBeacon(AP2)));
-            awaitReplay(bridge);
+        var receiver = new StreamingCaptureProcess();
+        try (var bridge = new PacketBridge(builder -> receiver, Map.of())) {
+            startLive(bridge, receiver, capture(namedBeacon(AP, "Known Lab"), hiddenBeacon(AP2)));
             var session = bridge.getPassiveWifi();
             String known = session.addressId(AP), hidden = session.addressId(AP2);
             String ssidToken = session.topology().accessPoints().stream()
@@ -113,6 +115,48 @@ class UncloakRoutesTest {
             }
         }
         assertTrue(commands.isEmpty());
+    }
+
+    @Test void rejectsAHiddenApAfterAProbeResponseRevealsItsName() throws Exception {
+        var commands = new CopyOnWriteArrayList<List<String>>();
+        var receiver = new StreamingCaptureProcess();
+        try (var bridge = new PacketBridge(builder -> receiver, Map.of())) {
+            startLive(bridge, receiver, capture(hiddenBeacon(AP),
+                    beacon(5, AP, "Revealed lab".getBytes(StandardCharsets.UTF_8), 2),
+                    data(AP, CLIENT, 1), data(AP, CLIENT, 2), data(AP, CLIENT, 3)));
+            var ap = bridge.getPassiveWifi().topology().accessPoints().getFirst();
+            assertTrue(ap.ssidHidden(), "Hidden remains historical Whistleblower evidence");
+            assertEquals("Revealed lab", ap.ssid());
+            try (var server = server(bridge, new WifiAccessPoints(directory.resolve("missing-aps")), commands);
+                 var client = HttpClient.newHttpClient()) {
+                assertEquals(400, post(client, server, "{\"bssid\":\"" + ap.bssid() + "\"}").statusCode());
+            }
+        }
+        assertTrue(commands.isEmpty());
+    }
+
+    @Test void usesSixGhzMeasurementsAndRejectsUnknownFrequencyBeforeInjecting() throws Exception {
+        for (int frequency : new int[]{5955, 0}) {
+            var commands = new CopyOnWriteArrayList<List<String>>();
+            var receiver = new StreamingCaptureProcess();
+            try (var bridge = new PacketBridge(builder -> receiver, Map.of())) {
+                Path file = capture(hiddenBeacon(AP), data(AP, CLIENT, 1), data(AP, CLIENT, 2), data(AP, CLIENT, 3));
+                byte[] pcap = Files.readAllBytes(file);
+                var buffer = ByteBuffer.wrap(pcap).order(ByteOrder.LITTLE_ENDIAN);
+                for (int offset = 24; offset < pcap.length; offset += 16 + buffer.getInt(offset + 8))
+                    buffer.putShort(offset + 16 + 8, (short) frequency);
+                Files.write(file, pcap);
+                startLive(bridge, receiver, file);
+                String apId = bridge.getPassiveWifi().addressId(AP);
+                try (var server = server(bridge, new WifiAccessPoints(directory.resolve("missing-aps")), commands);
+                     var client = HttpClient.newHttpClient()) {
+                    var response = post(client, server, "{\"bssid\":\"" + apId + "\"}");
+                    assertEquals(frequency == 0 ? 400 : 200, response.statusCode(), response.body());
+                    if (frequency == 0) assertTrue(commands.isEmpty());
+                    else assertEquals(List.of("sudo", "iw", "dev", "wlo1", "set", "freq", "5955"), commands.getFirst());
+                }
+            }
+        }
     }
 
     @Test void reportsAnUnavailableTopologyAndDisabledOperations() throws Exception {
@@ -151,15 +195,27 @@ class UncloakRoutesTest {
         return file;
     }
 
-    private static void awaitReplay(PacketBridge bridge) throws InterruptedException {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(8);
-        while (System.nanoTime() < deadline) {
-            Object state = bridge.getCaptureStatus().get("replayState");
-            if ("COMPLETE".equals(state) || "FAILED".equals(state)) break;
-            Thread.sleep(20);
+    private static void startLive(PacketBridge bridge, StreamingCaptureProcess receiver, Path file) throws Exception {
+        byte[] pcap = Files.readAllBytes(file);
+        var buffer = ByteBuffer.wrap(pcap).order(ByteOrder.LITTLE_ENDIAN);
+        int offset = 24;
+        int frames = 0;
+        while (offset < pcap.length) {
+            buffer.putInt(offset, (int) (System.currentTimeMillis() / 1000));
+            offset += 16 + buffer.getInt(offset + 8);
+            frames++;
         }
-        assertEquals("COMPLETE", bridge.getCaptureStatus().get("replayState"));
-        assertFalse(bridge.isRunning());
+        bridge.startPassive("lab0mon");
+        receiver.write(pcap);
+        // A trailing wildcard probe provides an observable callback barrier after the topology frames.
+        byte[] marker = ProbeFrames.pcap(ByteOrder.LITTLE_ENDIAN, true, 127, ProbeFrames.radiotap(ProbeFrames.frame("")));
+        ByteBuffer.wrap(marker).order(ByteOrder.LITTLE_ENDIAN).putInt(24, (int) (System.currentTimeMillis() / 1000));
+        receiver.write(java.util.Arrays.copyOfRange(marker, 24, marker.length));
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+        while (!bridge.getCaptureStatus().get("probeRequests").equals(1L) && System.nanoTime() < deadline) Thread.sleep(10);
+        assertEquals(1L, bridge.getCaptureStatus().get("probeRequests"));
+        assertEquals(frames + 1, bridge.getCaptureHealth().decoded());
+        assertFalse(bridge.isReplaySession());
     }
 
     private static byte[] hiddenBeacon(String bssid) { return beacon(8, bssid, new byte[0], 1); }

@@ -10,6 +10,7 @@
   <properties>
     <maven.compiler.release>21</maven.compiler.release>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <ewave.classesDirectory>classes</ewave.classesDirectory>
   </properties>
 
   <!--
@@ -49,6 +50,16 @@
 
   <build>
     <finalName>ewave-${project.version}</finalName>
+    <outputDirectory>${project.build.directory}/${ewave.classesDirectory}</outputDirectory>
+    <resources>
+      <resource>
+        <directory>src/main/resources</directory>
+        <excludes>
+          <exclude>**/__pycache__/**</exclude>
+          <exclude>**/*.pyc</exclude>
+        </excludes>
+      </resource>
+    </resources>
     <plugins>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
@@ -59,6 +70,15 @@
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-surefire-plugin</artifactId>
         <version>3.5.2</version>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-jar-plugin</artifactId>
+        <version>3.4.1</version>
+        <configuration>
+          <!-- Recreate the input JAR when switching profiles or shading again. -->
+          <forceCreation>true</forceCreation>
+        </configuration>
       </plugin>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
@@ -76,6 +96,10 @@
                 <filter>
                   <artifact>*:*</artifact>
                   <excludes>
+                    <exclude>module-info.class</exclude>
+                    <exclude>META-INF/versions/**/module-info.class</exclude>
+                    <exclude>**/__pycache__/**</exclude>
+                    <exclude>**/*.pyc</exclude>
                     <exclude>META-INF/*.SF</exclude>
                     <exclude>META-INF/*.DSA</exclude>
                     <exclude>META-INF/*.RSA</exclude>
@@ -97,4 +121,46 @@
       </plugin>
     </plugins>
   </build>
+  <profiles>
+    <profile>
+      <id>bundle-frontend</id>
+      <properties>
+        <ewave.classesDirectory>bundled-classes</ewave.classesDirectory>
+      </properties>
+      <build>
+        <resources>
+          <resource>
+            <directory>frontend/dist</directory>
+            <targetPath>ewave-dashboard</targetPath>
+            <includes>
+              <include>index.html</include>
+              <include>assets/**</include>
+            </includes>
+          </resource>
+        </resources>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-clean-plugin</artifactId>
+            <version>3.2.0</version>
+            <executions>
+              <execution>
+                <id>remove-previous-dashboard-assets</id>
+                <phase>initialize</phase>
+                <goals><goal>clean</goal></goals>
+                <configuration>
+                  <excludeDefaultDirectories>true</excludeDefaultDirectories>
+                  <filesets>
+                    <fileset>
+                      <directory>${project.build.outputDirectory}/ewave-dashboard</directory>
+                    </fileset>
+                  </filesets>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
 </project>

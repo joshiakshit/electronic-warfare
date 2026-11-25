@@ -41,7 +41,7 @@ class PmkidCaptureTest {
         assertEquals(List.of("sudo", "hcxdumptool", "-i", "wlo1", "-w", result.pcapngPath(), "--tot=1"),
                 commands.get(0));
         assertEquals(List.of("hcxpcapngtool", "-o", result.hashPath(), result.pcapngPath()), commands.get(1));
-        assertEquals(List.of("aircrack-ng", "-I",
+        assertEquals(List.of("aircrack-ng", "-q", "-I",
                 "4d4fe7aac3a2cecab195321ceb99a7d0*fc690c158264*f4747f87f9f4*hashcat-essid",
                 "-e", "hashcat-essid", "-w", words.toString()), commands.get(2));
         assertEquals(result.command(), String.join(" ", commands.get(2)));
@@ -90,6 +90,41 @@ class PmkidCaptureTest {
         assertTrue(result.output().contains("No PMKID hash found"));
     }
 
+    @Test void verifiesLaterPmkidsAndDoesNotMaskTheirToolErrorsWithAnEarlierDictionaryMiss() throws Exception {
+        Path words = Files.writeString(directory.resolve("words.txt"), "word\n");
+        for (String outcome : new String[]{"found", "miss", "error"}) {
+            var verified = new CopyOnWriteArrayList<String>();
+            var capture = new PmkidCapture("wlo1", directory.resolve(outcome).toString(), builder -> {
+                var command = builder.command();
+                if (command.contains("hcxdumptool")) {
+                    Files.write(Path.of(command.get(command.indexOf("-w") + 1)), new byte[]{1, 2, 3, 4});
+                    return new CompletedProcess("", 0);
+                }
+                if (command.getFirst().equals("hcxpcapngtool")) {
+                    Files.writeString(Path.of(command.get(command.indexOf("-o") + 1)),
+                            "WPA*01*" + "a".repeat(32) + "*001122334455*02aabbccddee*4c616231***\n"
+                            + "WPA*01*" + "b".repeat(32) + "*001122334466*02aabbccddee*4c616232***\n");
+                    return new CompletedProcess("", 0);
+                }
+                assertTrue(command.contains("-q"));
+                String hash = command.get(command.indexOf("-I") + 1);
+                verified.add(hash);
+                if (verified.size() == 1) return new CompletedProcess("stats ".repeat(180_000) + "\nKEY NOT FOUND\n", 1);
+                return new CompletedProcess(outcome.equals("found") ? "KEY FOUND! [ dummy ]\n"
+                        : outcome.equals("miss") ? "KEY NOT FOUND\n" : "tool failed\n", outcome.equals("found") ? 0 : 1);
+            });
+            if (outcome.equals("error")) assertThrows(IOException.class, () -> capture.run(words.toString(), 1));
+            else {
+                var result = capture.run(words.toString(), 1);
+                assertTrue(result.captured());
+                assertEquals(outcome.equals("found"), result.vulnerable());
+                assertEquals(outcome.equals("found") ? "dummy" : null, result.psk());
+            }
+            assertEquals(2, verified.size());
+            assertTrue(verified.get(1).startsWith("b".repeat(32)));
+        }
+    }
+
     @Test void validatesArgumentsBeforeLaunchingAnything() throws Exception {
         Path words = Files.writeString(directory.resolve("words.txt"), "word\n");
         var commands = new CopyOnWriteArrayList<List<String>>();
@@ -98,8 +133,92 @@ class PmkidCaptureTest {
         assertThrows(IllegalArgumentException.class, () -> capture.run(words.toString(), 301));
         assertThrows(IOException.class, () -> capture.run(directory.resolve("missing").toString(), 1));
         assertThrows(IllegalArgumentException.class, () -> new PmkidCapture("--help"));
+        assertThrows(IllegalArgumentException.class, () -> new PmkidCapture("wlo1", "ff:ff:ff:ff:ff:ff", 2437));
+        assertThrows(IllegalArgumentException.class, () -> new PmkidCapture("wlo1", "02:11:22:33:44:55", 999));
         assertTrue(commands.isEmpty());
         assertFalse(capture.status().running());
+    }
+
+    @Test void isolatesRunsInPrivateSubdirectoriesAndRejectsSymlinkCaptureDirs() throws Exception {
+        Path words = Files.writeString(directory.resolve("words.txt"), "lab password\n");
+        Path linked = Files.createSymbolicLink(directory.resolve("link"), directory);
+        var unsafe = new PmkidCapture("wlo1", linked.toString(),
+                builder -> { fail("Unsafe capture paths must fail before launching processes"); return null; });
+        assertThrows(IOException.class, () -> unsafe.run(words.toString(), 1));
+
+        Path sharedBase = directory.resolve("shared");
+        var first = new PmkidCapture("wlo1", sharedBase.toString(), starter(new CopyOnWriteArrayList<>(), true, true))
+                .run(words.toString(), 1);
+        var second = new PmkidCapture("wlo1", sharedBase.toString(), starter(new CopyOnWriteArrayList<>(), true, true))
+                .run(words.toString(), 1);
+        Path firstDir = Path.of(first.pcapngPath()).getParent();
+        Path secondDir = Path.of(second.pcapngPath()).getParent();
+        assertNotEquals(firstDir, secondDir);
+        assertTrue(firstDir.getFileName().toString().startsWith("ewave-pmkid-"));
+        assertTrue(secondDir.getFileName().toString().startsWith("ewave-pmkid-"));
+    }
+
+    @Test void scopesCaptureWithBpfFrequencyAndPostConversionTargetFiltering() throws Exception {
+        Path words = Files.writeString(directory.resolve("words.txt"), "lab password\n");
+        var commands = new CopyOnWriteArrayList<List<String>>();
+        var verifiedHashes = new CopyOnWriteArrayList<String>();
+        var capture = new PmkidCapture("wlo1", "00:11:22:33:44:66", 2437, directory.toString(), builder -> {
+            var command = List.copyOf(builder.command());
+            commands.add(command);
+            if (command.getFirst().equals("hcxdumptool") && command.get(1).startsWith("--bpfc=")) {
+                assertTrue(command.get(1).contains("001122334466"));
+                return new CompletedProcess("48 0 0 3\n100 0 0 8\n", 0);
+            }
+            if (command.size() > 1 && command.get(1).equals("hcxdumptool")) {
+                Files.write(Path.of(command.get(command.indexOf("-w") + 1)), new byte[]{0x0a, 0x0d, 0x0d, 0x0a});
+                return new CompletedProcess("capture\n", 0);
+            }
+            if (command.getFirst().equals("hcxpcapngtool")) {
+                Files.writeString(Path.of(command.get(command.indexOf("-o") + 1)),
+                        "WPA*01*" + "a".repeat(32) + "*001122334455*02aabbccddee*4f74686572***\n"
+                        + "WPA*01*" + "b".repeat(32) + "*001122334466*02aabbccddee*546172676574***\n");
+                return new CompletedProcess("converted\n", 0);
+            }
+            if (command.getFirst().equals("aircrack-ng")) {
+                verifiedHashes.add(command.get(command.indexOf("-I") + 1));
+                return new CompletedProcess("KEY FOUND! [ lab password ]\n", 0);
+            }
+            throw new IOException("Unexpected command: " + command);
+        });
+
+        var result = capture.run(words.toString(), 2);
+        assertTrue(result.captured());
+        assertTrue(result.vulnerable());
+        assertEquals("lab password", result.psk());
+        assertEquals("00:11:22:33:44:66", result.targetApBssid());
+        assertEquals(2437, result.frequencyMhz());
+        assertEquals(List.of("b".repeat(32) + "*001122334466*02aabbccddee*Target"), verifiedHashes);
+        var captureCmd = commands.get(1);
+        assertTrue(captureCmd.contains("-f"));
+        assertTrue(captureCmd.contains("2437"));
+        assertTrue(captureCmd.stream().anyMatch(arg -> arg.startsWith("--bpf=")));
+
+        // When only another AP's PMKID is present, target scoping reports no match without cracking it.
+        var missed = new PmkidCapture("wlo1", "00:11:22:33:44:77", 2412, directory.resolve("miss").toString(), builder -> {
+            var command = List.copyOf(builder.command());
+            if (command.getFirst().equals("hcxdumptool") && command.get(1).startsWith("--bpfc=")) {
+                return new CompletedProcess("", 1);
+            }
+            if (command.size() > 1 && command.get(1).equals("hcxdumptool")) {
+                Files.write(Path.of(command.get(command.indexOf("-w") + 1)), new byte[]{0x0a, 0x0d, 0x0d, 0x0a});
+                return new CompletedProcess("capture\n", 0);
+            }
+            if (command.getFirst().equals("hcxpcapngtool")) {
+                Files.writeString(Path.of(command.get(command.indexOf("-o") + 1)),
+                        "WPA*01*" + "a".repeat(32) + "*001122334455*02aabbccddee*4f74686572***\n");
+                return new CompletedProcess("converted\n", 0);
+            }
+            fail("aircrack-ng must not run for out-of-scope BSSIDs: " + command);
+            return null;
+        }).run(words.toString(), 1);
+        assertFalse(missed.captured());
+        assertFalse(missed.vulnerable());
+        assertTrue(missed.output().contains("No PMKID hash found for target AP 00:11:22:33:44:77"));
     }
 
     @Test void terminateStopsARunningCapture() throws Exception {

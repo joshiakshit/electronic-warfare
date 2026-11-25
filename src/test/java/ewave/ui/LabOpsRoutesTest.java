@@ -21,9 +21,11 @@ import java.net.http.HttpResponse;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -149,6 +151,115 @@ class LabOpsRoutesTest {
         }
     }
 
+    @Test void pmkidRouteForwardsTargetBssidAndFrequencyAndRejectsInvalidScope() throws Exception {
+        var commands = new CopyOnWriteArrayList<List<String>>();
+        var capturedSettings = new AtomicReference<PassiveRfServer.PmkidSettings>();
+        Path words = Files.writeString(directory.resolve("words.txt"), "lab password\n");
+        try (var bridge = new PacketBridge();
+             var server = server(bridge,
+                     settings -> {
+                         capturedSettings.set(settings);
+                         return new PmkidCapture(settings.monitorInterface(), settings.apBssid(),
+                                 settings.frequencyMhz(), directory.resolve("captures").toString(),
+                                 pmkidStarter(commands));
+                     },
+                     settings -> { fail("beacon must not start"); return null; });
+             var client = HttpClient.newHttpClient()) {
+            for (String body : new String[]{
+                    "{\"wordlistPath\":\"" + words + "\",\"apBssid\":\"bad-mac\"}",
+                    "{\"wordlistPath\":\"" + words + "\",\"frequencyMhz\":\"abc\"}",
+                    "{\"wordlistPath\":\"" + words + "\",\"frequencyMhz\":1200}",
+                    "{\"wordlistPath\":\"" + words + "\",\"apId\":\"ap-missing\"}"})
+                assertEquals(400, post(client, server, "/api/ops/pmkid", body).statusCode(), body);
+
+            var response = post(client, server, "/api/ops/pmkid",
+                    "{\"interface\":\"wlo1\",\"wordlistPath\":\"" + words + "\",\"durationSeconds\":2,"
+                            + "\"apBssid\":\"fc:69:0c:15:82:64\",\"frequencyMhz\":2437}");
+            assertEquals(200, response.statusCode(), response.body());
+            assertNotNull(capturedSettings.get());
+            assertEquals("fc:69:0c:15:82:64", capturedSettings.get().apBssid());
+            assertEquals(2437, capturedSettings.get().frequencyMhz());
+            var json = mapper.readTree(response.body());
+            assertEquals("fc:69:0c:15:82:64", json.path("targetApBssid").asText());
+            assertEquals(2437, json.path("frequencyMhz").asInt());
+            assertTrue(commands.stream().anyMatch(cmd -> cmd.size() > 1 && cmd.get(1).equals("hcxdumptool")
+                    && cmd.contains("-f") && cmd.contains("2437")
+                    && cmd.stream().anyMatch(arg -> arg.startsWith("--bpf="))));
+        }
+    }
+
+    @Test void tracksOperationHistoryScopesStopByOperationIdAndClearsHistory() throws Exception {
+        var commands = new CopyOnWriteArrayList<List<String>>();
+        Path words = Files.writeString(directory.resolve("words.txt"), "lab password\n");
+        try (var bridge = new PacketBridge();
+             var server = server(bridge,
+                     settings -> new PmkidCapture(settings.monitorInterface(), settings.apBssid(),
+                             settings.frequencyMhz(), directory.resolve("captures").toString(),
+                             pmkidStarter(commands)),
+                     settings -> new BeaconFlood(settings.monitorInterface(), builder -> {
+                         commands.add(List.copyOf(builder.command()));
+                         return new StreamingCaptureProcess();
+                     }));
+             var client = HttpClient.newHttpClient()) {
+            var pmkidResponse = post(client, server, "/api/ops/pmkid",
+                    "{\"interface\":\"wlo1\",\"wordlistPath\":\"" + words + "\",\"durationSeconds\":1,"
+                            + "\"apBssid\":\"fc:69:0c:15:82:64\"}");
+            assertEquals(200, pmkidResponse.statusCode(), pmkidResponse.body());
+
+            var started = post(client, server, "/api/ops/beacon",
+                    "{\"interface\":\"wlo1\",\"ssid\":\"lab-net\",\"channel\":6,\"rate\":80}");
+            assertEquals(200, started.statusCode(), started.body());
+
+            var caps = mapper.readTree(get(client, server, "/api/ops/capabilities").body());
+            assertEquals("beacon", caps.path("activeOperation").asText());
+            String activeId = caps.path("activeOperationId").asText();
+            assertNotNull(UUID.fromString(activeId));
+
+            assertEquals(400, post(client, server, "/api/ops/stop", "{\"operationId\":\"not-a-uuid\"}").statusCode());
+            var mismatch = post(client, server, "/api/ops/stop",
+                    "{\"operationId\":\"" + UUID.randomUUID() + "\"}");
+            assertEquals(409, mismatch.statusCode(), mismatch.body());
+            assertEquals("beacon", mapper.readTree(get(client, server, "/api/ops/capabilities").body())
+                    .path("activeOperation").asText());
+
+            var stoppedMatch = post(client, server, "/api/ops/stop",
+                    "{\"operationId\":\"" + activeId + "\"}");
+            assertEquals(200, stoppedMatch.statusCode(), stoppedMatch.body());
+            assertTrue(mapper.readTree(stoppedMatch.body()).path("stopped").asBoolean());
+
+            var capsAfter = mapper.readTree(get(client, server, "/api/ops/capabilities").body());
+            assertTrue(capsAfter.path("activeOperation").isNull());
+            assertTrue(capsAfter.path("activeOperationId").isNull());
+
+            var idleScopedStop = post(client, server, "/api/ops/stop",
+                    "{\"operationId\":\"" + activeId + "\"}");
+            assertEquals(200, idleScopedStop.statusCode());
+            assertFalse(mapper.readTree(idleScopedStop.body()).path("stopped").asBoolean());
+            assertTrue(mapper.readTree(post(client, server, "/api/ops/stop", "{}").body()).path("stopped").asBoolean());
+
+            var historyResp = get(client, server, "/api/ops/history");
+            assertEquals(200, historyResp.statusCode(), historyResp.body());
+            assertFalse(historyResp.body().contains("lab password"));
+            var history = mapper.readTree(historyResp.body());
+            assertEquals(2, history.size());
+            assertEquals("beacon", history.get(0).path("operation").asText());
+            assertEquals("lab-net", history.get(0).path("target").asText());
+            assertEquals("STOPPED", history.get(0).path("outcome").asText());
+            assertEquals("pmkid", history.get(1).path("operation").asText());
+            assertEquals("fc:69:0c:15:82:64", history.get(1).path("target").asText());
+            assertEquals("PSK_FOUND", history.get(1).path("outcome").asText());
+
+            var attackHistory = mapper.readTree(get(client, server, "/api/attack/history").body());
+            assertEquals(2, attackHistory.size());
+
+            var cleared = client.send(HttpRequest.newBuilder(uri(server, "/api/ops/history")).DELETE().build(),
+                    HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, cleared.statusCode());
+            assertTrue(mapper.readTree(cleared.body()).path("cleared").asBoolean());
+            assertEquals(0, mapper.readTree(get(client, server, "/api/ops/history").body()).size());
+        }
+    }
+
     private PassiveRfServer server(PacketBridge bridge,
                                    java.util.function.Function<PassiveRfServer.PmkidSettings, PmkidCapture> pmkid,
                                    java.util.function.Function<PassiveRfServer.BeaconSettings, BeaconFlood> beacon)
@@ -162,6 +273,10 @@ class LabOpsRoutesTest {
         return builder -> {
             var command = List.copyOf(builder.command());
             commands.add(command);
+            if (command.getFirst().equals("hcxdumptool")
+                    && command.stream().anyMatch(arg -> arg.startsWith("--bpfc="))) {
+                return new CompletedProcess("2\n32 0 0 16\n6 0 0 65535\n", 0);
+            }
             if (command.get(1).equals("hcxdumptool")) {
                 Files.write(Path.of(command.get(command.indexOf("-w") + 1)), new byte[]{0x0a, 0x0d, 0x0d, 0x0a});
                 return new CompletedProcess("capture\n", 0);
