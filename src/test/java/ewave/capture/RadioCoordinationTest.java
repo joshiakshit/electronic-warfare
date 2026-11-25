@@ -431,6 +431,172 @@ class RadioCoordinationTest {
         }
     }
 
+    @Test void opsHoldPinsPassiveScanChannelAfterReleaseAndPermitsBackToBackLease(@TempDir Path dir) throws Exception {
+        String prev = System.getProperty("rf.networkProfile");
+        System.setProperty("rf.networkProfile", dir.resolve("my-network.json").toString());
+        try {
+            var captureStreams = new CopyOnWriteArrayList<StreamingCaptureProcess>();
+            var tuneCommands = new CopyOnWriteArrayList<List<String>>();
+            try (var bridge = new PacketBridge(builder -> {
+                if (builder.command().getFirst().equals("tcpdump")) {
+                    var proc = new StreamingCaptureProcess();
+                    captureStreams.add(proc);
+                    return proc;
+                }
+                tuneCommands.add(List.copyOf(builder.command()));
+                return new CompletedProcess("", 0);
+            }, Map.of("001122", "TestRouter"), new DeviceProfiler(), 20, 64, 64,
+                    iface -> null, iface -> "phy0");
+                 var server = new PassiveRfServer(bridge, true).start(0);
+                 var client = HttpClient.newHttpClient()) {
+
+                String base = "http://127.0.0.1:" + server.port();
+                var startScan = postJson(client, base + "/api/capture/start",
+                        "{\"mode\":\"scan\",\"interface\":\"lab0mon\"}");
+                assertEquals(200, startScan.statusCode(), startScan.body());
+                awaitCondition(() -> tuneCommands.size() >= 2);
+
+                try (var first = bridge.acquireOpsLease("lab0mon", false)) {
+                    bridge.holdPassiveFrequency(2437, java.time.Duration.ofSeconds(10));
+                    tuneCommands.clear();
+                }
+
+                // Releasing the lease during an active hold retunes to the held frequency and suppresses channel hops.
+                awaitCondition(() -> tuneCommands.stream().anyMatch(cmd -> cmd.contains("2437")));
+                Thread.sleep(350);
+                assertTrue(tuneCommands.stream().allMatch(cmd -> cmd.contains("2437")),
+                        "Scanner hopped away during active hold: " + tuneCommands);
+
+                // Back-to-back Ops lease still succeeds without conflict and clears the previous hold on release.
+                tuneCommands.clear();
+                try (var second = bridge.acquireOpsLease("lab0mon", false)) {
+                    assertNotNull(second);
+                }
+                awaitCondition(() -> tuneCommands.stream().anyMatch(cmd -> !cmd.contains("2437") && !cmd.contains("2462")));
+            }
+        } finally {
+            restoreProfileProperty(prev);
+        }
+    }
+
+    @Test void enrichesLiveOpsTargetsDeauthAndLanHostsWithSecurityPmfAndDfsMetadata(@TempDir Path dir) throws Exception {
+        String prev = System.getProperty("rf.networkProfile");
+        System.setProperty("rf.networkProfile", dir.resolve("my-network.json").toString());
+        try {
+            var captureStreams = new CopyOnWriteArrayList<StreamingCaptureProcess>();
+            Path lanTable = dir.resolve("ewave-lan-hosts.txt");
+            String clientMac = "02:aa:bb:cc:dd:ee";
+            java.nio.file.Files.write(lanTable, List.of(
+                    "Interface: lab0mon, type: EN10MB, MAC: aa:bb:cc:dd:ee:ff, IPv4: 192.168.29.136",
+                    "192.168.29.94\t" + clientMac + "\t(TestPhone)"));
+
+            try (var bridge = new PacketBridge(builder -> {
+                if ("tcpdump".equals(builder.command().getFirst())) {
+                    var proc = new StreamingCaptureProcess();
+                    captureStreams.add(proc);
+                    return proc;
+                }
+                return new CompletedProcess("", 0);
+            }, Map.of("02aabb", "PhoneCo"), new DeviceProfiler(), 20, 64, 64,
+                    iface -> null, iface -> "phy0");
+                 var server = new PassiveRfServer(bridge, true,
+                         monitor -> new ewave.active.FrameInjector(monitor, b -> new CompletedProcess("", 0)),
+                         new ewave.active.LanScanner(lanTable),
+                         new ewave.active.WifiAccessPoints(dir.resolve("missing-aps"))).start(0);
+                 var client = HttpClient.newHttpClient()) {
+                String base = "http://127.0.0.1:" + server.port();
+                var startRes = postJson(client, base + "/api/capture/start",
+                        "{\"mode\":\"watch\",\"interface\":\"lab0mon\",\"channel\":52,\"band\":\"5\"}");
+                assertEquals(200, startRes.statusCode(), startRes.body());
+                assertFalse(captureStreams.isEmpty());
+
+                byte[] pcap = syntheticDfsWpa3Pcap(AP_MAC, clientMac, "LabWPA3", 52, 5260);
+                captureStreams.getFirst().write(pcap);
+
+                var targetsRef = new java.util.concurrent.atomic.AtomicReference<com.fasterxml.jackson.databind.JsonNode>();
+                awaitCondition(() -> {
+                    var arr = JSON.readTree(get(client, base + "/api/ops/targets").body());
+                    targetsRef.set(arr);
+                    return arr.size() == 1 && !arr.at("/0/apSecurity").isMissingNode()
+                            && !arr.at("/0/apSecurity").isNull();
+                });
+
+                var first = targetsRef.get().get(0);
+                String targetId = first.path("id").asText();
+                assertTrue(first.path("apSecurity").asText().contains("RSN"), first.toString());
+                assertEquals("Required", first.path("pmfStatus").asText());
+                assertEquals(List.of("SAE"), List.of(first.at("/akmSuites/0").asText()));
+                assertTrue(first.path("dfsChannel").asBoolean());
+                assertEquals("192.168.29.94", first.path("lanIp").asText());
+
+                var hostsRes = JSON.readTree(get(client, base + "/api/ops/lan-hosts").body());
+                assertTrue(hostsRes.path("available").asBoolean());
+                assertEquals(1, hostsRes.path("hosts").size());
+                var host = hostsRes.path("hosts").get(0);
+                assertEquals("192.168.29.94", host.path("ip").asText());
+                assertTrue(host.path("wirelessMatched").asBoolean());
+                assertEquals(targetId, host.path("targetId").asText());
+                assertEquals(52, host.path("channel").asInt());
+                assertEquals("LabWPA3", host.path("apSsid").asText());
+
+                var deauthRes = postJson(client, base + "/api/ops/deauth",
+                        "{\"targetId\":\"" + targetId + "\",\"count\":2,\"interface\":\"lab0mon\"}");
+                assertEquals(200, deauthRes.statusCode(), deauthRes.body());
+                var deauthJson = JSON.readTree(deauthRes.body());
+                assertTrue(deauthJson.path("success").asBoolean());
+                assertEquals(10, deauthJson.path("holdSeconds").asInt());
+                assertEquals("Required", deauthJson.path("pmfStatus").asText());
+                assertTrue(deauthJson.path("dfsChannel").asBoolean());
+                assertTrue(deauthJson.path("pmfWarning").asText().contains("802.11w PMF"));
+            }
+        } finally {
+            restoreProfileProperty(prev);
+        }
+    }
+
+    private static byte[] syntheticDfsWpa3Pcap(String apBssid, String clientMac, String ssid, int ch, int freqMhz) {
+        byte[] ap = HexFormat.ofDelimiter(":").parseHex(apBssid);
+        byte[] cli = HexFormat.ofDelimiter(":").parseHex(clientMac);
+        byte[] bcast = HexFormat.of().parseHex("ffffffffffff");
+        byte[] ssidBytes = ssid.getBytes(StandardCharsets.UTF_8);
+        // RSN IE: version=1, group=CCMP, pairwise=CCMP, akm=SAE (00:0f:ac:08), RSN caps=0x00c0 (MFPC+MFPR -> Required)
+        byte[] rsn = new byte[]{
+                48, 20, 1, 0,
+                0x00, 0x0f, (byte) 0xac, 4,
+                1, 0, 0x00, 0x0f, (byte) 0xac, 4,
+                1, 0, 0x00, 0x0f, (byte) 0xac, 8,
+                (byte) 0xc0, 0x00
+        };
+        var beaconBuf = ByteBuffer.allocate(24 + 12 + 2 + ssidBytes.length + 3 + rsn.length)
+                .order(ByteOrder.LITTLE_ENDIAN);
+        beaconBuf.putShort((short) 0x0080).putShort((short) 0).put(bcast).put(ap).put(ap).putShort((short) 0);
+        beaconBuf.putLong(1L).putShort((short) 100).putShort((short) 0x0011);
+        beaconBuf.put((byte) 0).put((byte) ssidBytes.length).put(ssidBytes);
+        beaconBuf.put((byte) 3).put((byte) 1).put((byte) ch);
+        beaconBuf.put(rsn);
+
+        byte[][] frames = new byte[4][];
+        frames[0] = beaconBuf.array();
+        for (int seq = 1; seq <= 3; seq++) {
+            var dataBuf = ByteBuffer.allocate(28).order(ByteOrder.LITTLE_ENDIAN);
+            dataBuf.putShort((short) 0x0108).putShort((short) 0).put(ap).put(cli).put(bcast)
+                    .putShort((short) (seq << 4)).putInt(0);
+            frames[seq] = dataBuf.array();
+        }
+
+        byte[][] packets = new byte[frames.length][];
+        for (int i = 0; i < frames.length; i++) packets[i] = radiotapAtFreq(frames[i], freqMhz);
+        byte[] pcap = ProbeFrames.pcap(ByteOrder.LITTLE_ENDIAN, false, 127, packets);
+        var buffer = ByteBuffer.wrap(pcap).order(ByteOrder.LITTLE_ENDIAN);
+        int offset = 24;
+        int now = (int) (System.currentTimeMillis() / 1000);
+        for (byte[] packet : packets) {
+            buffer.putInt(offset, now);
+            offset += 16 + packet.length;
+        }
+        return pcap;
+    }
+
     private static HttpResponse<String> get(HttpClient client, String url) throws Exception {
         return client.send(HttpRequest.newBuilder(URI.create(url)).GET().build(), HttpResponse.BodyHandlers.ofString());
     }

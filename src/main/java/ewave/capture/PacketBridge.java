@@ -19,6 +19,7 @@ import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -225,6 +226,17 @@ public final class PacketBridge implements AutoCloseable {
         }
         this.fixedFrequencyMhz = frequencyMhz;
         channel = legacyChannel(frequencyMhz == null ? 0 : frequencyMhz);
+        if (session != null) session.clearOpsHold();
+    }
+
+    /** Pins passive capture to frequencyMhz for duration after an Ops action without holding an OpsLease. */
+    public synchronized void holdPassiveFrequency(int frequencyMhz, Duration duration) {
+        if (frequencyMhz < 2300 || frequencyMhz > 7125 || duration == null || duration.isNegative()
+                || duration.isZero() || isReplaySession() || session == null) {
+            return;
+        }
+        session.opsHoldFrequencyMhz = frequencyMhz;
+        session.opsHoldUntilNanos = System.nanoTime() + duration.toNanos();
     }
 
     /** Serialized runtime capture start/switch preserving live same-interface observations. */
@@ -607,6 +619,7 @@ public final class PacketBridge implements AutoCloseable {
     public synchronized SniperState startSniperBySsidBytes(byte[] ssidBytes, String displaySsid) {
         if (session == null || !session.watchAllowed)
             throw new IllegalStateException("Start live passive Wi-Fi capture to run Sniper.");
+        session.clearOpsHold();
         var run = sniper.startBySsid(ssidBytes, displaySsid);
         session.sniperSweep.reset();
         session.survey.interruptListening();
@@ -616,6 +629,7 @@ public final class PacketBridge implements AutoCloseable {
     public synchronized SniperState startSniperByApId(String apId) {
         if (session == null || !session.watchAllowed)
             throw new IllegalStateException("Start live passive Wi-Fi capture to run Sniper.");
+        session.clearOpsHold();
         var details = passiveWifi == null ? null : passiveWifi.observedAp(apId);
         if (details == null) throw new IllegalArgumentException("Choose an access point from the current capture.");
         var run = sniper.startByAp(apId, details.bssid(), details.ssidBytes(),
@@ -744,6 +758,7 @@ public final class PacketBridge implements AutoCloseable {
                     && wiphy.equals(Objects.requireNonNullElse(wiphyResolver.apply(captureInterface), captureInterface));
             if (sameRadio) {
                 current.opsPaused = true;
+                current.clearOpsHold();
                 sniper.setOpsPaused(true);
                 current.sniperSweep.reset();
                 long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
@@ -793,15 +808,21 @@ public final class PacketBridge implements AutoCloseable {
                 current.opsPaused = false;
                 current.tunedChannel = 0;
                 current.tunedFrequencyMhz = 0;
+                long now = System.nanoTime();
                 Integer desired = sniper.desiredFrequencyMhz();
-                if (desired == null && !sniper.needsSweep() && current.scanner == null) {
-                    desired = fixedFrequencyMhz;
-                }
-                if (desired != null) {
-                    var purpose = sniper.desiredFrequencyMhz() == null ? TunePurpose.FIXED : TunePurpose.SNIPER_LOCK;
-                    requestRetune(current, captureInterface, desired, purpose);
-                } else if (sniper.needsSweep() || current.scanner != null) {
-                    current.survey.interruptListening();
+                if (desired == null && !sniper.needsSweep() && current.hasActiveOpsHold(now)
+                        && (current.scanner != null || fixedFrequencyMhz != null)) {
+                    requestRetune(current, captureInterface, current.opsHoldFrequencyMhz, TunePurpose.FIXED);
+                } else {
+                    if (desired == null && !sniper.needsSweep() && current.scanner == null) {
+                        desired = fixedFrequencyMhz;
+                    }
+                    if (desired != null) {
+                        var purpose = sniper.desiredFrequencyMhz() == null ? TunePurpose.FIXED : TunePurpose.SNIPER_LOCK;
+                        requestRetune(current, captureInterface, desired, purpose);
+                    } else if (sniper.needsSweep() || current.scanner != null) {
+                        current.survey.interruptListening();
+                    }
                 }
             }
             notifyAll();
@@ -1036,6 +1057,20 @@ public final class PacketBridge implements AutoCloseable {
                 if (sniper.needsSweep()) {
                     sweepForSniper(current, iface, now);
                     return;
+                }
+                if (current.hasActiveOpsHold(now)) {
+                    if ((current.scanner != null || fixedFrequencyMhz != null)
+                            && current.tunedFrequencyMhz != current.opsHoldFrequencyMhz) {
+                        requestRetune(current, iface, current.opsHoldFrequencyMhz, TunePurpose.FIXED);
+                    }
+                    return;
+                } else if (current.opsHoldFrequencyMhz != 0) {
+                    current.clearOpsHold();
+                    if (current.scanner == null && fixedFrequencyMhz != null
+                            && current.tunedFrequencyMhz != fixedFrequencyMhz) {
+                        requestRetune(current, iface, fixedFrequencyMhz, TunePurpose.FIXED);
+                        return;
+                    }
                 }
                 if (current.scanner == null || current.channels.isEmpty()) return;
                 var survey = current.survey;
@@ -1361,6 +1396,8 @@ public final class PacketBridge implements AutoCloseable {
         int tunedFrequencyMhz;
         boolean receivedFrame;
         boolean tuning, retunePending, opsPaused;
+        int opsHoldFrequencyMhz;
+        long opsHoldUntilNanos;
         long successfulRetunes, failedRetunes, retuneNanos, dwellStarted;
         final long[] dwellNanos;
         final long[] lastTuneAtMs;
@@ -1372,6 +1409,15 @@ public final class PacketBridge implements AutoCloseable {
         final int[] noiseSampleCursors;
 
         int slot(int frequencyMhz) { return slots.getOrDefault(frequencyMhz, -1); }
+
+        boolean hasActiveOpsHold(long now) {
+            return opsHoldFrequencyMhz > 0 && now - opsHoldUntilNanos < 0;
+        }
+
+        void clearOpsHold() {
+            opsHoldFrequencyMhz = 0;
+            opsHoldUntilNanos = 0;
+        }
 
         void confirmTune(int frequencyMhz, long now, long wallTime) {
             tunedFrequencyMhz = frequencyMhz;

@@ -11,7 +11,9 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.CancellationException;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Pattern;
 
@@ -19,13 +21,19 @@ import java.util.regex.Pattern;
 public final class BeaconFlood {
     private static final Pattern INTERFACE = Pattern.compile("[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,14}");
     private static final int OUTPUT_LIMIT = 1_048_576;
+    private static final int MAX_SSIDS = 50;
     private static final Pattern MISSING_MDK4 = Pattern.compile("(?m)^sudo: mdk4: command not found\\s*$");
 
     @FunctionalInterface public interface ProcessStarter {
         Process start(ProcessBuilder builder) throws IOException;
     }
 
-    public record Status(boolean running, String tool, String command, String output, String error) {}
+    public record Status(boolean running, String tool, String command, String output, String error,
+                         int ssidCount, long elapsedSeconds) {
+        public Status(boolean running, String tool, String command, String output, String error) {
+            this(running, tool, command, output, error, 0, 0L);
+        }
+    }
 
     private final String monitorInterface;
     private final ProcessStarter starter;
@@ -33,12 +41,16 @@ public final class BeaconFlood {
     private final Set<Process> processes = new HashSet<>();
     private final StringBuilder output = new StringBuilder();
     private volatile Process process;
+    private volatile Path ssidDir;
     private volatile Path ssidFile;
     private volatile boolean running;
     private volatile boolean terminated;
     private volatile String tool = "";
     private volatile String command = "";
     private volatile String error;
+    private volatile int ssidCount;
+    private volatile long startedAtNanos;
+    private volatile long stoppedElapsedSeconds;
     private volatile IOException readFailure;
     private boolean truncated;
 
@@ -54,9 +66,25 @@ public final class BeaconFlood {
 
     public Status start(String ssid, int channel, int rate) throws IOException {
         validate(ssid, channel, rate);
+        return startInternal(List.of(ssid), channel, rate, false);
+    }
+
+    public Status start(List<String> ssids, int channel, int rate) throws IOException {
+        if (ssids == null || ssids.isEmpty() || ssids.size() > MAX_SSIDS) {
+            throw new IllegalArgumentException("ssids must contain between 1 and " + MAX_SSIDS + " entries");
+        }
+        for (String ssid : ssids) validate(ssid, channel, rate);
+        if (ssids.size() == 1) return start(ssids.getFirst(), channel, rate);
+        return startInternal(List.copyOf(ssids), channel, rate, true);
+    }
+
+    private Status startInternal(List<String> ssids, int channel, int rate, boolean multiSsid) throws IOException {
         if (!used.compareAndSet(false, true)) throw new IllegalStateException("This beacon flood has already been used");
+        ssidCount = ssids.size();
+        startedAtNanos = System.nanoTime();
+        stoppedElapsedSeconds = 0L;
         try {
-            return launchMdk4(ssid, channel, rate);
+            return launchMdk4(ssids, channel, rate, multiSsid);
         } catch (IOException missing) {
             if (terminated) throw new CancellationException("Stopped by request");
             if (!missingProgram(missing, "mdk4")) {
@@ -64,7 +92,7 @@ public final class BeaconFlood {
                 throw missing;
             }
             try {
-                return launchMdk3(ssid, channel, rate);
+                return launchMdk3(ssids, channel, rate);
             } catch (IOException fallbackFailure) {
                 fail(fallbackFailure);
                 throw fallbackFailure;
@@ -73,39 +101,57 @@ public final class BeaconFlood {
     }
 
     public Status status() {
-        return new Status(running, tool, command, outputText(), error);
+        long elapsed = startedAtNanos == 0L ? 0L
+                : running ? TimeUnit.NANOSECONDS.toSeconds(Math.max(0L, System.nanoTime() - startedAtNanos))
+                : stoppedElapsedSeconds;
+        return new Status(running, tool, command, outputText(), error, ssidCount, elapsed);
     }
 
     public synchronized void terminate() {
         terminated = true;
         for (Process current : processes) forceStop(current);
         processes.clear();
+        latchElapsed();
         running = false;
         deleteSsidFile();
     }
 
-    private Status launchMdk4(String ssid, int channel, int rate) throws IOException {
+    private Status launchMdk4(List<String> ssids, int channel, int rate, boolean multiSsid) throws IOException {
         tool = "mdk4";
-        var args = List.of("sudo", "mdk4", monitorInterface, "b", "-n", ssid,
-                "-c", Integer.toString(channel), "-s", Integer.toString(rate));
+        List<String> args;
+        if (multiSsid) {
+            Path file = ensureSsidFile(ssids);
+            args = List.of("sudo", "mdk4", monitorInterface, "b", "-f", file.toString(),
+                    "-c", Integer.toString(channel), "-s", Integer.toString(rate));
+        } else {
+            args = List.of("sudo", "mdk4", monitorInterface, "b", "-n", ssids.getFirst(),
+                    "-c", Integer.toString(channel), "-s", Integer.toString(rate));
+        }
         command = String.join(" ", args);
-        return started(starter.start(builder(args)), ssid, channel, rate, true);
+        return started(starter.start(builder(args)), ssids, channel, rate, true);
     }
 
-    private Status launchMdk3(String ssid, int channel, int rate) throws IOException {
-        final Path file;
-        synchronized (this) {
-            if (terminated) throw new CancellationException("Stopped by request");
-            file = Files.createTempFile("ewave-beacon-", ".txt",
-                    PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")));
-            ssidFile = file;
-            Files.writeString(file, ssid + System.lineSeparator(), StandardCharsets.UTF_8);
-        }
+    private Status launchMdk3(List<String> ssids, int channel, int rate) throws IOException {
+        Path file = ensureSsidFile(ssids);
         tool = "mdk3";
         var args = List.of("sudo", "mdk3", monitorInterface, "b", "-f", file.toString(),
                 "-c", Integer.toString(channel), "-s", Integer.toString(rate));
         command = String.join(" ", args);
-        return started(starter.start(builder(args)), ssid, channel, rate, false);
+        return started(starter.start(builder(args)), ssids, channel, rate, false);
+    }
+
+    private synchronized Path ensureSsidFile(List<String> ssids) throws IOException {
+        if (terminated) throw new CancellationException("Stopped by request");
+        if (ssidFile != null && Files.isRegularFile(ssidFile)) return ssidFile;
+        Path dir = PrivateWorkspace.create(Path.of(System.getProperty("java.io.tmpdir"),
+                "ewave-beacon-" + UUID.randomUUID()));
+        Path file = Files.createFile(dir.resolve("ssids.txt"),
+                PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")));
+        ssidDir = dir;
+        ssidFile = file;
+        String content = String.join(System.lineSeparator(), ssids) + System.lineSeparator();
+        Files.writeString(file, content, StandardCharsets.UTF_8);
+        return file;
     }
 
     private static ProcessBuilder builder(List<String> args) {
@@ -114,7 +160,8 @@ public final class BeaconFlood {
         return builder;
     }
 
-    private Status started(Process started, String ssid, int channel, int rate, boolean allowFallback) throws IOException {
+    private Status started(Process started, List<String> ssids, int channel, int rate, boolean allowFallback)
+            throws IOException {
         if (started == null) throw new IOException("The beacon tool did not start");
         synchronized (this) {
             if (terminated) {
@@ -127,11 +174,11 @@ public final class BeaconFlood {
             error = null;
         }
         started.getOutputStream().close();
-        Thread.ofVirtual().name("ewave-beacon-watch").start(() -> watch(started, ssid, channel, rate, allowFallback));
+        Thread.ofVirtual().name("ewave-beacon-watch").start(() -> watch(started, ssids, channel, rate, allowFallback));
         return status();
     }
 
-    private void watch(Process source, String ssid, int channel, int rate, boolean allowFallback) {
+    private void watch(Process source, List<String> ssids, int channel, int rate, boolean allowFallback) {
         // Read the complete diagnostic before deciding whether a failed sudo invocation needs mdk3.
         drain(source);
         try {
@@ -147,6 +194,7 @@ public final class BeaconFlood {
             if (!fallback) {
                 if (!terminated && failed && error == null) error = tool + " exited with code " + source.exitValue();
                 process = null;
+                latchElapsed();
                 running = false;
                 deleteSsidFile();
                 return;
@@ -154,7 +202,7 @@ public final class BeaconFlood {
             // Keep running true while the replacement starts so the server retains its operation slot and radio lease.
         }
         try {
-            launchMdk3(ssid, channel, rate);
+            launchMdk3(ssids, channel, rate);
         } catch (CancellationException stopped) {
             // terminate() already cleared running and removed any temporary SSID file.
         } catch (IOException failure) {
@@ -176,9 +224,16 @@ public final class BeaconFlood {
 
     private void fail(IOException failure) {
         error = Objects.toString(failure.getMessage(), "Beacon flood failed");
+        latchElapsed();
         running = false;
         append("\nCould not start beacon flood: " + error + "\n");
         deleteSsidFile();
+    }
+
+    private void latchElapsed() {
+        if (startedAtNanos != 0L && running) {
+            stoppedElapsedSeconds = TimeUnit.NANOSECONDS.toSeconds(Math.max(0L, System.nanoTime() - startedAtNanos));
+        }
     }
 
     private synchronized void append(String value) {
@@ -196,10 +251,16 @@ public final class BeaconFlood {
     }
 
     private synchronized void deleteSsidFile() {
-        if (ssidFile == null) return;
-        try { Files.deleteIfExists(ssidFile); }
-        catch (IOException ignored) { /* A stale temporary wordlist is harmless. */ }
-        ssidFile = null;
+        if (ssidFile != null) {
+            try { Files.deleteIfExists(ssidFile); }
+            catch (IOException ignored) { /* A stale temporary wordlist is harmless. */ }
+            ssidFile = null;
+        }
+        if (ssidDir != null) {
+            try { Files.deleteIfExists(ssidDir); }
+            catch (IOException ignored) { /* Private directory cleanup is best-effort. */ }
+            ssidDir = null;
+        }
     }
 
     private static boolean missingProgram(IOException failure, String name) {

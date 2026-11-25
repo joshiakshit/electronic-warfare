@@ -210,16 +210,58 @@ public final class PassiveWifiSession {
         return ap == null || ap.advertisement() == null ? null : ap;
     }
 
+    public static boolean isDfsFrequency(int frequencyMhz) {
+        return (frequencyMhz >= 5250 && frequencyMhz <= 5330)
+                || (frequencyMhz >= 5490 && frequencyMhz <= 5730);
+    }
+
+    public static String summarizePmf(List<TopologyBuilder.AdvertisedSecurity> advertisedSecurity) {
+        if (advertisedSecurity == null || advertisedSecurity.isEmpty()) return null;
+        var rsn = advertisedSecurity.stream().filter(p -> "RSN".equals(p.protocol())).toList();
+        var profiles = rsn.isEmpty() ? advertisedSecurity : rsn;
+        boolean capable = false;
+        for (var profile : profiles) {
+            String pmf = profile.managementFrameProtection();
+            if ("Required".equalsIgnoreCase(pmf)) return "Required";
+            if ("Capable".equalsIgnoreCase(pmf)) capable = true;
+        }
+        return capable ? "Capable" : "Disabled";
+    }
+
+    public static List<String> akmSuitesOf(List<TopologyBuilder.AdvertisedSecurity> advertisedSecurity) {
+        if (advertisedSecurity == null || advertisedSecurity.isEmpty()) return List.of();
+        return advertisedSecurity.stream()
+                .flatMap(profile -> profile.authentication().stream())
+                .filter(Objects::nonNull)
+                .distinct()
+                .toList();
+    }
+
     public record SelectableAccessPoint(String bssid, String ssid, boolean ssidHidden, int channel,
-                                        int frequencyMhz, List<String> clients, long lastSeen) { }
+                                        int frequencyMhz, List<String> clients, long lastSeen,
+                                        String security, String managementFrameProtection,
+                                        List<String> akmSuites, Double rssiDbm, boolean dfsChannel) {
+        public SelectableAccessPoint {
+            clients = clients == null ? List.of() : List.copyOf(clients);
+            akmSuites = akmSuites == null ? List.of() : List.copyOf(akmSuites);
+        }
+
+        public SelectableAccessPoint(String bssid, String ssid, boolean ssidHidden, int channel,
+                                     int frequencyMhz, List<String> clients, long lastSeen) {
+            this(bssid, ssid, ssidHidden, channel, frequencyMhz, clients, lastSeen,
+                    null, null, List.of(), null, isDfsFrequency(frequencyMhz));
+        }
+    }
 
     /** Fresh advertised APs that can be resolved by Sniper and Ops, rather than historical topology rows. */
     public synchronized List<SelectableAccessPoint> selectableAccessPoints() {
         var snapshot = topology();
         return snapshot.accessPoints().stream().map(ap -> {
             var details = directlyObservedAp(ap.bssid());
-            return details == null || details.frequencyMhz() <= 0 ? null : new SelectableAccessPoint(ap.bssid(), ap.ssid(), ap.ssidHidden(),
-                    details.channel(), details.frequencyMhz(), ap.clients(), details.lastSeen());
+            return details == null || details.frequencyMhz() <= 0 ? null : new SelectableAccessPoint(
+                    ap.bssid(), ap.ssid(), ap.ssidHidden(), details.channel(), details.frequencyMhz(),
+                    ap.clients(), details.lastSeen(), ap.security(), summarizePmf(ap.advertisedSecurity()),
+                    akmSuitesOf(ap.advertisedSecurity()), details.rssi(), isDfsFrequency(details.frequencyMhz()));
         }).filter(Objects::nonNull).toList();
     }
 

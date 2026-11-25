@@ -42,7 +42,17 @@ public final class HandshakeAnalyzer {
     @FunctionalInterface public interface ProcessStarter {
         Process start(ProcessBuilder builder) throws IOException;
     }
-    public record Status(boolean running, String stage) {}
+    public record Status(boolean running, String stage, boolean beaconSeen, List<Integer> observedMessages,
+                         boolean verifiable, String verifiablePair, String peerMac,
+                         Integer remainingSeconds, int eapolFrames) {
+        public Status {
+            observedMessages = observedMessages == null ? List.of() : List.copyOf(observedMessages);
+        }
+
+        public Status(boolean running, String stage) {
+            this(running, stage, false, List.of(), false, null, null, null, 0);
+        }
+    }
     record Timing(Duration beacon, Duration observe, Duration poll, Duration verify) {
         static final Timing DEFAULT = new Timing(Duration.ofSeconds(8), Duration.ofSeconds(90),
                 Duration.ofMillis(100), Duration.ofMinutes(5));
@@ -60,8 +70,16 @@ public final class HandshakeAnalyzer {
     private final AtomicBoolean inUse = new AtomicBoolean();
     private final Set<Process> processes = new HashSet<>();
     private volatile boolean cancelled;
+    private volatile boolean finishRequested;
     private volatile boolean running;
     private volatile String stage = "Ready";
+    private volatile boolean liveBeaconSeen;
+    private volatile List<Integer> liveObservedMessages = List.of();
+    private volatile boolean liveVerifiable;
+    private volatile String liveVerifiablePair;
+    private volatile String livePeerMac;
+    private volatile Integer liveRemainingSeconds;
+    private volatile int liveEapolFrames;
     private volatile Path capturedFile;
 
     public HandshakeAnalyzer() { this("wlo1", null, null, 6); }
@@ -105,6 +123,19 @@ public final class HandshakeAnalyzer {
                              int frequency, String captureDir, ProcessStarter starter, boolean allowMacRotation) {
         this(monitorInterface, apBssid, clientMac, channel, frequency, captureDir, starter, Timing.DEFAULT,
                 allowMacRotation);
+    }
+
+    public HandshakeAnalyzer(String monitorInterface, String apBssid, String clientMac, int channel,
+                             int frequency, boolean allowMacRotation, int timeoutSeconds) {
+        this(monitorInterface, apBssid, clientMac, channel, frequency, DEFAULT_CAPTURE_DIR, ProcessBuilder::start,
+                timingWithObserve(timeoutSeconds), allowMacRotation);
+    }
+
+    private static Timing timingWithObserve(int timeoutSeconds) {
+        if (timeoutSeconds < 10 || timeoutSeconds > 180)
+            throw new IllegalArgumentException("timeoutSeconds must be an integer in 10–180");
+        return new Timing(Timing.DEFAULT.beacon(), Duration.ofSeconds(timeoutSeconds),
+                Timing.DEFAULT.poll(), Timing.DEFAULT.verify());
     }
 
     HandshakeAnalyzer(String monitorInterface, String apBssid, String clientMac, int channel,
@@ -182,16 +213,27 @@ public final class HandshakeAnalyzer {
             boolean ready = false;
             while (recorder.isAlive() && decoder.isAlive() && !relay.isDone() && !rows.isDone()) {
                 checkCancelled();
-                if (packets.observation().complete() || System.nanoTime() >= deadline) break;
+                long now = System.nanoTime();
+                var obs = packets.observation();
+                liveBeaconSeen = packets.beaconSeen();
+                liveObservedMessages = obs.messages();
+                liveVerifiable = obs.verifiable();
+                liveVerifiablePair = obs.verifiablePair();
+                livePeerMac = obs.clientMac();
+                liveEapolFrames = obs.eapolFrames();
+                long remainingNanos = ready ? deadline - now : beaconDeadline - now;
+                liveRemainingSeconds = Math.max(0, (int) Math.ceil(remainingNanos / 1_000_000_000.0));
+                if (obs.complete() || finishRequested || now >= deadline) break;
                 if (!ready && packets.beaconSeen()) {
                     ready = true;
                     stage = "Ready — reconnect your device now";
                 }
-                if (!ready && System.nanoTime() >= beaconDeadline) break;
+                if (!ready && now >= beaconDeadline) break;
                 TimeUnit.NANOSECONDS.sleep(timing.poll().toNanos());
             }
+            liveRemainingSeconds = null;
             checkCancelled();
-            boolean earlyExit = !recorder.isAlive() || !decoder.isAlive() || relay.isDone() || rows.isDone();
+            boolean earlyExit = !finishRequested && (!recorder.isAlive() || !decoder.isAlive() || relay.isDone() || rows.isDone());
             stage = "Finishing capture…";
             stopping.set(true);
             stop(recorder);
@@ -208,6 +250,12 @@ public final class HandshakeAnalyzer {
             if (!decoderFinished) diagnostics += "Packet decoder did not finish writing the capture.\n";
             if (Files.size(cap) < 24) throw new IOException("No readable 802.11 capture was written.\n" + diagnostics);
             var observed = packets.observation();
+            liveBeaconSeen = packets.beaconSeen();
+            liveObservedMessages = observed.messages();
+            liveVerifiable = observed.verifiable();
+            liveVerifiablePair = observed.verifiablePair();
+            livePeerMac = observed.clientMac();
+            liveEapolFrames = observed.eapolFrames();
             Outcome outcome;
             if (pipelineFailed) outcome = Outcome.CAPTURE_ENDED;
             else if (observed.complete()) outcome = Outcome.COMPLETE;
@@ -222,9 +270,10 @@ public final class HandshakeAnalyzer {
                 case TARGET_NOT_SEEN -> "Target AP beacon not seen";
                 case CAPTURE_ENDED -> "Capture ended without handshake";
             };
-            capturedFile = cap;
+            capturedFile = cap.toAbsolutePath().normalize();
             return new HandshakeResult(outcome == Outcome.COMPLETE, cap.toString(), apBssid,
-                    observed.clientMac(), diagnostics, Instant.now(), frequency, outcome, observed.messages());
+                    observed.clientMac(), diagnostics, Instant.now(), frequency, outcome, observed.messages(),
+                    observed.verifiable(), observed.verifiablePair());
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
             throw interrupted;
@@ -339,10 +388,25 @@ public final class HandshakeAnalyzer {
         return path;
     }
 
-    public Status status() { return new Status(running, stage); }
+    public Status status() {
+        return new Status(running, stage, liveBeaconSeen, liveObservedMessages, liveVerifiable,
+                liveVerifiablePair, livePeerMac, liveRemainingSeconds, liveEapolFrames);
+    }
+
+    public boolean finishEarly() {
+        if (!running || cancelled) return false;
+        finishRequested = true;
+        return true;
+    }
+
+    public Path capturedFile() {
+        return capturedFile;
+    }
 
     /** A recorded target can be reused for verification of exactly this analyzer's retained capture. */
-    public String capturedBssid(Path file) { return file.equals(capturedFile) ? apBssid : null; }
+    public String capturedBssid(Path file) {
+        return file != null && capturedFile != null && file.toAbsolutePath().normalize().equals(capturedFile) ? apBssid : null;
+    }
 
     public synchronized void terminate() {
         cancelled = true;

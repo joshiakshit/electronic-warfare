@@ -362,6 +362,7 @@ it.each([
   ['handshake', { captureOutput: 'lab stdout' }],
   ['handshake-verify', { fullOutput: 'lab stdout' }],
   ['pmkid', { output: 'lab stdout' }],
+  ['pmkid-verify', { output: 'lab stdout' }],
   ['beacon', { command: 'lab command', error: 'lab error', output: 'lab stdout' }],
   ['evil-twin', { error: 'lab error' }],
 ])('renders %s diagnostics once when both final result and status are present', (operation, result) => {
@@ -473,4 +474,89 @@ it('renders the enrolled label and device context in the Profiler table and arch
     expect(html.match(/<aside.*?<\/aside>/s)?.[0]).toContain(value);
   }
   expect(html).not.toContain('Save as sample');
+});
+
+it('renders live handshake progress steps, verifiable partial results, PMKID captureOnly table, and evil-twin telemetry', () => {
+  const hsHtml = renderToStaticMarkup(
+    <ResultView
+      operation="handshake"
+      status={{
+        running: true, stage: 'Ready — reconnect your device now', beaconSeen: true,
+        observedMessages: [1, 2], verifiable: true, verifiablePair: 'M1_M2',
+        peerMac: '02:11:22:33:44:66', remainingSeconds: 24,
+      }}
+      result={{
+        handshakeDetected: false, outcome: 'PARTIAL', verifiable: true, verifiablePair: 'M1_M2',
+        apBssid: '02:11:22:33:44:55', clientMac: '02:11:22:33:44:66', frequencyMhz: 2437,
+        messages: [1, 2], capFilePath: '/tmp/hs-partial.cap',
+      }}
+    />,
+  );
+  for (const text of ['24s remaining', 'Beacon', 'M1', 'M2', 'Verifiable (M1_M2)', 'Peer 02:11:22:33:44:66', 'PARTIAL', '/tmp/hs-partial.cap']) {
+    expect(hsHtml).toContain(text);
+  }
+
+  const pmkidHtml = renderToStaticMarkup(
+    <ResultView
+      operation="pmkid"
+      status={{ running: false, stage: 'Capture complete', phase: 'COMPLETE', pmkidCount: 1, eapolPairCount: 2 }}
+      result={{
+        captured: true, vulnerable: false, verificationSkipped: true, eapolPairCount: 2,
+        pcapngPath: '/tmp/p.pcapng', hashPath: '/tmp/p.22000',
+        pmkids: [{ pmkid: '4d4fe7aac3a2cecab195321ceb99a7d0', apBssid: 'fc:69:0c:15:82:64', stationMac: 'f4:74:7f:87:f9:f4', essid: 'hashcat-essid' }],
+      }}
+    />,
+  );
+  for (const text of ['Verification skipped', '2 EAPOL pairs', '4d4fe7aac3a2', 'fc:69:0c:15:82:64', 'hashcat-essid']) {
+    expect(pmkidHtml).toContain(text);
+  }
+
+  const twinHtml = renderToStaticMarkup(
+    <ResultView
+      operation="evil-twin"
+      result={null}
+      status={{
+        running: true, stage: 'Portal running', elapsedSeconds: 12,
+        connectedStations: [{ mac: 'aa:bb:cc:dd:ee:11', connectedAt: '10:00:00Z' }],
+        dhcpLeases: [{ ip: '10.0.0.25', mac: 'aa:bb:cc:dd:ee:11', hostname: 'lab-phone', expiresAtEpochSeconds: 1700000000 }],
+      }}
+    />,
+  );
+  for (const text of ['12s elapsed', 'Associated stations', 'aa:bb:cc:dd:ee:11', 'DHCP lease IP', '10.0.0.25', 'lab-phone']) {
+    expect(twinHtml).toContain(text);
+  }
+});
+
+it('renders Passive to Ops launch buttons only for live actionable rows', () => {
+  const hiddenRow = hiddenNameRow({
+    bssid: 'wifi:hidden-1', ssid: null, ssidHidden: true, channel: 6, frequencyMhz: 2437,
+  });
+  const revealedRow = hiddenNameRow({
+    bssid: 'wifi:hidden-2', ssid: 'RevealedNet', ssidHidden: true, channel: 6, frequencyMhz: 2437,
+  });
+
+  const liveHidden = renderToStaticMarkup(
+    <ObservationReport kind="hidden" rows={[hiddenRow]} running={false} stale={false}
+      initialSelectedKey={observationKey('hidden', hiddenRow)} onOpenInOps={() => {}} />,
+  );
+  expect(liveHidden).toContain('Uncloak in Ops');
+
+  const archivedHidden = renderToStaticMarkup(
+    <ObservationReport kind="hidden" rows={[hiddenRow]} archived running={false} stale={false}
+      initialSelectedKey={observationKey('hidden', hiddenRow)} onOpenInOps={() => {}} />,
+  );
+  expect(archivedHidden).not.toContain('Uncloak in Ops');
+
+  const liveRevealed = renderToStaticMarkup(
+    <ObservationReport kind="hidden" rows={[revealedRow]} running={false} stale={false}
+      initialSelectedKey={observationKey('hidden', revealedRow)} onOpenInOps={() => {}} />,
+  );
+  expect(liveRevealed).not.toContain('Uncloak in Ops');
+
+  const inspectorAp = { bssid: 'wifi:ap-1', ssid: 'CampusNet', channel: 36, frequencyMhz: 5180 };
+  const liveInspector = renderToStaticMarkup(
+    <ObservationReport kind="aps" rows={[inspectorAp]} running={false} stale={false}
+      initialSelectedKey={observationKey('aps', inspectorAp)} onOpenInOps={() => {}} />,
+  );
+  expect(liveInspector).toContain('Open in Ops');
 });

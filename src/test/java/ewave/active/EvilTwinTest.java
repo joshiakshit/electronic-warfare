@@ -228,6 +228,36 @@ class EvilTwinTest {
         for (var process : processes) assertFalse(process.isAlive());
     }
 
+    @Test void isolatesDnsmasqFromLoopbackAndTracksHostapdStationsAndDhcpLeases() throws Exception {
+        var hostapdProc = new StreamingCaptureProcess();
+        Path work = directory.resolve("telemetry-work"), creds = directory.resolve("telemetry-creds.tsv");
+        var twin = new EvilTwin("wlo1ap", "lab-portal", 6, 8080, work.toString(), creds.toString(),
+                builder -> {
+                    var cmd = List.copyOf(builder.command());
+                    return cmd.contains("hostapd") ? hostapdProc : new StreamingCaptureProcess();
+                });
+
+        twin.start();
+        String dnsmasqConf = Files.readString(work.resolve("dnsmasq.conf"));
+        assertTrue(dnsmasqConf.contains("except-interface=lo"));
+        assertTrue(dnsmasqConf.contains("dhcp-leasefile=" + work.resolve("dnsmasq.leases")));
+        assertTrue(dnsmasqConf.contains("pid-file=" + work.resolve("dnsmasq.pid")));
+
+        hostapdProc.write("AP-STA-CONNECTED aa:bb:cc:dd:ee:11\n".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        Files.writeString(work.resolve("dnsmasq.leases"), "1700000000 aa:bb:cc:dd:ee:11 10.0.0.25 lab-phone *\n");
+
+        await(() -> twin.status().connectedStations().size() == 1);
+        var st = twin.status();
+        assertEquals("aa:bb:cc:dd:ee:11", st.connectedStations().getFirst().mac());
+        assertEquals(1, st.dhcpLeases().size());
+        assertEquals("10.0.0.25", st.dhcpLeases().getFirst().ip());
+        assertEquals("lab-phone", st.dhcpLeases().getFirst().hostname());
+
+        hostapdProc.write("AP-STA-DISCONNECTED aa:bb:cc:dd:ee:11\n".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        await(() -> twin.status().connectedStations().isEmpty());
+        twin.terminate();
+    }
+
     private static EvilTwin.ProcessStarter launcher(List<List<String>> commands,
                                                     List<StreamingCaptureProcess> processes) {
         return builder -> {

@@ -180,6 +180,21 @@ class DeauthRoutesTest {
         }
     }
 
+    @Test void opsLanHostsReportsMissingCacheAsAvailableFalse() throws Exception {
+        Path missingLan = temporary.resolve("missing-lan.txt");
+        try (var bridge = new PacketBridge();
+             var server = new PassiveRfServer(bridge, true,
+                     monitor -> new FrameInjector(monitor, b -> new CompletedProcess("", 0)),
+                     new LanScanner(missingLan), cachedAps()).start(0);
+             var client = HttpClient.newHttpClient()) {
+            var emptyHosts = mapper.readTree(get(client, server, "/api/ops/lan-hosts").body());
+            assertEquals(200, get(client, server, "/api/ops/lan-hosts").statusCode());
+            assertFalse(emptyHosts.path("available").asBoolean());
+            assertTrue(emptyHosts.path("hosts").isArray());
+            assertEquals(0, emptyHosts.path("hosts").size());
+        }
+    }
+
     private WifiAccessPoints cachedAps() throws IOException {
         Path cache = temporary.resolve("aps.txt");
         Files.writeString(cache, "Lab AP:02\\:11\\:22\\:33\\:44\\:55:2:2417 MHz\n");

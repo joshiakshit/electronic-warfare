@@ -33,12 +33,32 @@ public final class PmkidCapture {
         Process start(ProcessBuilder builder) throws IOException;
     }
 
-    public record Status(boolean running, String stage) {}
+    public record ExtractedPmkid(String pmkid, String apBssid, String stationMac, String essid) {}
+
+    public record Status(boolean running, String stage, String phase, Integer remainingSeconds,
+                         int pmkidCount, int eapolPairCount, int verifiedCount, String output) {
+        public Status(boolean running, String stage) {
+            this(running, stage, running ? "RUNNING" : "IDLE", null, 0, 0, 0, "");
+        }
+    }
+
     public record Result(boolean captured, boolean vulnerable, String psk, String pcapngPath, String hashPath,
-                         String command, String output, Instant timestamp, String targetApBssid, Integer frequencyMhz) {
+                         String command, String output, Instant timestamp, String targetApBssid, Integer frequencyMhz,
+                         List<ExtractedPmkid> pmkids, int eapolPairCount, boolean verificationSkipped) {
+        public Result {
+            pmkids = pmkids == null ? List.of() : List.copyOf(pmkids);
+        }
+
         public Result(boolean captured, boolean vulnerable, String psk, String pcapngPath, String hashPath,
                       String command, String output, Instant timestamp) {
-            this(captured, vulnerable, psk, pcapngPath, hashPath, command, output, timestamp, null, null);
+            this(captured, vulnerable, psk, pcapngPath, hashPath, command, output, timestamp,
+                    null, null, List.of(), 0, false);
+        }
+
+        public Result(boolean captured, boolean vulnerable, String psk, String pcapngPath, String hashPath,
+                      String command, String output, Instant timestamp, String targetApBssid, Integer frequencyMhz) {
+            this(captured, vulnerable, psk, pcapngPath, hashPath, command, output, timestamp,
+                    targetApBssid, frequencyMhz, List.of(), 0, false);
         }
     }
 
@@ -53,7 +73,14 @@ public final class PmkidCapture {
     private volatile Process process;
     private volatile boolean running;
     private volatile boolean cancelled;
+    private volatile boolean finishCaptureRequested;
     private volatile String stage = "Ready";
+    private volatile String phase = "IDLE";
+    private volatile Integer remainingSeconds;
+    private volatile int pmkidCount;
+    private volatile int eapolPairCount;
+    private volatile int verifiedCount;
+    private volatile Path retainedHashFile;
     private volatile IOException readFailure;
     private boolean truncated;
 
@@ -93,7 +120,13 @@ public final class PmkidCapture {
 
     public Result run(String wordlistPath, int durationSeconds)
             throws IOException, InterruptedException, TimeoutException {
-        Path wordlist = HandshakeAnalyzer.readableFile(wordlistPath, HandshakeAnalyzer.WORDLIST_MISSING);
+        return run(wordlistPath, durationSeconds, false);
+    }
+
+    public Result run(String wordlistPath, int durationSeconds, boolean captureOnly)
+            throws IOException, InterruptedException, TimeoutException {
+        Path wordlist = captureOnly ? null
+                : HandshakeAnalyzer.readableFile(wordlistPath, HandshakeAnalyzer.WORDLIST_MISSING);
         if (durationSeconds < 1 || durationSeconds > 300)
             throw new IllegalArgumentException("durationSeconds must be between 1 and 300");
         begin();
@@ -111,7 +144,9 @@ public final class PmkidCapture {
             pcapng = runDirectory.resolve("pmkid.pcapng");
             hash = runDirectory.resolve("pmkid.22000");
 
+            phase = "CAPTURING";
             stage = "Capturing PMKIDs on " + monitorInterface + "…";
+            remainingSeconds = durationSeconds;
             List<String> captureCommand;
             if (targetHex == null && frequencyMhz == 0) {
                 captureCommand = List.of("sudo", "hcxdumptool", "-i", monitorInterface, "-w", pcapng.toString(),
@@ -130,7 +165,26 @@ public final class PmkidCapture {
             command = String.join(" ", captureCommand);
             Process capture = launch(captureCommand);
             Thread captureReader = drain(capture);
-            boolean captured = capture.waitFor(durationSeconds, TimeUnit.SECONDS);
+            long captureDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(durationSeconds);
+            boolean captured = false;
+            while (true) {
+                checkCancelled();
+                if (finishCaptureRequested) break;
+                long now = System.nanoTime();
+                long remainingNanos = captureDeadline - now;
+                if (remainingNanos <= 0) break;
+                remainingSeconds = Math.max(0, (int) Math.ceil(remainingNanos / 1_000_000_000.0));
+                long stepMs = Math.min(200L, Math.max(1L, TimeUnit.NANOSECONDS.toMillis(remainingNanos)));
+                long stepStart = System.nanoTime();
+                if (capture.waitFor(stepMs, TimeUnit.MILLISECONDS)) {
+                    captured = true;
+                    break;
+                }
+                if (!finishCaptureRequested && System.nanoTime() - stepStart < TimeUnit.MILLISECONDS.toNanos(10)) {
+                    TimeUnit.MILLISECONDS.sleep(20);
+                }
+            }
+            remainingSeconds = null;
             if (!captured) {
                 append("\nCapture window ended.\n");
                 stopProcess(capture);
@@ -142,9 +196,11 @@ public final class PmkidCapture {
             }
             if (!Files.exists(pcapng) || Files.size(pcapng) == 0) {
                 stage = "Capture complete";
-                return result(false, false, null, pcapng, hash, command);
+                phase = "COMPLETE";
+                return result(false, false, null, pcapng, hash, command, List.of(), 0, captureOnly);
             }
 
+            phase = "CONVERTING";
             stage = "Converting capture…";
             var convertCommand = List.of("hcxpcapngtool", "-o", hash.toString(), pcapng.toString());
             command = String.join(" ", convertCommand);
@@ -162,60 +218,13 @@ public final class PmkidCapture {
             }
             if (!Files.exists(hash) || Files.size(hash) == 0) {
                 stage = "Capture complete";
-                return result(false, false, null, pcapng, hash, command);
+                phase = "COMPLETE";
+                return result(false, false, null, pcapng, hash, command, List.of(), 0, captureOnly);
             }
+            restrictToOwner(pcapng);
+            restrictToOwner(hash);
 
-            try (var hashes = PmkidHash.read(hash)) {
-                var entries = hashes
-                        .filter(entry -> targetHex == null || entry.apMac().equalsIgnoreCase(targetHex))
-                        .iterator();
-                if (!entries.hasNext()) {
-                    append(targetApBssid != null
-                            ? "\nNo PMKID hash found for target AP " + targetApBssid + ".\n"
-                            : "\nNo PMKID hash found. hcxpcapngtool produced EAPOL-only or invalid hashes. "
-                            + "Use the Handshake card for an EAPOL capture.\n");
-                    stage = "Complete";
-                    return result(false, false, null, pcapng, hash, "");
-                }
-                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(300);
-                while (entries.hasNext()) {
-                    checkCancelled();
-                    PmkidHash pmkid = entries.next();
-                    stage = "Verifying PMKID for " + pmkid.apMac() + "…";
-                    var verifyCommand = List.of("aircrack-ng", "-q", "-I", pmkid.aircrackString(),
-                            "-e", pmkid.essid(), "-w", wordlist.toString());
-                    command = String.join(" ", verifyCommand);
-                    append("\nVerifying PMKID for " + pmkid.apMac() + "\n");
-                    Process verify = launch(verifyCommand);
-                    var verifyOutput = new HandshakeAnalyzer.Output(verify.getInputStream(), OUTPUT_LIMIT);
-                    boolean recordedOutput = false;
-                    try {
-                        long remaining = deadline - System.nanoTime();
-                        if (remaining <= 0 || !verify.waitFor(remaining, TimeUnit.NANOSECONDS)) {
-                            stopProcess(verify);
-                            throw new TimeoutException("PMKID verification timed out after 300 seconds");
-                        }
-                        verifyOutput.finish();
-                        checkCancelled();
-                        append(verifyOutput.text());
-                        recordedOutput = true;
-                        String key = verifyOutput.key();
-                        if (key != null && verify.exitValue() == 0) {
-                            stage = "Complete";
-                            return result(true, true, key, pcapng, hash, command);
-                        }
-                        if (!verifyOutput.keyNotFound() || key != null)
-                            throw new IOException("PMKID verification failed (exit " + verify.exitValue() + "): " + verifyOutput.text());
-                    } finally {
-                        forceStop(verify);
-                        if (!recordedOutput) append(verifyOutput.text());
-                        verifyOutput.close();
-                        synchronized (this) { processes.remove(verify); }
-                    }
-                }
-            }
-            stage = "Complete";
-            return result(true, false, null, pcapng, hash, command);
+            return processHashes(hash, pcapng, wordlist, targetHex, captureOnly, command);
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
             throw interrupted;
@@ -232,6 +241,94 @@ public final class PmkidCapture {
                 catch (IOException ignored) { /* Retain directories containing captures for later verification. */ }
             }
         }
+    }
+
+    public Result verifyCapturedHashes(Path hashFile, String wordlistPath)
+            throws IOException, InterruptedException, TimeoutException {
+        Path wordlist = HandshakeAnalyzer.readableFile(wordlistPath, HandshakeAnalyzer.WORDLIST_MISSING);
+        PrivateWorkspace.requireFile(hashFile);
+        Path normalizedHash = hashFile.toAbsolutePath().normalize();
+        String targetHex = targetApBssid == null ? null : targetApBssid.replace(":", "").toLowerCase(Locale.ROOT);
+        begin();
+        try {
+            Path siblingPcapng = normalizedHash.resolveSibling("pmkid.pcapng");
+            Path pcapng = Files.isRegularFile(siblingPcapng, LinkOption.NOFOLLOW_LINKS) ? siblingPcapng : Path.of("");
+            return processHashes(normalizedHash, pcapng, wordlist, targetHex, false, "");
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw interrupted;
+        } finally {
+            cleanup();
+        }
+    }
+
+    private Result processHashes(Path hash, Path pcapng, Path wordlist, String targetHex, boolean captureOnly,
+                                 String initialCommand) throws IOException, InterruptedException, TimeoutException {
+        var parsed = readHashSummary(hash, targetHex);
+        var entries = parsed.entries();
+        var extracted = parsed.extracted();
+        int eapolPairs = parsed.eapolPairs();
+        pmkidCount = extracted.size();
+        eapolPairCount = eapolPairs;
+        if (entries.isEmpty()) {
+            append(targetApBssid != null
+                    ? "\nNo PMKID hash found for target AP " + targetApBssid + ".\n"
+                    : "\nNo PMKID hash found. hcxpcapngtool produced EAPOL-only or invalid hashes. "
+                    + "Use the Handshake card for an EAPOL capture.\n");
+            stage = "Complete";
+            phase = "COMPLETE";
+            return result(false, false, null, pcapng, hash, "", List.of(), eapolPairs, captureOnly);
+        }
+        retainedHashFile = hash.toAbsolutePath().normalize();
+        if (captureOnly) {
+            stage = "Complete";
+            phase = "COMPLETE";
+            return result(true, false, null, pcapng, hash, initialCommand, extracted, eapolPairs, true);
+        }
+        phase = "VERIFYING";
+        verifiedCount = 0;
+        String command = initialCommand;
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(300);
+        for (PmkidHash pmkid : entries) {
+            checkCancelled();
+            stage = "Verifying PMKID for " + pmkid.apMac() + "…";
+            var verifyCommand = List.of("aircrack-ng", "-q", "-I", pmkid.aircrackString(),
+                    "-e", pmkid.essid(), "-w", wordlist.toString());
+            command = String.join(" ", verifyCommand);
+            append("\nVerifying PMKID for " + pmkid.apMac() + "\n");
+            Process verify = launch(verifyCommand);
+            var verifyOutput = new HandshakeAnalyzer.Output(verify.getInputStream(), OUTPUT_LIMIT);
+            boolean recordedOutput = false;
+            try {
+                long remaining = deadline - System.nanoTime();
+                remainingSeconds = Math.max(0, (int) Math.ceil(remaining / 1_000_000_000.0));
+                if (remaining <= 0 || !verify.waitFor(remaining, TimeUnit.NANOSECONDS)) {
+                    stopProcess(verify);
+                    throw new TimeoutException("PMKID verification timed out after 300 seconds");
+                }
+                verifyOutput.finish();
+                checkCancelled();
+                append(verifyOutput.text());
+                recordedOutput = true;
+                verifiedCount++;
+                String key = verifyOutput.key();
+                if (key != null && verify.exitValue() == 0) {
+                    stage = "Complete";
+                    phase = "COMPLETE";
+                    return result(true, true, key, pcapng, hash, command, extracted, eapolPairs, false);
+                }
+                if (!verifyOutput.keyNotFound() || key != null)
+                    throw new IOException("PMKID verification failed (exit " + verify.exitValue() + "): " + verifyOutput.text());
+            } finally {
+                forceStop(verify);
+                if (!recordedOutput) append(verifyOutput.text());
+                verifyOutput.close();
+                synchronized (this) { processes.remove(verify); }
+            }
+        }
+        stage = "Complete";
+        phase = "COMPLETE";
+        return result(true, false, null, pcapng, hash, command, extracted, eapolPairs, false);
     }
 
     private static void deleteIfEmpty(Path file) {
@@ -280,13 +377,25 @@ public final class PmkidCapture {
         }
     }
 
-    public Status status() { return new Status(running, stage); }
+    public Status status() {
+        return new Status(running, stage, phase, remainingSeconds, pmkidCount, eapolPairCount,
+                verifiedCount, outputText());
+    }
+
+    public Path capturedHashFile() { return retainedHashFile; }
+
+    public boolean finishCaptureEarly() {
+        if (!running || cancelled || !"CAPTURING".equals(phase)) return false;
+        finishCaptureRequested = true;
+        return true;
+    }
 
     /** Also cancels a run reserved by the server before process creation. */
     public synchronized void terminate() {
         cancelled = true;
         for (Process current : processes) forceStop(current);
         stage = "Stopped";
+        phase = "STOPPED";
     }
 
     private void begin() {
@@ -327,10 +436,13 @@ public final class PmkidCapture {
         });
     }
 
-    private Result result(boolean captured, boolean vulnerable, String psk, Path pcapng, Path hash, String command) {
+    private Result result(boolean captured, boolean vulnerable, String psk, Path pcapng, Path hash, String command,
+                          List<ExtractedPmkid> pmkids, int eapolPairs, boolean verificationSkipped) {
         if (readFailure != null) append("\nCould not read process output: " + readFailure.getMessage() + "\n");
-        return new Result(captured, vulnerable, psk, pcapng.toString(), hash.toString(), command, outputText(),
-                Instant.now(), targetApBssid, frequencyMhz > 0 ? frequencyMhz : null);
+        String pcapPath = pcapng == null || pcapng.toString().isEmpty() ? "" : pcapng.toString();
+        return new Result(captured, vulnerable, psk, pcapPath, hash.toString(), command, outputText(),
+                Instant.now(), targetApBssid, frequencyMhz > 0 ? frequencyMhz : null,
+                pmkids, eapolPairs, verificationSkipped);
     }
 
     private synchronized void append(String value) {
@@ -350,8 +462,48 @@ public final class PmkidCapture {
             processes.clear();
             process = null;
         }
+        remainingSeconds = null;
         running = false;
+        if (cancelled) phase = "STOPPED";
+        else if (!"COMPLETE".equals(phase)) phase = "STOPPED";
         inUse.set(false);
+    }
+
+    private record HashSummary(List<PmkidHash> entries, List<ExtractedPmkid> extracted, int eapolPairs) { }
+
+    private static HashSummary readHashSummary(Path hashFile, String targetHex) throws IOException {
+        var entries = new ArrayList<PmkidHash>();
+        var extracted = new ArrayList<ExtractedPmkid>();
+        int eapolPairs = 0;
+        try (Stream<String> lines = Files.lines(hashFile, StandardCharsets.UTF_8)) {
+            for (String line : (Iterable<String>) lines::iterator) {
+                if (line.startsWith("WPA*02*")) {
+                    var fields = line.split("\\*", -1);
+                    if (fields.length >= 6 && (targetHex == null || targetHex.equalsIgnoreCase(fields[3]))) {
+                        eapolPairs++;
+                    }
+                    continue;
+                }
+                PmkidHash parsed = PmkidHash.parse(line);
+                if (parsed == null) continue;
+                if (targetHex == null || parsed.apMac().equalsIgnoreCase(targetHex)) {
+                    entries.add(parsed);
+                    extracted.add(new ExtractedPmkid(parsed.pmkid(), formatMac(parsed.apMac()),
+                            formatMac(parsed.stationMac()), parsed.essid()));
+                }
+            }
+        }
+        return new HashSummary(List.copyOf(entries), List.copyOf(extracted), eapolPairs);
+    }
+
+    private static String formatMac(String hex12) {
+        if (hex12 == null || hex12.length() != 12) return hex12;
+        var out = new StringBuilder(17);
+        for (int i = 0; i < 12; i += 2) {
+            if (i > 0) out.append(':');
+            out.append(Character.toLowerCase(hex12.charAt(i))).append(Character.toLowerCase(hex12.charAt(i + 1)));
+        }
+        return out.toString();
     }
 
     private static void forceStop(Process process) {
@@ -379,6 +531,15 @@ public final class PmkidCapture {
         }
 
         String aircrackString() { return pmkid + "*" + apMac + "*" + stationMac + "*" + essid; }
+    }
+
+    private static void restrictToOwner(Path path) throws IOException {
+        if (path == null || !Files.exists(path, LinkOption.NOFOLLOW_LINKS)) return;
+        try {
+            Files.setPosixFilePermissions(path, PosixFilePermissions.fromString("rw-------"));
+        } catch (UnsupportedOperationException ignored) {
+            /* Non-POSIX filesystems lack POSIX permissions. */
+        }
     }
 
     private static void stopProcess(Process process) throws InterruptedException {

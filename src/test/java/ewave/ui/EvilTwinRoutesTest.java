@@ -118,6 +118,36 @@ class EvilTwinRoutesTest {
         }
     }
 
+    @Test void exposesConnectedStationsAndDhcpLeasesInStatusEndpoint() throws Exception {
+        var hostapdProc = new StreamingCaptureProcess();
+        Path work = directory.resolve("routes-telemetry");
+        try (var bridge = new PacketBridge();
+             var server = server(bridge, settings -> new EvilTwin(settings.apInterface(), settings.ssid(),
+                     settings.channel(), settings.portalPort(), work.toString(),
+                     directory.resolve("routes-creds.txt").toString(), builder -> {
+                         var cmd = List.copyOf(builder.command());
+                         return cmd.contains("hostapd") ? hostapdProc : new StreamingCaptureProcess();
+                     }));
+             var client = HttpClient.newHttpClient()) {
+            assertEquals(200, post(client, server, REQUEST).statusCode());
+            hostapdProc.write("AP-STA-CONNECTED aa:bb:cc:dd:ee:11\n".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            Files.writeString(work.resolve("dnsmasq.leases"), "1700000000 aa:bb:cc:dd:ee:11 10.0.0.25 lab-phone *\n");
+
+            long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(3);
+            com.fasterxml.jackson.databind.JsonNode status = mapper.createObjectNode();
+            while (System.nanoTime() < deadline) {
+                status = mapper.readTree(client.send(HttpRequest.newBuilder(uri(server, "/api/ops/evil-twin/status")).build(),
+                        HttpResponse.BodyHandlers.ofString()).body());
+                if (status.path("connectedStations").size() == 1 && status.path("dhcpLeases").size() == 1) break;
+                Thread.sleep(20);
+            }
+            assertEquals("aa:bb:cc:dd:ee:11", status.at("/connectedStations/0/mac").asText());
+            assertEquals("10.0.0.25", status.at("/dhcpLeases/0/ip").asText());
+            assertEquals("lab-phone", status.at("/dhcpLeases/0/hostname").asText());
+            assertEquals(200, post(client, server, "/api/ops/stop", "{}").statusCode());
+        }
+    }
+
     private Function<PassiveRfServer.EvilTwinSettings, EvilTwin> factory(List<StreamingCaptureProcess> processes) {
         return settings -> new EvilTwin(settings.apInterface(), settings.ssid(), settings.channel(),
                 settings.portalPort(), directory.resolve("work").toString(), directory.resolve("creds.txt").toString(),

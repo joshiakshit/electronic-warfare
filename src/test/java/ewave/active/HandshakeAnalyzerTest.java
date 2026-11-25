@@ -285,4 +285,80 @@ class HandshakeAnalyzerTest {
         assertFalse(tracker.observation().complete());
         assertEquals(CLIENT, tracker.observation().clientMac());
     }
+
+    @Test void tracksVerifiablePartialPairsAcrossRetriesAndMismatches() {
+        var m1m2 = new HandshakePackets(AP, CLIENT, 2437, 6);
+        m1m2.accept(message(AP, CLIENT, 2437, 1, 1, "m1"));
+        assertFalse(m1m2.observation().verifiable());
+        m1m2.accept(message(AP, CLIENT, 2437, 2, 1, "m2"));
+        assertTrue(m1m2.observation().verifiable());
+        assertEquals("M1_M2", m1m2.observation().verifiablePair());
+        assertFalse(m1m2.observation().complete());
+        assertEquals(2, m1m2.observation().eapolFrames());
+
+        // AP retry M1 preserves the latched verifiable M1+M2 pair instead of wiping it.
+        m1m2.accept(message(AP, CLIENT, 2437, 1, 2, "m1-retry"));
+        assertTrue(m1m2.observation().verifiable());
+        assertEquals("M1_M2", m1m2.observation().verifiablePair());
+
+        // ReassocReq clears verifiable state and resets the active exchange.
+        m1m2.accept(row("0x0002", "2437", AP, CLIENT, AP, "", "", "", "", "", "", ""));
+        assertFalse(m1m2.observation().verifiable());
+        assertNull(m1m2.observation().verifiablePair());
+
+        // M2+M3 with incrementing replay counter (M3 = M2 + 1) is also independently verifiable.
+        var m2m3 = new HandshakePackets(AP, CLIENT, 2437, 6);
+        m2m3.accept(message(AP, CLIENT, 2437, 2, 7, "m2"));
+        m2m3.accept(message(AP, CLIENT, 2437, 3, 8, "m3"));
+        assertTrue(m2m3.observation().verifiable());
+        assertEquals("M2_M3", m2m3.observation().verifiablePair());
+        assertFalse(m2m3.observation().complete());
+
+        // Mismatched replay counters do not form a verifiable pair.
+        var mismatch = new HandshakePackets(AP, CLIENT, 2437, 6);
+        mismatch.accept(message(AP, CLIENT, 2437, 1, 1, "m1"));
+        mismatch.accept(message(AP, CLIENT, 2437, 2, 2, "m2"));
+        assertFalse(mismatch.observation().verifiable());
+        assertNull(mismatch.observation().verifiablePair());
+    }
+
+    @Test void validatesTimeoutAndSupportsFinishEarlyWithVerifiablePartialPair() throws Exception {
+        for (int badTimeout : new int[]{9, 181}) {
+            assertThrows(IllegalArgumentException.class,
+                    () -> new HandshakeAnalyzer("wlo1", AP, CLIENT, 6, 2437, false, badTimeout));
+        }
+
+        var fixture = new PassiveFixture();
+        var timing = new HandshakeAnalyzer.Timing(java.time.Duration.ofSeconds(5),
+                java.time.Duration.ofSeconds(30), java.time.Duration.ofMillis(20), java.time.Duration.ofSeconds(5));
+        var analyzer = new HandshakeAnalyzer("wlo1", AP, CLIENT, 6, 2437, directory.toString(),
+                fixture::start, timing, false);
+        var pending = captureAsync(analyzer);
+        try {
+            assertTrue(fixture.started.await(1, TimeUnit.SECONDS));
+            fixture.row(beacon(AP, 2437, 6));
+            fixture.row(message(AP, CLIENT, 2437, 1, 1, "m1"));
+            fixture.row(message(AP, CLIENT, 2437, 2, 1, "m2"));
+
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while (System.nanoTime() < deadline && !analyzer.status().verifiable()) {
+                Thread.sleep(20);
+            }
+            var live = analyzer.status();
+            assertTrue(live.beaconSeen());
+            assertTrue(live.verifiable());
+            assertEquals("M1_M2", live.verifiablePair());
+            assertEquals(List.of(1, 2), live.observedMessages());
+            assertNotNull(live.remainingSeconds());
+            assertTrue(analyzer.finishEarly());
+
+            var result = pending.get(3, TimeUnit.SECONDS);
+            assertEquals(Outcome.PARTIAL, result.outcome());
+            assertTrue(result.verifiable());
+            assertEquals("M1_M2", result.verifiablePair());
+            assertTrue(Files.exists(Path.of(result.capFilePath())));
+        } finally {
+            analyzer.terminate();
+        }
+    }
 }

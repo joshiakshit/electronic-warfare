@@ -265,4 +265,37 @@ class BeaconFloodTest {
         assertFalse(failed.status().running());
         assertEquals("mdk4 exited with code 2", failed.status().error());
     }
+
+    @Test void supportsMultiSsidListInPrivateWorkspaceAndCleansUpOnTerminate() throws Exception {
+        var commands = new CopyOnWriteArrayList<List<String>>();
+        var capturedSsidList = new java.util.concurrent.atomic.AtomicReference<String>();
+        var process = new StreamingCaptureProcess();
+        var flood = new BeaconFlood("wlo1", builder -> {
+            var cmd = List.copyOf(builder.command());
+            commands.add(cmd);
+            int idx = cmd.indexOf("-f");
+            if (idx >= 0 && idx + 1 < cmd.size()) {
+                capturedSsidList.set(java.nio.file.Files.readString(java.nio.file.Path.of(cmd.get(idx + 1))));
+            }
+            return process;
+        });
+
+        assertThrows(IllegalArgumentException.class, () -> flood.start(List.of(), 6, 100));
+        var tooMany = java.util.Collections.nCopies(51, "lab");
+        assertThrows(IllegalArgumentException.class, () -> flood.start(tooMany, 6, 100));
+
+        var status = flood.start(List.of("lab-1", "lab-2"), 6, 100);
+        assertTrue(status.running());
+        assertEquals(2, status.ssidCount());
+        assertTrue(status.command().contains("-f "));
+        assertEquals("lab-1\nlab-2", capturedSsidList.get().trim());
+
+        var cmd = commands.getFirst();
+        java.nio.file.Path ssidPath = java.nio.file.Path.of(cmd.get(cmd.indexOf("-f") + 1));
+        assertTrue(java.nio.file.Files.exists(ssidPath));
+
+        flood.terminate();
+        assertFalse(java.nio.file.Files.exists(ssidPath));
+        assertFalse(java.nio.file.Files.exists(ssidPath.getParent()));
+    }
 }

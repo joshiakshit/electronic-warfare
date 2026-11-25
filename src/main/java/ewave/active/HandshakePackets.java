@@ -14,7 +14,8 @@ final class HandshakePackets {
             "wlan_rsna_eapol.keydes.msgnr", "eapol.keydes.replay_counter",
             "wlan_rsna_eapol.keydes.nonce", "wlan_rsna_eapol.keydes.key_info.key_type");
 
-    record Observation(String clientMac, List<Integer> messages, boolean complete) {}
+    record Observation(String clientMac, List<Integer> messages, boolean complete,
+                       boolean verifiable, String verifiablePair, int eapolFrames) {}
 
     private final String ap;
     private final String client;
@@ -23,6 +24,7 @@ final class HandshakePackets {
     private final boolean allowMacRotation;
     private final LinkedHashMap<String, Exchange> exchanges = new LinkedHashMap<>();
     private boolean beaconSeen;
+    private int totalEapolFrames;
     private Observation best;
 
     HandshakePackets(String ap, String client, int frequency, int channel) {
@@ -35,7 +37,7 @@ final class HandshakePackets {
         this.frequency = frequency;
         this.channel = channel;
         this.allowMacRotation = allowMacRotation;
-        best = new Observation(client, List.of(), false);
+        best = new Observation(client, List.of(), false, false, null, 0);
     }
 
     static boolean isLocallyAdministered(String mac) {
@@ -71,30 +73,36 @@ final class HandshakePackets {
         } catch (NumberFormatException invalid) {
             return;
         }
+        totalEapolFrames++;
         var exchange = exchanges.computeIfAbsent(peer, ignored -> new Exchange());
-        if (exchange.accept(message, replay, fields[10])) {
-            recomputeBest();
-        }
+        exchange.accept(message, replay, fields[10]);
+        recomputeBest();
     }
 
     private void recomputeBest() {
         if (client != null) {
             var pinned = exchanges.get(client.toLowerCase(Locale.ROOT));
-            if (pinned != null && !pinned.messages.isEmpty()) {
-                best = new Observation(client.toLowerCase(Locale.ROOT), new ArrayList<>(pinned.messages), pinned.complete);
+            if (pinned != null && !pinned.effectiveMessages().isEmpty()) {
+                String pair = pinned.currentPair();
+                best = new Observation(client.toLowerCase(Locale.ROOT), pinned.effectiveMessages(),
+                        pinned.complete, pair != null, pair, totalEapolFrames);
                 return;
             }
         }
         Observation candidate = null;
         for (var entry : exchanges.entrySet()) {
             var exchange = entry.getValue();
-            if (exchange.messages.isEmpty()) continue;
-            if (candidate == null
-                    || (!candidate.complete() && (exchange.complete || exchange.messages.size() > candidate.messages().size()))) {
-                candidate = new Observation(entry.getKey(), new ArrayList<>(exchange.messages), exchange.complete);
+            var msgs = exchange.effectiveMessages();
+            if (msgs.isEmpty()) continue;
+            String pair = exchange.currentPair();
+            boolean verifiable = pair != null;
+            if (candidate == null || (!candidate.complete() && (exchange.complete
+                    || (!candidate.verifiable() && verifiable)
+                    || (candidate.verifiable() == verifiable && msgs.size() > candidate.messages().size())))) {
+                candidate = new Observation(entry.getKey(), msgs, exchange.complete, verifiable, pair, totalEapolFrames);
             }
         }
-        best = candidate != null ? candidate : new Observation(client, List.of(), false);
+        best = candidate != null ? candidate : new Observation(client, List.of(), false, false, null, totalEapolFrames);
     }
 
     private boolean beaconMatchesChannel(String[] fields) {
@@ -115,24 +123,69 @@ final class HandshakePackets {
         final TreeSet<Integer> messages = new TreeSet<>();
         String apNonce;
         long firstReplay;
+        Long secondReplay;
+        String secondNonce;
         Long thirdReplay;
         boolean matchingResponse;
+        boolean matchedTwoThree;
         boolean complete;
+        String latchedPair;
+        List<Integer> latchedMessages = List.of();
 
-        boolean accept(int message, long replay, String nonce) {
+        void accept(int message, long replay, String nonce) {
             if (message == 1 && (!nonce.equals(apNonce) || replay != firstReplay)) {
+                if (matchingResponse) {
+                    latchedPair = "M1_M2";
+                    latchedMessages = List.copyOf(messages);
+                } else if (matchedTwoThree && latchedPair == null) {
+                    latchedPair = "M2_M3";
+                    latchedMessages = List.copyOf(messages);
+                }
                 messages.clear();
                 apNonce = nonce;
                 firstReplay = replay;
                 matchingResponse = false;
+                secondReplay = null;
+                secondNonce = null;
+                matchedTwoThree = false;
                 thirdReplay = null;
                 complete = false;
             }
-            if (message == 2 && apNonce != null && replay == firstReplay) matchingResponse = true;
-            if (message == 3 && matchingResponse && !nonce.isEmpty() && nonce.equals(apNonce)
-                    && Long.compareUnsigned(replay, firstReplay) > 0) thirdReplay = replay;
+            if (message == 2) {
+                if (apNonce != null && !apNonce.isEmpty() && !nonce.isEmpty() && replay == firstReplay) {
+                    matchingResponse = true;
+                }
+                if (!nonce.isEmpty()) {
+                    secondReplay = replay;
+                    secondNonce = nonce;
+                }
+            }
+            if (message == 3) {
+                if (matchingResponse && !nonce.isEmpty() && nonce.equals(apNonce)
+                        && Long.compareUnsigned(replay, firstReplay) > 0) {
+                    thirdReplay = replay;
+                }
+                if (secondReplay != null && secondNonce != null && !secondNonce.isEmpty() && !nonce.isEmpty()
+                        && Long.compareUnsigned(replay, secondReplay) > 0 && replay - secondReplay <= 2) {
+                    matchedTwoThree = true;
+                }
+            }
             if (message == 4 && thirdReplay != null && replay == thirdReplay) complete = true;
-            return messages.add(message) || complete;
+            messages.add(message);
+        }
+
+        String currentPair() {
+            if (complete) return "M1_M2_M3_M4";
+            if (matchingResponse) return "M1_M2";
+            if (matchedTwoThree) return "M2_M3";
+            return latchedPair;
+        }
+
+        List<Integer> effectiveMessages() {
+            if (!complete && !matchingResponse && !matchedTwoThree && latchedPair != null) {
+                return latchedMessages;
+            }
+            return new ArrayList<>(messages);
         }
     }
 }

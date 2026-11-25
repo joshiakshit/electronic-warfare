@@ -265,6 +265,78 @@ class PmkidCaptureTest {
         assertTrue(exitError.getMessage().contains("permission denied"));
     }
 
+    @Test void supportsCaptureOnlyModeEarlyFinishAndStandaloneVerification() throws Exception {
+        var commands = new CopyOnWriteArrayList<List<String>>();
+        PmkidCapture.ProcessStarter captureOnlyStarter = builder -> {
+            var command = List.copyOf(builder.command());
+            commands.add(command);
+            if (command.get(1).equals("hcxdumptool")) {
+                Files.write(Path.of(command.get(command.indexOf("-w") + 1)), new byte[]{0x0a, 0x0d, 0x0d, 0x0a});
+                return new CompletedProcess("capture\n", 0);
+            }
+            if (command.getFirst().equals("hcxpcapngtool")) {
+                Files.writeString(Path.of(command.get(command.indexOf("-o") + 1)),
+                        "WPA*01*4d4fe7aac3a2cecab195321ceb99a7d0*fc690c158264*f4747f87f9f4*"
+                                + "686173686361742d6573736964***\n"
+                                + "WPA*02*abcdef0123456789abcdef0123456789*fc690c158264*021122334455*"
+                                + "686173686361742d6573736964*deadbeef**\n");
+                return new CompletedProcess("converted\n", 0);
+            }
+            if (command.getFirst().equals("aircrack-ng")) {
+                return new CompletedProcess("KEY FOUND! [ lab password ]\n", 0);
+            }
+            throw new IOException("Unexpected command: " + command);
+        };
+
+        var captureOnly = new PmkidCapture("wlo1", directory.toString(), captureOnlyStarter);
+        var captured = captureOnly.run(null, 2, true);
+        assertTrue(captured.captured());
+        assertFalse(captured.vulnerable());
+        assertTrue(captured.verificationSkipped());
+        assertEquals(1, captured.pmkids().size());
+        assertEquals("fc:69:0c:15:82:64", captured.pmkids().getFirst().apBssid());
+        assertEquals("hashcat-essid", captured.pmkids().getFirst().essid());
+        assertEquals(1, captured.eapolPairCount());
+        assertEquals(List.of("hcxdumptool", "hcxpcapngtool"),
+                List.of(commands.get(0).get(1), commands.get(1).getFirst()));
+
+        Path words = Files.writeString(directory.resolve("words.txt"), "lab password\n");
+        var verified = captureOnly.verifyCapturedHashes(captureOnly.capturedHashFile(), words.toString());
+        assertTrue(verified.captured());
+        assertTrue(verified.vulnerable());
+        assertFalse(verified.verificationSkipped());
+        assertEquals("lab password", verified.psk());
+        assertEquals(1, captureOnly.status().verifiedCount());
+
+        // Early finish terminates hcxdumptool early yet proceeds into hash conversion cleanly.
+        var dumpProcess = new StreamingCaptureProcess();
+        var dumpStarted = new CountDownLatch(1);
+        var early = new PmkidCapture("wlo1", directory.toString(), builder -> {
+            var cmd = List.copyOf(builder.command());
+            if (cmd.get(1).equals("hcxdumptool")) {
+                Files.write(Path.of(cmd.get(cmd.indexOf("-w") + 1)), new byte[]{0x0a, 0x0d, 0x0d, 0x0a});
+                dumpStarted.countDown();
+                return dumpProcess;
+            }
+            if (cmd.getFirst().equals("hcxpcapngtool")) {
+                Files.writeString(Path.of(cmd.get(cmd.indexOf("-o") + 1)),
+                        "WPA*01*4d4fe7aac3a2cecab195321ceb99a7d0*fc690c158264*f4747f87f9f4*"
+                                + "686173686361742d6573736964***\n");
+                return new CompletedProcess("converted\n", 0);
+            }
+            throw new IOException("Unexpected command: " + cmd);
+        });
+        try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            var future = executor.submit(() -> early.run(null, 20, true));
+            assertTrue(dumpStarted.await(3, TimeUnit.SECONDS));
+            assertEquals("CAPTURING", early.status().phase());
+            assertTrue(early.finishCaptureEarly());
+            var earlyResult = future.get(5, TimeUnit.SECONDS);
+            assertTrue(earlyResult.captured());
+            assertTrue(earlyResult.verificationSkipped());
+        }
+    }
+
     private static final class NeverFinishes extends Process {
         @Override public java.io.InputStream getInputStream() { return java.io.InputStream.nullInputStream(); }
         @Override public java.io.OutputStream getOutputStream() { return java.io.OutputStream.nullOutputStream(); }

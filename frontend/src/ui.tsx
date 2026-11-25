@@ -15,6 +15,7 @@ import { MyNetworkSettings } from './MyNetworkSettings';
 import { startSnapshotPolling } from './snapshotPolling';
 import { Sniper } from './Sniper';
 import { Ops } from './Ops';
+import type { OpsLaunchIntent } from './ops';
 
 type Tab = { id: string; label: string; hint: string; endpoint: string; kind: string };
 type Section = { id: string; label: string; icon: typeof Wifi; hint: string; tabs?: Tab[] };
@@ -107,6 +108,7 @@ export default function App({ initialTheme }: { initialTheme: Theme }) {
  };
  const [route,setRoute]=useState(location.pathname);const [data,setData]=useState<Record<string,any>>({});const [errors,setErrors]=useState<Record<string,string>>({});const [busy,setBusy]=useState(true);const [ws,setWs]=useState(false);
  const [snapshot, setSnapshot] = useState<SavedSnapshot>();
+ const [opsIntent, setOpsIntent] = useState<OpsLaunchIntent | null>(null);
  const streamReady = useRef(false);
  const reportModule = useRef<ReportModule>();
  const [captureFeedback, setCaptureFeedback] = useState({ pending: false, error: '', message: '' });
@@ -177,6 +179,10 @@ export default function App({ initialTheme }: { initialTheme: Theme }) {
  };
  const pathId=activeRoute(route);const section=modules.find(s=>s.id===pathId)||modules.find(s=>s.tabs?.some(t=>t.id===pathId))||modules[0];const activeId=section.id===pathId&&section.tabs?rememberedTab(section.id,pathId,section.tabs.map(t=>t.id),readTab(section.id)):pathId;const tab=byTab.get(activeId);
  const navigate=useCallback((id:string)=>{const cat=modules.find(s=>s.id===id)||modules.find(s=>s.tabs?.some(t=>t.id===id));if(!cat)return;const tabs=cat.tabs?.map(t=>t.id)||[];const chosen=cat.tabs?rememberedTab(cat.id,id,tabs,readTab(cat.id)):cat.id;history.pushState({},'',modulePath(cat.id,cat.tabs?chosen:undefined));setRoute(location.pathname);if(cat.tabs)rememberTab(cat.id,chosen)},[]);
+ const openInOps = useCallback((intent: Omit<OpsLaunchIntent, 'id'>) => {
+   setOpsIntent({ ...intent, id: Date.now() });
+   navigate('ops');
+ }, [navigate]);
  useEffect(()=>{const pop=()=>setRoute(location.pathname);window.addEventListener('popstate',pop);return()=>window.removeEventListener('popstate',pop)},[]);
  const snapshotModule = activeId === 'de-cloaker' ? 'decloaker' : activeId;
  const viewingSnapshot = !!snapshot && (section.id === 'overview' || snapshotModules.includes(snapshotModule as SnapshotModule));
@@ -335,7 +341,7 @@ export default function App({ initialTheme }: { initialTheme: Theme }) {
         probes={viewingSnapshot ? (snapshot?.reports.decloaker as Json).totalProbes : undefined}
         topology={viewingSnapshot ? archivedTopology : errors.overview ? null : data.overview} onNavigate={navigate} />
      )}
-     {section.id === 'ops' && <Ops status={status} />}
+     {section.id === 'ops' && <Ops status={status} launchIntent={opsIntent} />}
      {tab?.kind === 'health' && (
       <CaptureControls wifi={status?.wifi} connected={connected} actions={actions} onRecordings={() => navigate('saved-results')} />
      )}
@@ -361,10 +367,12 @@ export default function App({ initialTheme }: { initialTheme: Theme }) {
        {tab.kind === 'settings' && <MyNetworkSettings profile={current} onChanged={updateMyNetwork} />}
        {tab.kind === 'edges' && <SpotterReport key={viewingSnapshot ? snapshot?.id : sessionKey}
          {...spotterObservations(current)}
-         running={!viewingSnapshot && capture.running} stale={!!error} />}
+         running={!viewingSnapshot && capture.running} stale={!!error}
+         onOpenInOps={!viewingSnapshot && status?.operationsEnabled !== false ? openInOps : undefined} />}
        {!['edges', 'health', 'saved', 'settings', 'sniper'].includes(tab.kind) && (
         <ObservationReport key={`${tab.id}/${viewingSnapshot ? snapshot?.id : sessionKey}`} kind={tab.kind} rows={rows} archived={viewingSnapshot} running={!viewingSnapshot && capture.running} stale={!!error}
-                           emptyMessage={emptyMessages[tab.kind]} activeFrequencyMhz={current.activeFrequencyMhz} />
+                           emptyMessage={emptyMessages[tab.kind]} activeFrequencyMhz={current.activeFrequencyMhz}
+                           onOpenInOps={!viewingSnapshot && status?.operationsEnabled !== false ? openInOps : undefined} />
        )}
        {!viewingSnapshot && health?.referenceTime && <p className="source-note">Replay reference {date(health.referenceTime)}</p>}
       </>
@@ -480,8 +488,8 @@ export function Summary({ kind, data, rows }: { kind: string; data: Json; rows: 
     </div>
   );
 }
-export function SpotterReport({ accessPoints, edges, devices, essGroups, meshLinks, running, stale }:
-  SpotterObservations & { running: boolean; stale: boolean }) {
+export function SpotterReport({ accessPoints, edges, devices, essGroups, meshLinks, running, stale, onOpenInOps }:
+  SpotterObservations & { running: boolean; stale: boolean; onOpenInOps?: (intent: Omit<OpsLaunchIntent, 'id'>) => void }) {
   const [view, setView] = useState<'table' | 'topology'>('table');
   const [selection, setSelection] = useState<TopologyEndpoint | null>(null);
   const [activeOnly, setActiveOnly] = useState(false);
@@ -570,7 +578,8 @@ export function SpotterReport({ accessPoints, edges, devices, essGroups, meshLin
         </div>
         <ObservationReport key={selected ? endpointKey(selected) : 'all'} kind="edges" rows={links} running={running} stale={stale}
                            emptyMessage={activeOnly ? 'No active client links observed'
-                             : selected?.kind === 'ap' ? 'No client links observed for this access point' : 'No client links observed'} />
+                             : selected?.kind === 'ap' ? 'No client links observed for this access point' : 'No client links observed'}
+                           onOpenInOps={onOpenInOps} />
       </section>
       {!!meshLinks?.length && (
         <section id="spotter-mesh" className="spotter-mesh" aria-labelledby="spotter-mesh-heading">

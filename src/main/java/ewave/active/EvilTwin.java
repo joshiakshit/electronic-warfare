@@ -7,9 +7,13 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.time.Instant;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
@@ -20,6 +24,11 @@ import java.util.regex.Pattern;
 /** hostapd, dnsmasq, and a stdlib Python captive portal that records submitted credentials. */
 public final class EvilTwin {
     private static final Pattern INTERFACE = Pattern.compile("[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,14}");
+    private static final Pattern MAC = Pattern.compile("(?i)(?:[0-9a-f]{2}:){5}[0-9a-f]{2}");
+    private static final Pattern STA_CONNECTED = Pattern.compile(
+            "(?i)\\bAP-STA-CONNECTED\\s+((?:[0-9a-f]{2}:){5}[0-9a-f]{2})\\b");
+    private static final Pattern STA_DISCONNECTED = Pattern.compile(
+            "(?i)\\bAP-STA-DISCONNECTED\\s+((?:[0-9a-f]{2}:){5}[0-9a-f]{2})\\b");
     private static final int OUTPUT_LIMIT = 1_048_576;
     private static final int CREDENTIAL_LIMIT = 200;
 
@@ -28,8 +37,24 @@ public final class EvilTwin {
     }
 
     public record Credential(String time, String client, String username, String password) {}
+    public record ConnectedStation(String mac, String connectedAt) {}
+    public record DhcpLease(String ip, String mac, String hostname, long expiresAtEpochSeconds) {}
     public record Status(boolean running, String stage, String ssid, String error, List<Credential> credentials,
-                         String portalUrl, String workDir, String credentialsFile, String output) {}
+                         String portalUrl, String workDir, String credentialsFile, String output,
+                         List<ConnectedStation> connectedStations, List<DhcpLease> dhcpLeases,
+                         long elapsedSeconds) {
+        public Status {
+            credentials = credentials == null ? List.of() : List.copyOf(credentials);
+            connectedStations = connectedStations == null ? List.of() : List.copyOf(connectedStations);
+            dhcpLeases = dhcpLeases == null ? List.of() : List.copyOf(dhcpLeases);
+        }
+
+        public Status(boolean running, String stage, String ssid, String error, List<Credential> credentials,
+                      String portalUrl, String workDir, String credentialsFile, String output) {
+            this(running, stage, ssid, error, credentials, portalUrl, workDir, credentialsFile, output,
+                    List.of(), List.of(), 0L);
+        }
+    }
 
     private final String apInterface;
     private final String ssid;
@@ -42,6 +67,7 @@ public final class EvilTwin {
     private final AtomicBoolean used = new AtomicBoolean();
     private final Set<Process> processes = new HashSet<>();
     private final ArrayDeque<Credential> credentials = new ArrayDeque<>();
+    private final LinkedHashMap<String, ConnectedStation> connectedStations = new LinkedHashMap<>();
     private final StringBuilder output = new StringBuilder();
     private volatile Process hostapd;
     private volatile Process dnsmasq;
@@ -49,6 +75,8 @@ public final class EvilTwin {
     private volatile boolean running;
     private volatile boolean terminated;
     private boolean addressAssigned;
+    private volatile long startedAtNanos;
+    private volatile long stoppedElapsedSeconds;
     private volatile String stage = "Ready";
     private volatile String error;
     private volatile IOException readFailure;
@@ -112,6 +140,8 @@ public final class EvilTwin {
             writeDnsmasqConfig();
             synchronized (this) {
                 running = true;
+                startedAtNanos = System.nanoTime();
+                stoppedElapsedSeconds = 0L;
                 error = null;
             }
             if (configureAddress) {
@@ -156,16 +186,27 @@ public final class EvilTwin {
 
     public Status status() {
         List<Credential> captured;
-        synchronized (this) { captured = List.copyOf(credentials); }
+        List<ConnectedStation> stations;
+        long elapsed;
+        synchronized (this) {
+            captured = List.copyOf(credentials);
+            stations = List.copyOf(connectedStations.values());
+            elapsed = startedAtNanos == 0L ? 0L
+                    : running ? TimeUnit.NANOSECONDS.toSeconds(Math.max(0L, System.nanoTime() - startedAtNanos))
+                    : stoppedElapsedSeconds;
+        }
         boolean active = running && isRunning(hostapd) && isRunning(dnsmasq) && isRunning(portal);
         if (running && !active && error == null) error = "A helper process exited";
         return new Status(active, stage, ssid, error, captured, portalUrl(), workDir.toString(),
-                credentialsFile.toString(), output());
+                credentialsFile.toString(), output(), stations, readDhcpLeases(), elapsed);
     }
 
     public void terminate() {
         boolean releaseAddress;
         synchronized (this) {
+            if (startedAtNanos != 0L && running) {
+                stoppedElapsedSeconds = TimeUnit.NANOSECONDS.toSeconds(Math.max(0L, System.nanoTime() - startedAtNanos));
+            }
             terminated = true;
             running = false;
             stage = "Stopped";
@@ -216,6 +257,9 @@ public final class EvilTwin {
         Files.writeString(path, String.join("\n",
                 "interface=" + apInterface,
                 "bind-interfaces",
+                "except-interface=lo",
+                "dhcp-leasefile=" + workDir.resolve("dnsmasq.leases"),
+                "pid-file=" + workDir.resolve("dnsmasq.pid"),
                 "dhcp-range=10.0.0.10,10.0.0.100,12h",
                 "dhcp-option=3,10.0.0.1",
                 "dhcp-option=6,10.0.0.1",
@@ -263,6 +307,10 @@ public final class EvilTwin {
                 processes.remove(source);
                 unexpected = running && !terminated;
                 if (unexpected) {
+                    if (startedAtNanos != 0L) {
+                        stoppedElapsedSeconds = TimeUnit.NANOSECONDS.toSeconds(
+                                Math.max(0L, System.nanoTime() - startedAtNanos));
+                    }
                     error = name + " exited unexpectedly";
                     running = false;
                     stage = "Stopped";
@@ -332,12 +380,70 @@ public final class EvilTwin {
     }
 
     private void drain(Process source) {
+        var lineCarry = new StringBuilder();
         try (var input = new InputStreamReader(source.getInputStream(), StandardCharsets.UTF_8)) {
             char[] buffer = new char[4096];
             int size;
-            while ((size = input.read(buffer)) != -1) append(new String(buffer, 0, size));
+            while ((size = input.read(buffer)) != -1) {
+                append(new String(buffer, 0, size));
+                for (int i = 0; i < size; i++) {
+                    char ch = buffer[i];
+                    if (ch == '\n' || ch == '\r') {
+                        if (!lineCarry.isEmpty()) {
+                            observeStationLine(lineCarry.toString());
+                            lineCarry.setLength(0);
+                        }
+                    } else if (lineCarry.length() < 4096) {
+                        lineCarry.append(ch);
+                    }
+                }
+            }
+            if (!lineCarry.isEmpty()) observeStationLine(lineCarry.toString());
         } catch (IOException failure) {
             readFailure = failure;
+        }
+    }
+
+    private void observeStationLine(String line) {
+        var connected = STA_CONNECTED.matcher(line);
+        if (connected.find()) {
+            String mac = connected.group(1).toLowerCase(Locale.ROOT);
+            synchronized (this) {
+                connectedStations.put(mac, new ConnectedStation(mac, Instant.now().toString()));
+            }
+            return;
+        }
+        var disconnected = STA_DISCONNECTED.matcher(line);
+        if (disconnected.find()) {
+            String mac = disconnected.group(1).toLowerCase(Locale.ROOT);
+            synchronized (this) {
+                connectedStations.remove(mac);
+            }
+        }
+    }
+
+    private List<DhcpLease> readDhcpLeases() {
+        Path leases = workDir.resolve("dnsmasq.leases");
+        if (!Files.isRegularFile(leases, java.nio.file.LinkOption.NOFOLLOW_LINKS)) return List.of();
+        try {
+            var lines = Files.readAllLines(leases, StandardCharsets.UTF_8);
+            var parsed = new ArrayList<DhcpLease>();
+            for (String raw : lines) {
+                String trimmed = raw.strip();
+                if (trimmed.isEmpty()) continue;
+                String[] parts = trimmed.split("\\s+");
+                if (parts.length < 4) continue;
+                try {
+                    long expires = Long.parseLong(parts[0]);
+                    String mac = parts[1].toLowerCase(Locale.ROOT);
+                    String ip = parts[2];
+                    String host = "*".equals(parts[3]) || parts[3].isBlank() ? null : parts[3];
+                    if (MAC.matcher(mac).matches()) parsed.add(new DhcpLease(ip, mac, host, expires));
+                } catch (NumberFormatException ignored) { }
+            }
+            return List.copyOf(parsed);
+        } catch (IOException ignored) {
+            return List.of();
         }
     }
 

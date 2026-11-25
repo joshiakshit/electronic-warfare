@@ -260,6 +260,85 @@ class LabOpsRoutesTest {
         }
     }
 
+    @Test void supportsPmkidCaptureOnlyFinishStandaloneVerifyAndMultiSsidBeacon() throws Exception {
+        var pmkidCommands = new java.util.concurrent.CopyOnWriteArrayList<List<String>>();
+        Path words = Files.writeString(directory.resolve("words.txt"), "lab password\n");
+        var dumpStarted = new java.util.concurrent.CountDownLatch(1);
+        var dumpProc = new StreamingCaptureProcess();
+        try (var bridge = new PacketBridge();
+             var server = server(bridge, settings -> new PmkidCapture(settings.monitorInterface(),
+                     settings.apBssid(), settings.frequencyMhz(), directory.resolve("pmkid-work").toString(),
+                     builder -> {
+                         var cmd = List.copyOf(builder.command());
+                         pmkidCommands.add(cmd);
+                         if (cmd.getFirst().equals("hcxdumptool") && cmd.stream().anyMatch(a -> a.startsWith("--bpfc="))) {
+                             return new CompletedProcess("2\n32 0 0 16\n6 0 0 65535\n", 0);
+                         }
+                         if (cmd.size() > 1 && cmd.get(1).equals("hcxdumptool")) {
+                             Files.write(Path.of(cmd.get(cmd.indexOf("-w") + 1)), new byte[]{0x0a, 0x0d, 0x0d, 0x0a});
+                             if (settings.captureOnly() && dumpStarted.getCount() > 0) {
+                                 dumpStarted.countDown();
+                                 return dumpProc;
+                             }
+                             return new CompletedProcess("capture\n", 0);
+                         }
+                         if (cmd.getFirst().equals("hcxpcapngtool")) {
+                             Files.writeString(Path.of(cmd.get(cmd.indexOf("-o") + 1)),
+                                     "WPA*01*4d4fe7aac3a2cecab195321ceb99a7d0*fc690c158264*f4747f87f9f4*"
+                                             + "686173686361742d6573736964***\n");
+                             return new CompletedProcess("converted\n", 0);
+                         }
+                         if (cmd.getFirst().equals("aircrack-ng")) {
+                             return new CompletedProcess("KEY FOUND! [ lab password ]\n", 0);
+                         }
+                         throw new IOException("Unexpected command: " + cmd);
+                     }),
+                     settings -> new BeaconFlood(settings.monitorInterface(),
+                             builder -> new StreamingCaptureProcess()));
+             var client = HttpClient.newHttpClient()) {
+            // Capture-only requires no wordlistPath and finishes cleanly via /api/ops/pmkid/finish.
+            var pending = client.sendAsync(request(server, "/api/ops/pmkid",
+                    "{\"interface\":\"wlo1\",\"durationSeconds\":20,\"captureOnly\":true}"),
+                    HttpResponse.BodyHandlers.ofString());
+            assertTrue(dumpStarted.await(3, java.util.concurrent.TimeUnit.SECONDS));
+            var finish = post(client, server, "/api/ops/pmkid/finish", "{}");
+            assertEquals(200, finish.statusCode());
+            assertTrue(mapper.readTree(finish.body()).path("finishing").asBoolean());
+
+            var capturedRes = pending.get(3, java.util.concurrent.TimeUnit.SECONDS);
+            assertEquals(200, capturedRes.statusCode(), capturedRes.body());
+            var captured = mapper.readTree(capturedRes.body());
+            assertTrue(captured.path("captured").asBoolean());
+            assertTrue(captured.path("verificationSkipped").asBoolean());
+            assertEquals(1, captured.path("pmkids").size());
+
+            var history = mapper.readTree(get(client, server, "/api/ops/history").body());
+            assertEquals("PMKID_CAPTURED", history.at("/0/outcome").asText());
+
+            // Mismatched hashPath rejected; standalone verification succeeds on retained hash.
+            assertEquals(400, post(client, server, "/api/ops/pmkid/verify",
+                    "{\"wordlistPath\":\"" + words + "\",\"hashPath\":\"/tmp/arbitrary.22000\"}").statusCode());
+            var verifyRes = post(client, server, "/api/ops/pmkid/verify",
+                    "{\"wordlistPath\":\"" + words + "\",\"hashPath\":\""
+                            + captured.path("hashPath").asText() + "\"}");
+            assertEquals(200, verifyRes.statusCode(), verifyRes.body());
+            var verified = mapper.readTree(verifyRes.body());
+            assertTrue(verified.path("vulnerable").asBoolean());
+            assertEquals("lab password", verified.path("psk").asText());
+
+            // Multi-SSID Beacon Flood validation & execution.
+            assertEquals(400, post(client, server, "/api/ops/beacon",
+                    "{\"interface\":\"wlo1\",\"ssids\":[]}").statusCode());
+            assertEquals(400, post(client, server, "/api/ops/beacon",
+                    "{\"interface\":\"wlo1\",\"ssids\":[\"ok\",\" \"]}").statusCode());
+            var beaconRes = post(client, server, "/api/ops/beacon",
+                    "{\"interface\":\"wlo1\",\"ssids\":[\"lab-1\",\"lab-2\"],\"channel\":6,\"rate\":100}");
+            assertEquals(200, beaconRes.statusCode(), beaconRes.body());
+            assertEquals(2, mapper.readTree(beaconRes.body()).path("ssidCount").asInt());
+            assertEquals(200, post(client, server, "/api/ops/stop", "{}").statusCode());
+        }
+    }
+
     private PassiveRfServer server(PacketBridge bridge,
                                    java.util.function.Function<PassiveRfServer.PmkidSettings, PmkidCapture> pmkid,
                                    java.util.function.Function<PassiveRfServer.BeaconSettings, BeaconFlood> beacon)

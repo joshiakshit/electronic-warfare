@@ -179,6 +179,34 @@ class UncloakRoutesTest {
         assertTrue(commands.isEmpty());
     }
 
+    @Test void opsUncloakReturnsChannelHoldAndPmfMetadataWhileLegacyRouteStaysCompact() throws Exception {
+        var commands = new java.util.ArrayList<List<String>>();
+        var receiver = new StreamingCaptureProcess();
+        Path initial = capture(hiddenBeacon(AP), data(AP, CLIENT, 1), data(AP, CLIENT, 2), data(AP, CLIENT, 3));
+        try (var bridge = new PacketBridge(builder -> {
+            if ("tcpdump".equals(builder.command().getFirst())) return receiver;
+            return new CompletedProcess("", 0);
+        }, java.util.Map.of(), new ewave.passive.DeviceProfiler());
+             var server = server(bridge, new WifiAccessPoints(directory.resolve("missing-aps")), commands);
+             var client = HttpClient.newHttpClient()) {
+            startLive(bridge, receiver, initial);
+            var response = client.send(HttpRequest.newBuilder(uri(server, "/api/ops/uncloak"))
+                    .header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString("{\"bssid\":\"" + AP + "\",\"interface\":\"wlo1\"}"))
+                    .build(), HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, response.statusCode(), response.body());
+            var json = mapper.readTree(response.body());
+            assertEquals("deauth_sent", json.path("status").asText());
+            assertEquals(CLIENT, json.path("targetClient").asText());
+            assertEquals(bridge.getPassiveWifi().addressId(AP), json.path("apId").asText());
+            assertEquals(6, json.path("channel").asInt());
+            assertEquals(2437, json.path("frequencyMhz").asInt());
+            assertEquals(10, json.path("holdSeconds").asInt());
+            assertFalse(json.path("dfsChannel").asBoolean());
+            assertFalse(commands.isEmpty());
+        }
+    }
+
     private PassiveRfServer server(PacketBridge bridge, WifiAccessPoints accessPoints, List<List<String>> commands)
             throws Exception {
         return new PassiveRfServer(bridge, true, monitor -> new FrameInjector(monitor, builder -> {

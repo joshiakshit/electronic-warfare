@@ -222,6 +222,113 @@ class HandshakeRoutesTest {
         }
     }
 
+    @Test void forwardsTimeoutSupportsEarlyFinishAndSavesVerifiedRecording() throws Exception {
+        var capturedSettings = new AtomicReference<PassiveRfServer.HandshakeSettings>();
+        byte[] validCapHeader = java.util.HexFormat.of().parseHex("d4c3b2a1020004000000000000000000000004007f000000");
+        byte[] radiotapBeacon = new byte[13 + 38];
+        java.nio.ByteBuffer.wrap(radiotapBeacon).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                .put((byte) 0).put((byte) 0).putShort((short) 13).putInt(0x28)
+                .putShort((short) 2437).putShort((short) 0xa0).put((byte) -42)
+                .putShort((short) 0x0080);
+        byte[] fullCap = new byte[validCapHeader.length + 16 + radiotapBeacon.length];
+        System.arraycopy(validCapHeader, 0, fullCap, 0, validCapHeader.length);
+        java.nio.ByteBuffer.wrap(fullCap, validCapHeader.length, 16).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                .putInt((int) (System.currentTimeMillis() / 1000)).putInt(0)
+                .putInt(radiotapBeacon.length).putInt(radiotapBeacon.length);
+        System.arraycopy(radiotapBeacon, 0, fullCap, validCapHeader.length + 16, radiotapBeacon.length);
+
+        try (var bridge = new PacketBridge();
+             var server = server(bridge, settings -> {
+                 capturedSettings.set(settings);
+                 return new HandshakeAnalyzer(settings.monitorInterface(), settings.apBssid(), settings.clientMac(),
+                         settings.channel(), settings.frequencyMhz(), directory.resolve("hs-captures").toString(),
+                         builder -> {
+                             if (builder.command().contains("iw")) return new CompletedProcess("", 0);
+                             if (builder.command().getFirst().equals("tshark")) {
+                                 Files.write(Path.of(builder.command().get(builder.command().indexOf("-w") + 1)),
+                                         fullCap);
+                                 return new CompletedProcess(completeExchange(), 0);
+                             }
+                             if (builder.command().contains("tcpdump")) {
+                                 return new CompletedProcess(validCapHeader, 0);
+                             }
+                             return new CompletedProcess("", 0);
+                         }, settings.allowMacRotation());
+             });
+             var client = HttpClient.newHttpClient()) {
+            assertEquals(400, post(client, server, "/api/ops/handshake",
+                    "{\"apBssid\":\"" + AP + "\",\"channel\":6,\"timeoutSeconds\":5}").statusCode());
+            var response = post(client, server, "/api/ops/handshake",
+                    "{\"apBssid\":\"" + AP + "\",\"channel\":6,\"interface\":\"wlo1\",\"timeoutSeconds\":45}");
+            assertEquals(200, response.statusCode(), response.body());
+            assertEquals(45, capturedSettings.get().timeoutSeconds());
+            var json = mapper.readTree(response.body());
+            assertTrue(json.path("verifiable").asBoolean());
+
+            assertFalse(mapper.readTree(post(client, server, "/api/ops/handshake/finish", "{}").body())
+                    .path("finishing").asBoolean());
+
+            assertEquals(400, post(client, server, "/api/ops/handshake/save-recording",
+                    "{\"capFilePath\":\"/tmp/wrong-path.cap\"}").statusCode());
+            var saved = post(client, server, "/api/ops/handshake/save-recording",
+                    "{\"name\":\"lab-handshake.pcap\"}");
+            assertEquals(201, saved.statusCode(), saved.body());
+            var savedJson = mapper.readTree(saved.body());
+            assertEquals("lab-handshake.pcap", savedJson.path("name").asText());
+
+            var recordings = mapper.readTree(get(client, server, "/api/recordings").body());
+            assertTrue(recordings.findValuesAsText("id").contains(savedJson.path("id").asText()));
+            assertTrue(recordings.findValuesAsText("name").contains("lab-handshake.pcap"));
+        }
+
+        // Verify POST /api/ops/handshake/finish while a handshake capture is live.
+        var launched = new java.util.concurrent.CountDownLatch(1);
+        var dump = new StreamingCaptureProcess();
+        var decoder = new StreamingCaptureProcess();
+        try (var bridge = new PacketBridge();
+             var server = server(bridge, settings -> new HandshakeAnalyzer(settings.monitorInterface(),
+                     settings.apBssid(), settings.clientMac(), settings.channel(), settings.frequencyMhz(),
+                     directory.resolve("hs-finish").toString(), builder -> {
+                         if (builder.command().contains("iw")) return new CompletedProcess("", 0);
+                         if (builder.command().getFirst().equals("tshark")) {
+                             Files.write(Path.of(builder.command().get(builder.command().indexOf("-w") + 1)), fullCap);
+                             return decoder;
+                         }
+                         if (builder.command().contains("tcpdump")) {
+                             launched.countDown();
+                             return dump;
+                         }
+                         return new CompletedProcess("", 0);
+                     }));
+             var client = HttpClient.newHttpClient()) {
+            var pending = client.sendAsync(request(server, "/api/ops/handshake", CAPTURE),
+                    HttpResponse.BodyHandlers.ofString());
+            assertTrue(launched.await(3, TimeUnit.SECONDS));
+            String clientMac = "02:11:22:33:44:66";
+            String partialRows = "0x0028\t2437\t" + AP + "\t" + AP + "\t" + clientMac + "\t\t\t\t1\t1\tnonce\tTrue\n"
+                    + "0x0028\t2437\t" + AP + "\t" + clientMac + "\t" + AP + "\t\t\t\t2\t1\tnonce\tTrue\n";
+            decoder.write(partialRows.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+            while (System.nanoTime() < deadline) {
+                if (mapper.readTree(get(client, server, "/api/ops/handshake/status").body())
+                        .path("verifiable").asBoolean()) {
+                    break;
+                }
+                Thread.sleep(20);
+            }
+            var finishRes = post(client, server, "/api/ops/handshake/finish", "{}");
+            assertEquals(200, finishRes.statusCode());
+            assertTrue(mapper.readTree(finishRes.body()).path("finishing").asBoolean());
+            decoder.finish();
+            var finished = pending.get(3, TimeUnit.SECONDS);
+            assertEquals(200, finished.statusCode(), finished.body());
+            var finishedJson = mapper.readTree(finished.body());
+            assertEquals("PARTIAL", finishedJson.path("outcome").asText());
+            assertTrue(finishedJson.path("verifiable").asBoolean());
+            assertEquals("M1_M2", finishedJson.path("verifiablePair").asText());
+        }
+    }
+
     private static String completeExchange() {
         var rows = new StringBuilder();
         String client = "02:11:22:33:44:66";

@@ -8,11 +8,13 @@ import {
 import { ProfilerContext, ProfilerEvidence } from './ProfilerEvidence';
 import { FrameFields, ManagementEvidence, RadioFrameEvidence } from './FrameEvidence';
 import { startSnapshotPolling } from './snapshotPolling';
+import type { OpsLaunchIntent } from './ops';
 
 export function ObservationReport({ kind, rows, running, stale, archived = false,
-  emptyMessage = 'No observations recorded', initialSelectedKey = null, activeFrequencyMhz }: {
+  emptyMessage = 'No observations recorded', initialSelectedKey = null, activeFrequencyMhz, onOpenInOps }: {
   kind: string; rows: Json[]; running: boolean; stale: boolean; archived?: boolean; emptyMessage?: string;
   initialSelectedKey?: string | null; activeFrequencyMhz?: number | null;
+  onOpenInOps?: (intent: Omit<OpsLaunchIntent, 'id'>) => void;
 }) {
   const [query, setQuery] = useState('');
   const [selectedKey, setSelectedKey] = useState(initialSelectedKey);
@@ -183,7 +185,8 @@ export function ObservationReport({ kind, rows, running, stale, archived = false
           </div>
           {selected && (
             <Evidence key={selectedKey} kind={kind} archived={archived} row={selected} subjectKey={columns[0]}
-                      headingRef={evidenceHeading} onClose={closeEvidence} />
+                      headingRef={evidenceHeading} onClose={closeEvidence}
+                      onOpenInOps={archived ? undefined : onOpenInOps} />
           )}
         </div>
       ) : (
@@ -257,8 +260,9 @@ export function ChannelChart({ channels, selectedKey, onSelect, activeFrequencyM
   );
 }
 
-function Evidence({ kind, row, subjectKey, headingRef, onClose, archived }: {
-  kind: string; row: Json; subjectKey: string; archived: boolean; headingRef: RefObject<HTMLHeadingElement>; onClose: () => void;
+function Evidence({ kind, row, subjectKey, headingRef, onClose, archived, onOpenInOps }: {
+  kind: string; row: Json; subjectKey: string; archived: boolean; headingRef: RefObject<HTMLHeadingElement>;
+  onClose: () => void; onOpenInOps?: (intent: Omit<OpsLaunchIntent, 'id'>) => void;
 }) {
   const [detail, setDetail] = useState<DeviceProfileDetail | null>(null);
   const [error, setError] = useState('');
@@ -292,6 +296,24 @@ function Evidence({ kind, row, subjectKey, headingRef, onClose, archived }: {
       || (evidence[key] && typeof evidence[key] === 'object')
       || (['aps', 'hidden'].includes(kind) && ['security', 'channelUtilization'].includes(key)))
   ));
+  const uncloakIntent: Omit<OpsLaunchIntent, 'id'> | null = onOpenInOps && !archived
+    ? kind === 'hidden' && row.bssid && row.nameStatus !== 'Name observed' && !row.ssid
+      ? { tab: 'uncloak', apId: String(row.bssid) }
+      : kind === 'aps' && row.bssid
+        ? {
+            tab: 'handshake',
+            apId: String(row.bssid),
+            ssid: typeof row.ssid === 'string' ? row.ssid : undefined,
+            channel: typeof row.channel === 'number' ? row.channel : undefined,
+          }
+        : kind === 'edges' && row.bssid
+          ? {
+              tab: 'handshake',
+              targetId: typeof row.clientId === 'string' ? row.clientId : undefined,
+              apId: String(row.bssid),
+            }
+          : null
+    : null;
   return (
     <aside className="evidence" id="observation-evidence" aria-label="Observation evidence">
       <header>
@@ -301,9 +323,17 @@ function Evidence({ kind, row, subjectKey, headingRef, onClose, archived }: {
             ? evidence.enrolledLabel : observationValue(subjectKey, row)}</h2>
           {kind === 'inventory' && evidence.enrolledLabel && <code className="profiler-device-id">{row.id}</code>}
         </div>
-        <button type="button" className="icon-btn" onClick={onClose} aria-label="Close evidence">
-          <X size={18} />
-        </button>
+        <div className="evidence-head-actions">
+          {uncloakIntent && onOpenInOps && (
+            <button type="button" className="text-button evidence-ops-btn"
+                    onClick={() => onOpenInOps(uncloakIntent)}>
+              {uncloakIntent.tab === 'uncloak' ? 'Uncloak in Ops' : 'Open in Ops'}
+            </button>
+          )}
+          <button type="button" className="icon-btn" onClick={onClose} aria-label="Close evidence">
+            <X size={18} />
+          </button>
+        </div>
       </header>
       {kind === 'aps' && <AccessPointEvidence row={evidence} priority={priority} />}
       {kind === 'inventory' ? (

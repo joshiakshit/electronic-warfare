@@ -35,6 +35,54 @@ export type OperationHistoryEntry = {
   outcome: string;
   success: boolean;
 };
+export type OpsLaunchIntent = {
+  id: number;
+  tab: OperationTabId;
+  targetId?: string;
+  apId?: string;
+  apBssid?: string;
+  clientMac?: string;
+  ssid?: string;
+  channel?: number;
+  frequencyMhz?: number;
+};
+
+export type LanHostEntry = {
+  ip: string;
+  mac: string;
+  vendor?: string;
+  wirelessMatched?: boolean;
+  targetId?: string | null;
+  apSsid?: string | null;
+  channel?: number | null;
+  rssi?: number | null;
+};
+
+export type LanHostsReport = {
+  available: boolean;
+  hosts: LanHostEntry[];
+  error?: string | null;
+};
+
+export type ExtractedPmkid = {
+  pmkid: string;
+  apBssid: string;
+  stationMac: string;
+  essid?: string;
+};
+
+export type ConnectedStation = {
+  mac: string;
+  connectedAt?: string;
+};
+
+export type DhcpLease = {
+  ip: string;
+  mac: string;
+  hostname?: string;
+  expiresAtEpochSeconds?: number;
+};
+
 export type OpsTarget = {
   id: string;
   mac: string;
@@ -50,6 +98,12 @@ export type OpsTarget = {
   evidenceSource?: string;
   lastSeen?: number;
   sessionId?: string;
+  apSecurity?: string | null;
+  pmfStatus?: string | null;
+  akmSuites?: string[];
+  dfsChannel?: boolean;
+  lanIp?: string | null;
+  lanHostname?: string | null;
 };
 export type ObservedAp = {
   bssid: string;
@@ -61,15 +115,35 @@ export type ObservedAp = {
   clients?: string[];
   stationCount?: number | null;
   lastSeen?: number;
+  security?: string | null;
+  managementFrameProtection?: string | null;
+  akmSuites?: string[];
+  rssiDbm?: number | null;
+  dfsChannel?: boolean;
 };
 export type InspectorReport = { accessPoints?: ObservedAp[] };
 export type OpsStatus = {
   running?: boolean;
   stage?: string;
+  phase?: string;
+  remainingSeconds?: number | null;
+  elapsedSeconds?: number;
   command?: string;
   output?: string;
   error?: string | null;
   tool?: string;
+  beaconSeen?: boolean;
+  observedMessages?: number[];
+  verifiable?: boolean;
+  verifiablePair?: string | null;
+  peerMac?: string | null;
+  eapolFrames?: number;
+  pmkidCount?: number;
+  eapolPairCount?: number;
+  verifiedCount?: number;
+  ssidCount?: number;
+  connectedStations?: ConnectedStation[];
+  dhcpLeases?: DhcpLease[];
   credentials?: Array<{ time: string; client: string; username: string; password: string }>;
   [key: string]: unknown;
 };
@@ -78,10 +152,17 @@ export const opsApi = {
   capabilities: (signal?: AbortSignal) => get<OpsCapabilities>('/api/ops/capabilities', signal),
   targets: (signal?: AbortSignal) => get<OpsTarget[]>('/api/ops/targets', signal),
   accessPoints: (signal?: AbortSignal) => get<InspectorReport>('/api/capture/access-points', signal),
+  lanHosts: (signal?: AbortSignal) => get<LanHostsReport>('/api/ops/lan-hosts', signal),
   status: (operation: string, signal?: AbortSignal) => get<OpsStatus>(statusPath(operation), signal),
   start: (path: string, body: Json) => send<Json>(path, 'POST', body),
   stop: (operationId?: string | null) =>
     send<Json>('/api/ops/stop', 'POST', operationId ? { operationId } : {}),
+  finishHandshake: () => send<{ finishing?: boolean }>('/api/ops/handshake/finish', 'POST', {}),
+  saveHandshakeRecording: (body?: { capFilePath?: string; name?: string }) =>
+    send<Json>('/api/ops/handshake/save-recording', 'POST', body ?? {}),
+  finishPmkid: () => send<{ finishing?: boolean }>('/api/ops/pmkid/finish', 'POST', {}),
+  verifyPmkid: (body: { wordlistPath: string; hashPath?: string; apBssid?: string }) =>
+    send<Json>('/api/ops/pmkid/verify', 'POST', body),
   history: (signal?: AbortSignal) => get<OperationHistoryEntry[]>('/api/ops/history', signal),
   clearHistory: () => send<Json>('/api/ops/history', 'DELETE'),
 };
@@ -89,11 +170,14 @@ export const opsApi = {
 export function statusPath(operation: string): string {
   if (operation === 'deauth' || operation === 'uncloak') return '/api/ops/status';
   if (operation === 'handshake' || operation === 'handshake-verify') return '/api/ops/handshake/status';
+  if (operation === 'pmkid' || operation === 'pmkid-verify') return '/api/ops/pmkid/status';
   return `/api/ops/${operation}/status`;
 }
 
 export function startPath(operation: string): string {
-  return operation === 'handshake-verify' ? '/api/ops/handshake/verify' : `/api/ops/${operation}`;
+  if (operation === 'handshake-verify') return '/api/ops/handshake/verify';
+  if (operation === 'pmkid-verify') return '/api/ops/pmkid/verify';
+  return `/api/ops/${operation}`;
 }
 
 export function operationReadiness(capabilities: OpsCapabilities | null, id: string): OpsOperation | undefined {
@@ -161,11 +245,51 @@ export function adoptBackendOperation(
 
 export function operationTabForActive(active: string | null | undefined): OperationTabId | null {
   if (active === 'handshake-verify') return 'handshake';
+  if (active === 'pmkid-verify') return 'pmkid';
   if (active === 'deauth' || active === 'uncloak' || active === 'handshake'
       || active === 'pmkid' || active === 'beacon' || active === 'evil-twin') {
     return active;
   }
   return null;
+}
+
+export function isDfsChannel(channel?: number | null, frequencyMhz?: number | null): boolean {
+  if (typeof frequencyMhz === 'number') return frequencyMhz >= 5250 && frequencyMhz <= 5730;
+  if (typeof channel === 'number') return (channel >= 52 && channel <= 64) || (channel >= 100 && channel <= 144);
+  return false;
+}
+
+export function pskSuitabilityWarning(security?: string | null, akmSuites?: string[] | null): string | null {
+  const sec = (security ?? '').toUpperCase();
+  const akms = (akmSuites ?? []).map((s) => s.toUpperCase());
+  const hasPsk = akms.some((s) => s === 'PSK' || s.startsWith('PSK/') || s.startsWith('FT/PSK'))
+    || sec.includes('PSK');
+  const hasNonPskOnly = !hasPsk && (
+    akms.includes('SAE')
+    || akms.includes('OWE')
+    || akms.some((s) => s.includes('802.1X'))
+    || sec.includes('WPA3')
+    || sec.includes('OWE')
+    || sec.includes('ENTERPRISE')
+  );
+  if (hasNonPskOnly) {
+    return 'AP does not advertise WPA/WPA2-PSK; offline dictionary recovery is not applicable.';
+  }
+  if (sec === 'OPEN') {
+    return 'Open network has no PSK handshake or PMKID exchange.';
+  }
+  return null;
+}
+
+export function pmfDeauthWarning(pmfStatus?: string | null): string | null {
+  if (pmfStatus?.toLowerCase() === 'required') {
+    return '802.11w PMF is Required; compliant stations drop unprotected deauthentication frames.';
+  }
+  return null;
+}
+
+export function parseSsidList(raw: string): string[] {
+  return raw.split(/\r?\n/).map((line) => line.trim()).filter((line) => line.length > 0);
 }
 
 /** Hidden is historical evidence; an already revealed name is no longer an uncloak candidate. */
@@ -183,15 +307,17 @@ export function pmkidRequestBody(params: {
   interfaceName: string;
   wordlistPath: string;
   durationSeconds: number;
+  captureOnly?: boolean;
   selectedApId?: string;
   apBssid?: string;
   frequencyMhz?: number | null;
 }): Json {
   const body: Json = {
     interface: params.interfaceName,
-    wordlistPath: params.wordlistPath,
     durationSeconds: params.durationSeconds,
   };
+  if (params.wordlistPath.trim()) body.wordlistPath = params.wordlistPath;
+  if (params.captureOnly) body.captureOnly = true;
   if (params.selectedApId) {
     body.apId = params.selectedApId;
     return body;
