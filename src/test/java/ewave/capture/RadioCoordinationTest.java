@@ -597,6 +597,94 @@ class RadioCoordinationTest {
         return pcap;
     }
 
+    @Test void resolvesAuthoritativeFiveGhzHtChannelAcrossStaleRadiotapAndFiltersRoamedTargets(@TempDir Path dir)
+            throws Exception {
+        String prev = System.getProperty("rf.networkProfile");
+        System.setProperty("rf.networkProfile", dir.resolve("my-network.json").toString());
+        try {
+            var captureStreams = new CopyOnWriteArrayList<StreamingCaptureProcess>();
+            String ap2 = "00:11:22:33:44:66";
+            String cli = "02:aa:bb:cc:dd:ee";
+            try (var bridge = new PacketBridge(builder -> {
+                if ("tcpdump".equals(builder.command().getFirst())) {
+                    var proc = new StreamingCaptureProcess();
+                    captureStreams.add(proc);
+                    return proc;
+                }
+                return new CompletedProcess("", 0);
+            }, Map.of("02aabb", "PhoneCo"), new DeviceProfiler(), 20, 64, 64,
+                    iface -> null, iface -> "phy0");
+                 var server = new PassiveRfServer(bridge, true).start(0);
+                 var client = HttpClient.newHttpClient()) {
+                String base = "http://127.0.0.1:" + server.port();
+                var startRes = postJson(client, base + "/api/capture/start",
+                        "{\"mode\":\"watch\",\"interface\":\"lab0mon\",\"channel\":1,\"band\":\"2.4\"}");
+                assertEquals(200, startRes.statusCode(), startRes.body());
+
+                // 5 GHz HT Operation IE (ID 61, len 22, primary channel 36) arriving with stale 2412 MHz radiotap
+                byte[] ssid5 = "Lab5G".getBytes(StandardCharsets.UTF_8);
+                byte[] mac1 = HexFormat.ofDelimiter(":").parseHex(AP_MAC);
+                byte[] bcast = HexFormat.of().parseHex("ffffffffffff");
+                var htBeacon = ByteBuffer.allocate(24 + 12 + 2 + ssid5.length + 24).order(ByteOrder.LITTLE_ENDIAN);
+                htBeacon.putShort((short) 0x0080).putShort((short) 0).put(bcast).put(mac1).put(mac1).putShort((short) 0);
+                htBeacon.putLong(1L).putShort((short) 100).putShort((short) 1);
+                htBeacon.put((byte) 0).put((byte) ssid5.length).put(ssid5);
+                htBeacon.put((byte) 61).put((byte) 22).put((byte) 36).put(new byte[21]);
+
+                writeFrames(captureStreams.getFirst(), 2412, htBeacon.array(),
+                        rawToDsData(AP_MAC, cli, bcastHex(), 1),
+                        rawToDsData(AP_MAC, cli, bcastHex(), 2),
+                        rawToDsData(AP_MAC, cli, bcastHex(), 3));
+
+                awaitCondition(() -> JSON.readTree(get(client, base + "/api/ops/targets").body()).size() == 1);
+                var apsJson = JSON.readTree(get(client, base + "/api/capture/access-points").body()).path("accessPoints");
+                assertEquals(36, apsJson.at("/0/channel").asInt());
+                assertEquals(5180, apsJson.at("/0/frequencyMhz").asInt());
+
+                var targets1 = JSON.readTree(get(client, base + "/api/ops/targets").body());
+                var session = bridge.getPassiveWifi();
+                assertEquals(session.addressId(cli) + ":" + session.addressId(AP_MAC), targets1.at("/0/id").asText());
+                assertEquals(36, targets1.at("/0/channel").asInt());
+                assertEquals(5180, targets1.at("/0/frequencyMhz").asInt());
+
+                // Client roams to AP2 on CH 11 -> historical AP1 link becomes ROAMED_AWAY and drops out of Ops targets.
+                appendFrames(captureStreams.getFirst(), 2462,
+                        rawBeacon(ap2, "Lab24".getBytes(StandardCharsets.UTF_8), 11),
+                        rawToDsData(ap2, cli, bcastHex(), 4),
+                        rawToDsData(ap2, cli, bcastHex(), 5),
+                        rawToDsData(ap2, cli, bcastHex(), 6));
+
+                awaitCondition(() -> {
+                    var t = JSON.readTree(get(client, base + "/api/ops/targets").body());
+                    return t.size() == 1 && "Lab24".equals(t.at("/0/apSsid").asText());
+                });
+                var targets2 = JSON.readTree(get(client, base + "/api/ops/targets").body());
+                assertEquals(1, targets2.size());
+                assertEquals(session.addressId(cli) + ":" + session.addressId(ap2), targets2.at("/0/id").asText());
+                assertEquals(11, targets2.at("/0/channel").asInt());
+                assertEquals(2462, targets2.at("/0/frequencyMhz").asInt());
+            }
+        } finally {
+            restoreProfileProperty(prev);
+        }
+    }
+
+    private static String bcastHex() { return "ff:ff:ff:ff:ff:ff"; }
+
+    private static void appendFrames(StreamingCaptureProcess proc, int freqMhz, byte[]... frames) throws Exception {
+        byte[][] packets = new byte[frames.length][];
+        for (int i = 0; i < frames.length; i++) packets[i] = radiotapAtFreq(frames[i], freqMhz);
+        byte[] pcap = ProbeFrames.pcap(ByteOrder.LITTLE_ENDIAN, false, 127, packets);
+        var buffer = ByteBuffer.wrap(pcap).order(ByteOrder.LITTLE_ENDIAN);
+        int offset = 24;
+        int now = (int) (System.currentTimeMillis() / 1000);
+        for (byte[] packet : packets) {
+            buffer.putInt(offset, now);
+            offset += 16 + packet.length;
+        }
+        proc.write(java.util.Arrays.copyOfRange(pcap, 24, pcap.length));
+    }
+
     private static HttpResponse<String> get(HttpClient client, String url) throws Exception {
         return client.send(HttpRequest.newBuilder(URI.create(url)).GET().build(), HttpResponse.BodyHandlers.ofString());
     }

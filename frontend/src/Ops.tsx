@@ -6,9 +6,10 @@ import {
 import type { Json } from './api';
 import {
   accessPointLabel, adoptBackendOperation, errorMessage, evilTwinAddressSummary, evilTwinChannelSupported,
-  formatHistoryDuration, isDfsChannel, isLocallyAdministeredMac, operationIsRunning, operationReadiness,
-  operationTabForActive, opsApi, parseSsidList, pmkidRequestBody, pmfDeauthWarning, polledOperation,
-  pskSuitabilityWarning, startPath, targetLabel, toolSummary, uncloakCandidates,
+  formatHistoryDuration, isDfsChannel, isLocallyAdministeredMac, matchesTargetFilter, operationIsRunning,
+  operationReadiness, operationTabForActive, opsApi, parseSsidList, pmkidRequestBody, pmfDeauthWarning,
+  polledOperation, pskSuitabilityWarning, sortObservedAps, sortOpsTargets, startPath, targetLabel, toolSummary,
+  uncloakCandidates,
   type ConnectedStation, type DhcpLease, type ExtractedPmkid, type LanHostsReport, type ObservedAp,
   type OperationHistoryEntry, type OperationTabId, type OpsCapabilities, type OpsLaunchIntent, type OpsStatus,
   type OpsTarget,
@@ -42,6 +43,7 @@ export function Ops({ status, launchIntent }: {
   const [capabilitiesError, setCapabilitiesError] = useState('');
   const [targets, setTargets] = useState<OpsTarget[]>([]);
   const [observedAps, setObservedAps] = useState<ObservedAp[]>([]);
+  const [targetFilter, setTargetFilter] = useState('');
   const [lanHosts, setLanHosts] = useState<LanHostsReport | null>(null);
   const [showLanHosts, setShowLanHosts] = useState(false);
   const [operation, setOperation] = useState<OperationId>('handshake');
@@ -147,12 +149,34 @@ export function Ops({ status, launchIntent }: {
   }, [capabilities]);
 
   const evidencedTargets = useMemo(
-    () => targets.filter(target => !!target.apBssid),
+    () => sortOpsTargets(targets.filter(target => !!target.apBssid)),
     [targets],
   );
-  const hiddenAps = useMemo(
-    () => uncloakCandidates(observedAps),
+  const sortedObservedAps = useMemo(
+    () => sortObservedAps(observedAps),
     [observedAps],
+  );
+  const hiddenAps = useMemo(
+    () => sortObservedAps(uncloakCandidates(observedAps)),
+    [observedAps],
+  );
+  const visibleTargets = useMemo(
+    () => evidencedTargets.filter(target => target.id === selectedTarget || matchesTargetFilter(targetFilter, [
+      target.apSsid, target.apBssid, target.mac, target.label, target.channel, target.lanIp,
+    ])),
+    [evidencedTargets, selectedTarget, targetFilter],
+  );
+  const visibleObservedAps = useMemo(
+    () => sortedObservedAps.filter(ap => ap.bssid === selectedAp || ap.bssid === pmkidAp || matchesTargetFilter(targetFilter, [
+      ap.ssid, ap.bssid, ap.channel, ap.band, ap.security,
+    ])),
+    [sortedObservedAps, selectedAp, pmkidAp, targetFilter],
+  );
+  const visibleHiddenAps = useMemo(
+    () => hiddenAps.filter(ap => ap.bssid === hiddenBssid || matchesTargetFilter(targetFilter, [
+      ap.bssid, ap.channel, ap.band, ap.security,
+    ])),
+    [hiddenAps, hiddenBssid, targetFilter],
   );
   const parsedSsids = useMemo(() => parseSsidList(ssidListText), [ssidListText]);
 
@@ -170,7 +194,8 @@ export function Ops({ status, launchIntent }: {
       if (typeof intent.channel === 'number') setChannel(String(intent.channel));
       return;
     }
-    const matched = liveTargets.find(t => (intent.targetId && t.id === intent.targetId)
+    const matched = liveTargets.find(t =>
+      (intent.targetId && (t.id === intent.targetId || (intent.apId && t.id === `${intent.targetId}:${intent.apId}`)))
       || (intent.apId && t.apId === intent.apId));
     if (matched) {
       setSelectedTarget(matched.id);
@@ -218,7 +243,7 @@ export function Ops({ status, launchIntent }: {
   useEffect(() => {
     if (operation !== 'uncloak') return;
     if (hiddenAps.some(ap => ap.bssid === hiddenBssid)) return;
-    if (!hiddenBssid || !pendingLaunchIntent.current) setHiddenBssid(hiddenAps[0]?.bssid ?? '');
+    if (!hiddenBssid && hiddenAps.length > 0) setHiddenBssid(hiddenAps[0].bssid);
   }, [operation, hiddenBssid, hiddenAps]);
 
   const selectedTargetRow = evidencedTargets.find(target => target.id === selectedTarget);
@@ -631,6 +656,13 @@ export function Ops({ status, launchIntent }: {
             {readiness && !readiness.ready && <span className="ops-warn">Missing {readiness.missing.join(', ')}</span>}
           </div>
 
+          {['deauth', 'handshake', 'uncloak', 'pmkid'].includes(operation) && (
+            <Field label="Filter targets & APs" hint="Sorted by strongest signal; type an SSID, BSSID, client, or channel.">
+              <input value={targetFilter} onChange={event => setTargetFilter(event.target.value)}
+                     placeholder="Filter e.g. EWAVE, CH 36…" />
+            </Field>
+          )}
+
           {(operation === 'deauth' || operation === 'handshake') && (
             <>
               <div className="ops-form-grid">
@@ -647,7 +679,7 @@ export function Ops({ status, launchIntent }: {
                     }
                   }}>
                     <option value="">Select a client target</option>
-                    {evidencedTargets.map(target => <option key={target.id} value={target.id}>{targetLabel(target)}</option>)}
+                    {visibleTargets.map(target => <option key={target.id} value={target.id}>{targetLabel(target)}</option>)}
                   </select>
                 </Field>
                 <Field label="Access point" hint="Use an observed AP for broadcast deauth or an AP-only handshake.">
@@ -659,7 +691,7 @@ export function Ops({ status, launchIntent }: {
                     }
                   }}>
                     <option value="">Select an observed AP</option>
-                    {observedAps.map(ap => <option key={ap.bssid} value={ap.bssid}>{accessPointLabel(ap)}</option>)}
+                    {visibleObservedAps.map(ap => <option key={ap.bssid} value={ap.bssid}>{accessPointLabel(ap)}</option>)}
                   </select>
                 </Field>
               </div>
@@ -702,7 +734,7 @@ export function Ops({ status, launchIntent }: {
                 <Field label="Hidden access point" hint="Hidden APs with at least one observed client.">
                   <select value={selectedHiddenRow ? hiddenBssid : ''} onChange={event => setHiddenBssid(event.target.value)}>
                     <option value="">Select a hidden AP</option>
-                    {hiddenAps.map(ap => <option key={ap.bssid} value={ap.bssid}>{accessPointLabel(ap)}</option>)}
+                    {visibleHiddenAps.map(ap => <option key={ap.bssid} value={ap.bssid}>{accessPointLabel(ap)}</option>)}
                   </select>
                 </Field>
                 <Field label="Monitor interface">
@@ -752,7 +784,7 @@ export function Ops({ status, launchIntent }: {
                     }
                   }}>
                     <option value="">All nearby APs (unscoped)</option>
-                    {observedAps.map(ap => <option key={ap.bssid} value={ap.bssid}>{accessPointLabel(ap)}</option>)}
+                    {visibleObservedAps.map(ap => <option key={ap.bssid} value={ap.bssid}>{accessPointLabel(ap)}</option>)}
                   </select>
                 </Field>
               </div>

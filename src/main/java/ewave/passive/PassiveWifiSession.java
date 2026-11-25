@@ -123,6 +123,7 @@ public final class PassiveWifiSession {
         for (var dev : inventory.prepareSnapshot()) invMap.put(dev.id(), dev);
         var targets = new java.util.ArrayList<EvidencedTarget>();
         for (var edge : snap.edges()) {
+            if (edge.state() != null && !"ACTIVE".equals(edge.state())) continue;
             var evidence = topology.associationEvidence(edge.clientId(), edge.bssid());
             if (evidence == null || evidence.lastSeen() <= now - topology.associationRetention(retention)) continue;
             String clientMac = observedClient(edge.clientId());
@@ -134,18 +135,18 @@ public final class PassiveWifiSession {
             String type = inv != null && inv.classLabel() != null && !"UNCLASSIFIED".equals(inv.classLabel())
                     ? inv.classLabel() : prof != null ? prof.guessedType() : "Client";
             String vendor = inv != null ? inv.vendor() : prof != null ? prof.vendor() : "Unknown";
-            int rssi = prof != null && prof.lastRssi() != DeviceProfiler.UNKNOWN_RSSI ? prof.lastRssi()
-                    : inv != null && inv.rssiMedian() != null ? (int) Math.round(inv.rssiMedian())
-                    : DeviceProfiler.UNKNOWN_RSSI;
+            int profRssi = prof != null && prof.lastRssi() <= 0 && prof.lastRssi() >= -120
+                    ? prof.lastRssi() : DeviceProfiler.UNKNOWN_RSSI;
+            int rssi = inv != null && inv.rssiMedian() != null ? (int) Math.round(inv.rssiMedian()) : profRssi;
             var apInfo = apMap.get(edge.bssid());
-            String apSsid = apInfo != null ? apInfo.ssid() : null;
-            if (apSsid == null) {
-                var obs = directlyObservedAp(edge.bssid());
-                if (obs != null) apSsid = obs.ssid();
-            }
-            targets.add(new EvidencedTarget(edge.clientId(), clientMac, type, vendor, type + " · " + vendor,
-                    rssi, edge.bssid(), apBssid, apSsid, Dot11FrameDecoder.channel(evidence.frequencyMhz()),
-                    evidence.frequencyMhz(), evidence.source(), evidence.lastSeen(), sessionId));
+            var obs = directlyObservedAp(edge.bssid());
+            String apSsid = apInfo != null && apInfo.ssid() != null ? apInfo.ssid() : (obs != null ? obs.ssid() : null);
+            int targetFreq = obs != null && obs.frequencyMhz() > 0 ? obs.frequencyMhz() : evidence.frequencyMhz();
+            int targetChan = obs != null && obs.channel() > 0 ? obs.channel() : Dot11FrameDecoder.channel(targetFreq);
+            String targetId = edge.clientId() + ":" + edge.bssid();
+            targets.add(new EvidencedTarget(targetId, clientMac, type, vendor, type + " · " + vendor,
+                    rssi, edge.bssid(), apBssid, apSsid, targetChan, targetFreq,
+                    evidence.source(), evidence.lastSeen(), sessionId));
         }
         return List.copyOf(targets);
     }
@@ -208,6 +209,28 @@ public final class PassiveWifiSession {
     public synchronized ObservedApDetails directlyObservedAp(String token) {
         var ap = observedAp(token);
         return ap == null || ap.advertisement() == null ? null : ap;
+    }
+
+    public record ChannelFreq(int channel, int frequencyMhz) { }
+
+    public static ChannelFreq authoritativeChannelAndFrequency(int radiotapMhz, Dot11InformationElements ies) {
+        int mhz = radiotapMhz;
+        int ch = Dot11FrameDecoder.channel(mhz);
+        if (!"6 GHz".equals(WifiInventory.band(mhz)) && ies != null) {
+            byte[] ds = ies.first(3), ht = ies.first(61);
+            int dsCh = ds.length == 1 ? (ds[0] & 0xff) : 0;
+            int htCh = ht.length >= 22 ? (ht[0] & 0xff) : 0;
+            int fiveCh = (htCh >= 32 && htCh <= 177) ? htCh : (dsCh >= 32 && dsCh <= 177 ? dsCh : 0);
+            int twoCh = (dsCh >= 1 && dsCh <= 14) ? dsCh : (htCh >= 1 && htCh <= 14 ? htCh : 0);
+            if (fiveCh > 0 && Dot11FrameDecoder.channel(5000 + fiveCh * 5) == fiveCh) {
+                ch = fiveCh;
+                mhz = 5000 + fiveCh * 5;
+            } else if (twoCh > 0) {
+                ch = twoCh;
+                mhz = twoCh == 14 ? 2484 : 2407 + twoCh * 5;
+            }
+        }
+        return new ChannelFreq(ch, mhz);
     }
 
     public static boolean isDfsFrequency(int frequencyMhz) {
@@ -289,19 +312,9 @@ public final class PassiveWifiSession {
                 ? MultipleBssidDecoder.decode(frame).stream().filter(profile -> allowsBssid(profile.bssid())).toList()
                 : List.<MultipleBssidDecoder.Profile>of();
         if (frame.apAdvertisement() && frameBssid != null && (frame.capability() & 1) != 0) {
-            int mhz = frame.frequencyMhz();
-            int ch = Dot11FrameDecoder.channel(mhz);
-            byte[] ds = frame.ies().first(3), ht = frame.ies().first(61);
-            if ("2.4 GHz".equals(WifiInventory.band(mhz)) && ds.length == 1 && ds[0] > 0 && ds[0] <= 14) {
-                ch = ds[0];
-                mhz = ch == 14 ? 2484 : 2407 + ch * 5;
-            } else if ("5 GHz".equals(WifiInventory.band(mhz)) && ht.length >= 22) {
-                ch = ht[0] & 0xff;
-            }
-            if (ch == 0 && ds.length == 1) {
-                ch = ds[0] & 0xff;
-                if (ch >= 1 && ch <= 13) mhz = ch == 14 ? 2484 : 2407 + ch * 5;
-            }
+            var cf = authoritativeChannelAndFrequency(frame.frequencyMhz(), frame.ies());
+            int ch = cf.channel();
+            int mhz = cf.frequencyMhz();
             if (allowsBssid(frameBssid)) {
                 rememberAdvertisement(frameBssid, frame.ies().first(0), ch, mhz, frame, true);
             }

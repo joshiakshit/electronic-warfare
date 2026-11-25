@@ -292,6 +292,46 @@ export function parseSsidList(raw: string): string[] {
   return raw.split(/\r?\n/).map((line) => line.trim()).filter((line) => line.length > 0);
 }
 
+export function validRssi(rssi?: number | null): number | null {
+  return typeof rssi === 'number' && Number.isFinite(rssi) && rssi <= 0 && rssi >= -120 ? rssi : null;
+}
+
+export function sortObservedAps(aps: ObservedAp[]): ObservedAp[] {
+  return [...aps].sort((a, b) => {
+    const rssiA = validRssi(a.rssiDbm);
+    const rssiB = validRssi(b.rssiDbm);
+    if (rssiA !== null && rssiB !== null && rssiA !== rssiB) return rssiB - rssiA;
+    if (rssiA !== null && rssiB === null) return -1;
+    if (rssiA === null && rssiB !== null) return 1;
+    const namedA = Boolean(a.ssid?.trim());
+    const namedB = Boolean(b.ssid?.trim());
+    if (namedA !== namedB) return namedA ? -1 : 1;
+    const ssidCmp = (a.ssid ?? '').localeCompare(b.ssid ?? '', undefined, { sensitivity: 'base' });
+    return ssidCmp !== 0 ? ssidCmp : a.bssid.localeCompare(b.bssid);
+  });
+}
+
+export function sortOpsTargets(targets: OpsTarget[]): OpsTarget[] {
+  return [...targets].sort((a, b) => {
+    const rssiA = validRssi(a.rssi);
+    const rssiB = validRssi(b.rssi);
+    if (rssiA !== null && rssiB !== null && rssiA !== rssiB) return rssiB - rssiA;
+    if (rssiA !== null && rssiB === null) return -1;
+    if (rssiA === null && rssiB !== null) return 1;
+    const namedA = Boolean(a.apSsid?.trim());
+    const namedB = Boolean(b.apSsid?.trim());
+    if (namedA !== namedB) return namedA ? -1 : 1;
+    const ssidCmp = (a.apSsid ?? '').localeCompare(b.apSsid ?? '', undefined, { sensitivity: 'base' });
+    return ssidCmp !== 0 ? ssidCmp : a.id.localeCompare(b.id);
+  });
+}
+
+export function matchesTargetFilter(query: string, fields: Array<string | number | null | undefined>): boolean {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return true;
+  return fields.some(value => value != null && String(value).toLowerCase().includes(needle));
+}
+
 /** Hidden is historical evidence; an already revealed name is no longer an uncloak candidate. */
 export function uncloakCandidates(aps: ObservedAp[]): ObservedAp[] {
   return aps.filter(ap => ap.ssidHidden && !ap.ssid && (ap.clients?.length ?? 0) > 0);

@@ -693,13 +693,10 @@ public final class TopologyBuilder {
         ap.advertisedAt = frame.timestamp();
         if (ap.ouiPrefix5 == null) ap.ouiPrefix5 = globalOuiPrefix5(frame.addr3());
         ap.signal(frame.rssi());
-        byte[] ds = ies.first(3), ht = ies.first(61), load = ies.first(11), country = ies.first(7);
-        int mhz = frame.frequencyMhz();
-        int channel = Dot11FrameDecoder.channel(mhz);
-        if ("2.4 GHz".equals(WifiInventory.band(mhz)) && ds.length == 1 && ds[0] > 0 && ds[0] <= 14)
-            channel = ds[0];
-        else if ("5 GHz".equals(WifiInventory.band(mhz)) && ht.length >= 22) channel = ht[0] & 0xff;
-        if (channel == 0 && ds.length == 1) channel = ds[0] & 0xff;
+        byte[] load = ies.first(11), country = ies.first(7);
+        var cf = PassiveWifiSession.authoritativeChannelAndFrequency(frame.frequencyMhz(), ies);
+        int mhz = cf.frequencyMhz();
+        int channel = cf.channel();
         if (mhz != 0 && ap.frequency != mhz) ap.clocks.clear();
         if (mhz != 0) ap.frequency = mhz;
         if (channel != 0) ap.channel = channel;

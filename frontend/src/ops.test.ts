@@ -1,9 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   accessPointLabel, adoptBackendOperation, errorMessage, evilTwinAddressSummary, evilTwinChannelSupported,
-  formatHistoryDuration, isDfsChannel, isLocallyAdministeredMac, operationIsRunning, operationReadiness,
-  operationTabForActive, opsApi, parseSsidList, pmkidRequestBody, pmfDeauthWarning, polledOperation,
-  pskSuitabilityWarning, startPath, statusPath, targetLabel, toolSummary, uncloakCandidates,
+  formatHistoryDuration, isDfsChannel, isLocallyAdministeredMac, matchesTargetFilter, operationIsRunning,
+  operationReadiness, operationTabForActive, opsApi, parseSsidList, pmkidRequestBody, pmfDeauthWarning,
+  polledOperation, pskSuitabilityWarning, sortObservedAps, sortOpsTargets, startPath, statusPath, targetLabel,
+  toolSummary, uncloakCandidates,
 } from './ops';
 
 describe('Ops request routing and labels', () => {
@@ -185,6 +186,26 @@ describe('Ops lab workbench helpers (#9A–#9D)', () => {
     expect(pskSuitabilityWarning('WPA2/WPA3', ['PSK', 'SAE'])).toBeNull();
     expect(pskSuitabilityWarning('Open', [])).toContain('Open network');
     expect(parseSsidList(' Lab-1 \n\n  Lab-2\r\n ')).toEqual(['Lab-1', 'Lab-2']);
+  });
+
+  it('sorts targets and APs strongest signal first while ignoring bogus sentinel RSSI and filters case-insensitively', () => {
+    const aps = sortObservedAps([
+      { bssid: 'weak', ssid: 'Neighbor', rssiDbm: -88, channel: 1 },
+      { bssid: 'strong-hidden', ssid: null, ssidHidden: true, rssiDbm: -32, channel: 6 },
+      { bssid: 'strong-named', ssid: 'EWAVE-LAB', rssiDbm: -34, channel: 11 },
+      { bssid: 'unknown', ssid: 'NoRssi', rssiDbm: null, channel: 36 },
+    ]);
+    expect(aps.map(a => a.bssid)).toEqual(['strong-hidden', 'strong-named', 'weak', 'unknown']);
+
+    const targets = sortOpsTargets([
+      { id: 'sentinel', mac: '02:00:00:00:00:01', rssi: 127, apSsid: 'FarAp' },
+      { id: 'close', mac: '02:00:00:00:00:02', rssi: -38, apSsid: 'EWAVE-LAB-5G' },
+      { id: 'mid', mac: '02:00:00:00:00:03', rssi: -75, apSsid: 'MidAp' },
+    ]);
+    expect(targets.map(t => t.id)).toEqual(['close', 'mid', 'sentinel']);
+    expect(matchesTargetFilter('ewave', ['EWAVE-LAB', 'aa:bb:cc'])).toBe(true);
+    expect(matchesTargetFilter('ch 36', ['Other', 'CH 36'])).toBe(true);
+    expect(matchesTargetFilter('ewave', ['Neighbor', 6])).toBe(false);
   });
 
   it('calls new LAN hosts, handshake/PMKID early finish, save-recording, and PMKID verify endpoints', async () => {
